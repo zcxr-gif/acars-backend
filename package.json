@@ -1,0 +1,13 @@
+{
+  "name": "if-acars-tracker",
+  "version": "1.0.0",
+  "description": "An ACARS tracker for Infinite Flight using the Live API.",
+  "main": "tracker.js",
+  "type": "module",
+  "scripts": {
+    "start": "node tracker.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}
