@@ -1,13 +1,17 @@
 import fetch from 'node-fetch';
 import fs from 'fs/promises';
+import express from 'express';
 
 // --- Configuration ---
 const IF_API_KEY = process.env.IF_API_KEY; // Your API key from environment variables
 const TRACKING_FILE = 'flights_to_track.json';
 const LOG_FILE = 'flight_logs.json';
 const API_BASE_URL = 'https://api.infiniteflight.com/public/v2';
+const PORT = process.env.PORT || 3000;
 
-// --- Main Function ---
+const app = express();
+
+// --- Main Tracker Function ---
 async function runTracker() {
     if (!IF_API_KEY) {
         console.error('ERROR: Infinite Flight API key is not set in environment variables.');
@@ -20,7 +24,7 @@ async function runTracker() {
         const trackingData = await fs.readFile(TRACKING_FILE);
         activeFlights = JSON.parse(trackingData);
     } catch (error) {
-        console.log('No active flights to track or file not found. Exiting.');
+        console.log('No active flights to track or file not found. Continuing.');
         return;
     }
 
@@ -63,7 +67,7 @@ async function runTracker() {
     console.log('Tracker run complete.');
 }
 
-// --- Helper Functions ---
+// --- Helper Functions (No changes needed here) ---
 
 async function getAllLiveFlights() {
     try {
@@ -115,5 +119,16 @@ function logPosition(logs, trackedFlight, liveData) {
     logs[flightId].positions.push(positionReport);
 }
 
-// --- Start the process ---
-runTracker();
+// --- Express Server and Scheduled Execution ---
+app.get('/', (req, res) => {
+  res.send('ACARS Tracker is running.');
+});
+
+// Set the tracker to run every 5 minutes (300,000 milliseconds)
+setInterval(runTracker, 300000);
+
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+    // Run the tracker once on startup
+    runTracker();
+});
