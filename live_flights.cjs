@@ -183,9 +183,20 @@ app.get('/if-sessions-test', async (req, res) => {
 
 app.get('/flights/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
+  const callsignFilter = req.query.callsignEndsWith || null;
+
   try {
     const flights = await getFlightsForSession(sessionId);
-    const simplified = flights.map(simplifyFlight);
+    let simplified = flights.map(simplifyFlight);
+
+    // Optional filter by callsign suffix
+    if (callsignFilter) {
+      const suffix = callsignFilter.toUpperCase();
+      simplified = simplified.filter(flight =>
+        flight.callsign && flight.callsign.toUpperCase().endsWith(suffix)
+      );
+    }
+
     res.json({ ok: true, total: simplified.length, flights: simplified });
   } catch (e) {
     const status = e?.response?.status || 500;
