@@ -19,7 +19,7 @@ const IF_API_KEY = process.env.INFINITE_FLIGHT_API_KEY;
 const IF_API_BASE_URL = 'https://api.infiniteflight.com/v2';
 
 // We now only need the callsign prefix for filtering
-const VA_CALLSIGN_PREFIX = 'IGO';
+const VA_CALLSIGN_PREFIX = 'GO';
 const TARGET_SERVER_NAME = 'Expert Server';
 
 // 3. MIDDLEWARE
