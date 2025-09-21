@@ -1,106 +1,172 @@
-// live_flights.js
-// Description: A dedicated microservice to fetch live flights for a specific
-// Virtual Airline from the Infinite Flight Live API.
+// live_flights.cjs (CommonJS)
+// A small Express microservice to fetch live flights from Infinite Flight Live API v2
+// Robust against wrong base URLs (404s), with friendly errors and optional VA callsign filtering.
 
-// 1. IMPORT DEPENDENCIES
+// 1) IMPORTS
 const express = require('express');
-const axios = require('axios'); // To make requests to the IF API
+const axios = require('axios');
 const cors = require('cors');
 require('dotenv').config();
 
-// 2. INITIALIZE EXPRESS APP & CONSTANTS
+// 2) APP SETUP
 const app = express();
-// Use a different port than your main backend to avoid conflicts if you run them locally
-const PORT = process.env.PORT || 5001; 
+app.use(cors());
 
-// --- Configuration ---
-// IMPORTANT: You MUST get an API key from https://api.infiniteflight.com/
-const IF_API_KEY = process.env.INFINITE_FLIGHT_API_KEY;
-const IF_API_BASE_URL = 'https://api.infiniteflight.com/v2';
+const PORT = process.env.PORT || 5001;
 
-// We now only need the callsign prefix for filtering
-const VA_CALLSIGN_PREFIX = 'GO';
-const TARGET_SERVER_NAME = 'Expert Server';
+// 3) CONFIG
+// ✅ Correct public v2 base. If you override, keep the trailing "/public/v2"
+const IF_API_BASE_URL = process.env.IF_API_BASE_URL || 'https://api.infiniteflight.com/public/v2';
+const IF_API_KEY = process.env.INFINITE_FLIGHT_API_KEY; // required
 
-// 3. MIDDLEWARE
-// Allow requests from your front-end application
-const corsOptions = {
-    origin: 'https://indgo-va.netlify.app', // Your frontend URL
-    optionsSuccessStatus: 200
-};
-app.use(cors(corsOptions));
-app.use(express.json());
+// Default server to query (you can change via ?server=Training%20Server)
+const DEFAULT_SERVER_NAME = process.env.TARGET_SERVER_NAME || 'Expert Server';
 
+// Optional VA callsign prefix filter (e.g., IGO, AAL). Empty means "no filter".
+const DEFAULT_VA_PREFIX = (process.env.VA_PREFIX || '').toUpperCase();
 
-// 4. API ROUTE
-app.get('/api/live-flights', async (req, res) => {
-    // First, validate that the API key is configured on the server
-    if (!IF_API_KEY) {
-        console.error('CRITICAL: INFINITE_FLIGHT_API_KEY is not configured in environment variables.');
-        return res.status(500).json({ message: 'Server configuration error. Cannot connect to the flight service.' });
-    }
+// 4) HELPERS
+const withAuth = { headers: { Authorization: `Bearer ${IF_API_KEY || ''}` }, timeout: 20000 };
 
-    try {
-        // --- Step 1: Get all available servers (called "sessions") to find the Expert Server's ID ---
-        console.log('Fetching server list from Infinite Flight API...');
-        const sessionsResponse = await axios.get(`${IF_API_BASE_URL}/sessions`, {
-            headers: { 'Authorization': `Bearer ${IF_API_KEY}` }
-        });
+function err(status, message, extra = {}) {
+  return { status, message, ...extra };
+}
 
-        const expertServer = sessionsResponse.data.result.find(s => s.name === TARGET_SERVER_NAME);
+function sanitizePrefix(prefix) {
+  return (prefix || '').toString().trim().toUpperCase();
+}
 
-        if (!expertServer) {
-            console.log(`'${TARGET_SERVER_NAME}' is not currently active.`);
-            // Return an empty array if the server isn't up, which is a normal state.
-            return res.json([]);
-        }
-        
-        const expertServerId = expertServer.id;
-        console.log(`Found '${TARGET_SERVER_NAME}' with ID: ${expertServerId}`);
-
-        // --- Step 2: Get all flights currently on the Expert Server ---
-        console.log(`Fetching all flights for server ID: ${expertServerId}`);
-        const flightsResponse = await axios.get(`${IF_API_BASE_URL}/flights/${expertServerId}`, {
-            headers: { 'Authorization': `Bearer ${IF_API_KEY}` }
-        });
-
-        const allFlights = flightsResponse.data.result;
-        console.log(`Found a total of ${allFlights.length} flights on the server.`);
-
-        // --- Step 3: Filter the flights to find only those with the VA callsign ---
-        const vaFlights = allFlights.filter(flight => {
-            // **MODIFIED LOGIC**: We now only check if the callsign starts with the VA prefix.
-            return flight.callsign && flight.callsign.trim().toUpperCase().startsWith(VA_CALLSIGN_PREFIX);
-        });
-
-        console.log(`Filtered down to ${vaFlights.length} flights with callsign prefix '${VA_CALLSIGN_PREFIX}'.`);
-        
-        // --- Step 4: Send the filtered list back to the client ---
-        res.status(200).json(vaFlights);
-
-    } catch (error) {
-        if (error.response) {
-            // The request was made and the server responded with a status code
-            // that falls out of the range of 2xx
-            console.error(`Error from Infinite Flight API: Status ${error.response.status}`, error.response.data);
-            if (error.response.status === 401) {
-                 return res.status(500).json({ message: 'Authentication error with the flight API. Check the server API key.' });
-            }
-            return res.status(500).json({ message: `Error fetching flight data: ${error.response.statusText}` });
-        } else if (error.request) {
-            // The request was made but no response was received
-            console.error('Error: No response received from Infinite Flight API.', error.request);
-            return res.status(503).json({ message: 'The flight data service is currently unavailable.' });
-        } else {
-            // Something happened in setting up the request that triggered an Error
-            console.error('An unexpected error occurred:', error.message);
-            return res.status(500).json({ message: 'An internal server error occurred.' });
-        }
-    }
+// 5) ROUTES
+// GET /health — simple health check
+app.get('/health', (req, res) => {
+  res.json({ ok: true, service: 'live_flights', baseUrl: IF_API_BASE_URL });
 });
 
+// GET /live-flights
+// Query params:
+//   server: name of server (e.g., "Expert Server")
+//   prefix: callsign prefix filter (e.g., "IGO")
+//   limit:  integer to limit results (post-filter)
+//   includeRaw: '1' to include raw flight objects
+app.get('/live-flights', async (req, res) => {
+  try {
+    if (!IF_API_KEY) {
+      return res.status(500).json(err(500, 'Server misconfigured: INFINITE_FLIGHT_API_KEY is not set.'));
+    }
 
-// 5. START THE SERVER
+    const serverName = (req.query.server || DEFAULT_SERVER_NAME).toString();
+    const vaPrefix = sanitizePrefix(req.query.prefix || DEFAULT_VA_PREFIX);
+    const limit = Math.max(0, parseInt(req.query.limit || '0', 10) || 0);
+    const includeRaw = req.query.includeRaw === '1';
+
+    // Step 1: Get sessions
+    const sessionsUrl = `${IF_API_BASE_URL}/sessions`;
+    console.log('[IF] GET', sessionsUrl);
+
+    let sessionsResp;
+    try {
+      sessionsResp = await axios.get(sessionsUrl, withAuth);
+    } catch (e) {
+      if (e.response) {
+        // Often the sign of a wrong base URL is a 404 HTML page from nginx
+        const body = typeof e.response.data === 'string' ? e.response.data.slice(0, 400) : e.response.data;
+        return res.status(e.response.status).json(
+          err(e.response.status, 'Error fetching sessions from Infinite Flight API', { url: sessionsUrl, body })
+        );
+      }
+      if (e.request) {
+        return res.status(503).json(err(503, 'No response from Infinite Flight API when fetching sessions.'));
+      }
+      return res.status(500).json(err(500, 'Unexpected error before sessions request.', { detail: e.message }));
+    }
+
+    const sessions = Array.isArray(sessionsResp?.data?.result) ? sessionsResp.data.result : [];
+    if (!sessions.length) {
+      return res.status(502).json(err(502, 'Received empty session list from Infinite Flight API.'));
+    }
+
+    // Find server by name (exact match). If not found, suggest available names.
+    const target = sessions.find(s => (s?.name || '').toString() === serverName);
+    if (!target) {
+      return res.status(404).json(
+        err(404, `Server "${serverName}" not found.`, { availableServers: sessions.map(s => s?.name).filter(Boolean) })
+      );
+    }
+
+    // Step 2: Get flights for that session
+    const flightsUrl = `${IF_API_BASE_URL}/sessions/${target.id}/flights`;
+    console.log('[IF] GET', flightsUrl);
+
+    let flightsResp;
+    try {
+      flightsResp = await axios.get(flightsUrl, withAuth);
+    } catch (e) {
+      if (e.response) {
+        const body = typeof e.response.data === 'string' ? e.response.data.slice(0, 400) : e.response.data;
+        return res.status(e.response.status).json(
+          err(e.response.status, 'Error fetching flights from Infinite Flight API', { url: flightsUrl, body })
+        );
+      }
+      if (e.request) {
+        return res.status(503).json(err(503, 'No response from Infinite Flight API when fetching flights.'));
+      }
+      return res.status(500).json(err(500, 'Unexpected error before flights request.', { detail: e.message }));
+    }
+
+    let flights = Array.isArray(flightsResp?.data?.result) ? flightsResp.data.result : [];
+
+    // Optional callsign prefix filtering (case-insensitive)
+    if (vaPrefix) {
+      flights = flights.filter(f => (f?.callsign || '').toUpperCase().startsWith(vaPrefix));
+    }
+
+    // Sort by callsign then by last seen (if available)
+    flights.sort((a, b) => {
+      const ca = (a?.callsign || '').toUpperCase();
+      const cb = (b?.callsign || '').toUpperCase();
+      if (ca < cb) return -1; if (ca > cb) return 1;
+      const ta = a?.lastSeen || a?.lastUpdated || 0;
+      const tb = b?.lastSeen || b?.lastUpdated || 0;
+      return tb - ta; // newest first
+    });
+
+    if (limit > 0 && flights.length > limit) flights = flights.slice(0, limit);
+
+    // Shape a compact response
+    const shaped = flights.map(f => ({
+      id: f?.id,
+      callsign: f?.callsign || null,
+      userId: f?.userId || null,
+      aircraftId: f?.aircraftId || null,
+      server: target.name,
+      sessionId: target.id,
+      latitude: f?.latitude ?? null,
+      longitude: f?.longitude ?? null,
+      altitude: f?.altitude ?? null,
+      speed: f?.speed ?? null,
+      heading: f?.heading ?? null,
+      vs: f?.verticalSpeed ?? null,
+      lastUpdated: f?.lastUpdated || f?.lastSeen || null,
+    }));
+
+    const payload = {
+      server: target.name,
+      sessionId: target.id,
+      count: flights.length,
+      flights: includeRaw ? flights : shaped,
+      filteredByPrefix: vaPrefix || null,
+      baseUrl: IF_API_BASE_URL,
+    };
+
+    return res.json(payload);
+  } catch (errAny) {
+    console.error('UNHANDLED ERROR in /live-flights:', errAny);
+    return res.status(500).json(err(500, 'Unexpected server error.', { detail: errAny?.message }));
+  }
+});
+
+// 6) START SERVER
 app.listen(PORT, () => {
-    console.log(`IndGo Air Virtual Live Flight Tracker is running on http://localhost:${PORT}`);
+  console.log(`Live Flight Tracker listening on http://localhost:${PORT}`);
+  console.log('Base URL:', IF_API_BASE_URL);
 });
