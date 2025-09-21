@@ -183,17 +183,16 @@ app.get('/if-sessions-test', async (req, res) => {
 
 app.get('/flights/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
-  const callsignFilter = req.query.callsignEndsWith || null;
+  const callsignFilter = req.query.callsignEndsWith;
 
   try {
     const flights = await getFlightsForSession(sessionId);
     let simplified = flights.map(simplifyFlight);
 
-    // Optional filter by callsign suffix
     if (callsignFilter) {
       const suffix = callsignFilter.toUpperCase();
-      simplified = simplified.filter(flight =>
-        flight.callsign && flight.callsign.toUpperCase().endsWith(suffix)
+      simplified = simplified.filter(f =>
+        f.callsign && f.callsign.toUpperCase().endsWith(suffix)
       );
     }
 
@@ -203,6 +202,7 @@ app.get('/flights/:sessionId', async (req, res) => {
     res.status(status).json(err(status, 'Failed to fetch flights', { detail: e?.message }));
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`✅ Live Flight Tracker ready: http://localhost:${PORT}`);
