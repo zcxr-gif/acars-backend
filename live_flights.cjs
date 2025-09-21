@@ -203,6 +203,9 @@ app.get('/flights/:sessionId', async (req, res) => {
   }
 });
 
+app.get('/health', (req, res) => {
+  res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
+});
 
 app.listen(PORT, () => {
   console.log(`✅ Live Flight Tracker ready: http://localhost:${PORT}`);
