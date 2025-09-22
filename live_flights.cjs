@@ -196,6 +196,31 @@ function simplifyFlightPlan(plan) {
 
 // --- Routes
 
+app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
+  const { sessionId, flightId } = req.params;
+
+  try {
+    const rawPlan = await getFlightPlan(sessionId, flightId);
+
+    if (!rawPlan) {
+      return res.status(404).json(err(404, 'Flight plan not found. The flight may not exist or has no filed plan.'));
+    }
+
+    const simplifiedPlan = simplifyFlightPlan(rawPlan);
+    res.json({ ok: true, flightId, plan: simplifiedPlan });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch flight plan', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
 app.get('/if-key-debug', (req, res) => {
   const masked = IF_API_KEY ? `${IF_API_KEY.slice(0, 4)}...${IF_API_KEY.slice(-4)}` : '(missing)';
   res.json({
