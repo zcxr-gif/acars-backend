@@ -1,4 +1,3 @@
-// live_flights.cjs
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -189,24 +188,20 @@ function simplifyFlightPlan(plan) {
   };
 }
 
-// --- CORRECTED FUNCTION to get the flown path (route) of a flight ---
 async function getFlightRoute(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
-  // UPDATED: The correct endpoint is /route, not /track
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/route`;
 
   try {
     const { data } = await ifClient.get(url);
     const payload = data && typeof data === 'object' ? data : {};
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
-      // According to docs, errorCode 6 is FlightNotFound.
-      // An empty route will likely return an empty result array, not an error.
       if (payload.errorCode === 6) return [];
       const err = new Error(`IF API errorCode ${payload.errorCode}`);
       err.response = { data: payload };
       throw err;
     }
-    return payload.result || []; // The result is an array of position reports
+    return payload.result || [];
   } catch (e) {
     const status = e?.response?.status;
     if (status === 401 || status === 403) {
@@ -227,14 +222,12 @@ async function getFlightRoute(sessionId, flightId) {
   }
 }
 
-// --- CORRECTED FUNCTION to simplify the route data ---
 function simplifyFlightRoute(routeData) {
   if (!Array.isArray(routeData)) return [];
   return routeData.map(p => ({
     lat: p.latitude,
     lon: p.longitude,
     alt_ft: p.altitude,
-    // UPDATED: The correct field name is groundSpeed, not speed
     gs_kt: p.groundSpeed,
     track_deg: p.track,
     timestamp: p.date,
@@ -270,20 +263,16 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
   }
 });
 
-// --- CORRECTED ROUTE to serve the flown flight route ---
-// UPDATED: The correct endpoint is /route, not /track
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
   const { sessionId, flightId } = req.params;
 
   try {
-    // UPDATED: Call the corrected function name
     const rawRoute = await getFlightRoute(sessionId, flightId);
 
     if (!rawRoute || rawRoute.length === 0) {
       return res.status(404).json(err(404, 'Flight route not found. The flight may not exist or has no position reports available.'));
     }
 
-    // UPDATED: Call the corrected simplifier function
     const simplifiedRoute = simplifyFlightRoute(rawRoute);
     res.json({ ok: true, flightId, route: simplifiedRoute });
 
