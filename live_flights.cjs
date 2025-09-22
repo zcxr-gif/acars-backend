@@ -134,7 +134,6 @@ async function getFlightPlan(sessionId, flightId) {
     const { data } = await ifClient.get(url);
     const payload = data && typeof data === 'object' ? data : {};
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
-      // errorCode 6 means Flight Not Found or No Flight Plan, which is a valid case.
       if (payload.errorCode === 6) return null;
       const err = new Error(`IF API errorCode ${payload.errorCode}`);
       err.response = { data: payload };
@@ -143,7 +142,6 @@ async function getFlightPlan(sessionId, flightId) {
     return payload.result || null;
   } catch (e) {
     const status = e?.response?.status;
-    // Retry with query param for consistency with your other functions
     if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
       const payload = retry && typeof retry === 'object' ? retry : {};
@@ -155,7 +153,6 @@ async function getFlightPlan(sessionId, flightId) {
       }
       return payload.result || null;
     }
-    // If it's a 404, it just means no flight plan, so we can return null.
     if (status === 404) {
       return null;
     }
@@ -171,7 +168,6 @@ function simplifyFlightPlan(plan) {
   const waypoints = [];
   const extractWaypoints = (items) => {
     for (const item of items) {
-      // A valid waypoint must have a location. Procedures might have a (0,0) location.
       if (item.location && (item.location.latitude !== 0 || item.location.longitude !== 0)) {
         waypoints.push({
           name: item.name,
@@ -179,7 +175,6 @@ function simplifyFlightPlan(plan) {
           lon: item.location.longitude,
         });
       }
-      // If the item is a procedure (SID, STAR, Approach), process its children
       if (Array.isArray(item.children)) {
         extractWaypoints(item.children);
       }
@@ -193,6 +188,60 @@ function simplifyFlightPlan(plan) {
     waypoints,
   };
 }
+
+// --- CORRECTED FUNCTION to get the flown path (route) of a flight ---
+async function getFlightRoute(sessionId, flightId) {
+  if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
+  // UPDATED: The correct endpoint is /route, not /track
+  const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/route`;
+
+  try {
+    const { data } = await ifClient.get(url);
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+      // According to docs, errorCode 6 is FlightNotFound.
+      // An empty route will likely return an empty result array, not an error.
+      if (payload.errorCode === 6) return [];
+      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+      err.response = { data: payload };
+      throw err;
+    }
+    return payload.result || []; // The result is an array of position reports
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+        if (payload.errorCode === 6) return [];
+        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+        err.response = { data: payload };
+        throw err;
+      }
+      return payload.result || [];
+    }
+    if (status === 404) {
+      return [];
+    }
+    throw e;
+  }
+}
+
+// --- CORRECTED FUNCTION to simplify the route data ---
+function simplifyFlightRoute(routeData) {
+  if (!Array.isArray(routeData)) return [];
+  return routeData.map(p => ({
+    lat: p.latitude,
+    lon: p.longitude,
+    alt_ft: p.altitude,
+    // UPDATED: The correct field name is groundSpeed, not speed
+    gs_kt: p.groundSpeed,
+    track_deg: p.track,
+    timestamp: p.date,
+    timestampMs: Date.parse(p.date) || null,
+  }));
+}
+
 
 // --- Routes
 
@@ -220,6 +269,36 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
     );
   }
 });
+
+// --- CORRECTED ROUTE to serve the flown flight route ---
+// UPDATED: The correct endpoint is /route, not /track
+app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
+  const { sessionId, flightId } = req.params;
+
+  try {
+    // UPDATED: Call the corrected function name
+    const rawRoute = await getFlightRoute(sessionId, flightId);
+
+    if (!rawRoute || rawRoute.length === 0) {
+      return res.status(404).json(err(404, 'Flight route not found. The flight may not exist or has no position reports available.'));
+    }
+
+    // UPDATED: Call the corrected simplifier function
+    const simplifiedRoute = simplifyFlightRoute(rawRoute);
+    res.json({ ok: true, flightId, route: simplifiedRoute });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch flight route', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
 
 app.get('/if-key-debug', (req, res) => {
   const masked = IF_API_KEY ? `${IF_API_KEY.slice(0, 4)}...${IF_API_KEY.slice(-4)}` : '(missing)';
