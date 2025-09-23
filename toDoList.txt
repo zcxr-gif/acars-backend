@@ -1,0 +1,40 @@
+manage pilots must only be allowed to the admins,coo,ceo, and cot. The CI can only see if the users need tests, but cannot promote or edit, they can send in evaluations for the users and schedule an evaluation.
+
+CI, is allowed to accept pireps only if allowed. I will keep this in mind. 
+
+add an event pirep so users with lower rank can file that pirep
+add a multiplier for events if the staff allow it. ceo, coo, event manager, event leader, admin
+
+only route manager, ceo,coo, admins can touch route manager, route manager and will also be able to handle roster management.
+
+
+when a pirep doesn't look right, the other member who wishes for a higher up to review it will then touch a button that will mark the pirep as supervisor review needed
+
+administration category must only be admins, ceo, coo, and technology manager, technology manager should have cite wide access.
+
+make the invite code just be inside the link or something the users will just touch the link and they will be sent right over in which the register page will take them step by step so its not like all thrown at them.
+
+Dont have time or dont feel well its okay we get it. you can apply for a leave of absence leave your reasons and well handle it from there! in the dashboard there will be a leave of absence that will will be stored for a month then deleted.
+
+need to report something or need staff help? ask us! this will delete after the issue is resolved.
+
+send a test with a variation of 20 questions(still gotta see how many) out of a pool of 50 questions, the user will then get immediate results and told that they will have a cooldown period of a week. if any questions reach out to any staff member. If passed then they will be told that a team member will be right with them to do the practical. The user will then be tagged as "Practical needed"
+
+the pilot MUST fly one flight per month OR the system will flag him and report him to staff and on manage pilots he will be the color red. In which there will be a message saying this pilot hasn't filed a pirep for more then a month.
+
+
+Fit everything well into the phone UI.
+
+Fix how the performance pass is not fitting right in the screen and also dosnt fit right on mobile.
+
+We should be able to hold various roles, only the higher roles will be shown in the staff page. Admin will not be shown.
+
+still gotta add route of the week thats based on the IFATC schedule so pilots get the best experience out there, botw.
+
+we should be able to add the aircrafts for each VA, their liveries and the name of the aircrafts.
+
+admins,ceo,coo should be able to edit the hours of a pilot. the system should adjust the pilots rank accordingly.
+
+a little section in pilot hub that will hold something like "Antony, just got promoted to Commander!(badge)" make it very nice with different types of congratulations not just a singular one. They will erase by the end of the day. only a maximum of 4 can be inside.
+
+fix rosters again
