@@ -354,7 +354,12 @@ async function notifyCallback(tracker, payload) {
       server: tracker.server,
       status: tracker.status,
       ...payload,
-    }, { timeout: 10000 });
+    }, {
+      timeout: 10000,
+      headers: {
+        'x-acars-signature': process.env.TRACK_WEBHOOK_SECRET || ''
+      }
+    });
   } catch (e) {
     if (TRACK_LOG) console.warn('[callback] failed', e?.message);
   }
