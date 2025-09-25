@@ -425,6 +425,10 @@ async function pollOnce() {
         if (t.status !== 'tracking') {
           t.history.push({ event: 'online', timestamp: now });
           if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server}`);
+          
+          // <<< DEBUGGER: Log sending departure notification >>>
+          console.log(`[ACARS Debug] User found online. Sending 'found' (departure) notification to callback URL for ${t.username}`);
+          
           notifyCallback(t, { flight: { ...found, sessionId }, reason: 'user_online' });
         }
         t.status = 'tracking';
@@ -443,8 +447,6 @@ async function pollOnce() {
           continue;
         }
         
-        // This block runs if the user was just online and has now disappeared.
-        // We check if they landed before reverting to the searching state.
         if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
             
           if (TRACK_LOG) console.log(`[track] User ${t.username} disappeared, checking last route...`);
@@ -455,16 +457,14 @@ async function pollOnce() {
             if (simplifiedRoute.length > 0) {
               const lastPoint = simplifiedRoute[simplifiedRoute.length - 1];
               
-              // Condition 1: Is the aircraft low and slow?
               const isLowAndSlow = lastPoint.altitude < LANDED_ALTITUDE_FT && lastPoint.groundSpeed < LANDED_SPEED_KT;
               
               if (isLowAndSlow) {
-                // Condition 2: Is the aircraft near a known airport?
                 const proximity = findNearestAirport(lastPoint.lat, lastPoint.lon);
                 const isNearAirport = proximity && proximity.distanceKm < LANDED_PROXIMITY_KM;
                 
                 if (isNearAirport) {
-                  t.status = 'landed'; // New terminal status
+                  t.status = 'landed';
                   t.history.push({ event: 'landed', timestamp: now, airport: proximity.airport.icao });
                   
                   const onlineEvent = t.history.slice().reverse().find(h => h.event === 'online');
@@ -472,11 +472,14 @@ async function pollOnce() {
                   
                   if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${proximity.airport.icao} after ${Math.round(flightDurationMs/60000)}m. Stopping tracker.`);
                   
+                  // <<< DEBUGGER: Log sending landed notification >>>
+                  console.log(`[ACARS Debug] Flight has landed. Sending 'landed' notification to callback URL for ${t.username}`);
+
                   notifyCallback(t, { 
                     reason: 'flight_landed', 
                     flightDurationMs, 
                     lastPosition: lastPoint,
-                    airport: { // Send rich airport data in the callback
+                    airport: {
                       icao: proximity.airport.icao,
                       name: proximity.airport.name,
                       distanceKm: proximity.distanceKm,
@@ -484,7 +487,7 @@ async function pollOnce() {
                   });
                   
                   trackers.set(t.id, t);
-                  continue; // Flight is over, stop processing.
+                  continue;
                 } else if (TRACK_LOG) {
                   console.log(`[track] ${t.username} is low & slow but not near an airport. Closest: ${proximity?.airport?.icao} at ${proximity?.distanceKm?.toFixed(1)}km`);
                 }
