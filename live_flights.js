@@ -1,4 +1,10 @@
+// live_flights.js
+
+/* =========================
+ * Imports & setup
+ * ========================= */
 const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -8,42 +14,36 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Load airport data
-let airports = [];
-try {
-  // Assuming airports.json is in the same directory as your script
-  const airportData = fs.readFileSync('./airports.json', 'utf8');
-  airports = JSON.parse(airportData);
-  console.log(`✅ Loaded ${airports.length} airports from airports.json`);
-} catch (e) {
-  console.error('❌ Could not load airports.json. Proximity checks will be disabled.', e);
-}
-
-const PORT = process.env.PORT || 5001;
+/* =========================
+ * Config
+ * ========================= */
+const PORT = parseInt(process.env.PORT || '5001', 10);
 
 const IF_API_BASE_URL = (process.env.IF_API_BASE_URL || 'https://api.infiniteflight.com/public/v2').trim();
 const RAW_IF_KEY = process.env.INFINITE_FLIGHT_API_KEY || process.env.IF_API_KEY || '';
 const IF_API_KEY = RAW_IF_KEY.trim();
 
-// -------- Tracking config (updated) --------
 const POLL_MS = parseInt(process.env.POLL_MS || '30000', 10); // 30s (for active flights)
-const BACKGROUND_POLL_MS = 15 * 60 * 1000; // 15 minutes (for backgrounded flights)
+const BACKGROUND_POLL_MS = parseInt(process.env.BACKGROUND_POLL_MS || (15 * 60 * 1000), 10); // 15 minutes (for backgrounded flights)
 const SEARCH_TIMEOUT_MS = parseInt(process.env.SEARCH_TIMEOUT_MS || (48 * 60 * 60 * 1000), 10); // 48 hours
 const DEFAULT_IF_SERVER = (process.env.DEFAULT_IF_SERVER || 'Expert Server').trim();
 const DEFAULT_CALLBACK_URL = (process.env.TRACK_CALLBACK_URL || '').trim();
 const TRACK_LOG = process.env.TRACK_LOG === '1';
-// CHANGED: Constants to determine if a flight has landed now use AGL.
-const LANDED_ALTITUDE_AGL_FT = 1000; // Max altitude Above Ground Level (AGL) to be considered landed. Requires airport elevation data.
-const LANDED_SPEED_KT = 40;     // Max ground speed (knots) to be considered landed.
-const LANDED_PROXIMITY_KM = 10; // Max distance from an airport center (km) to be considered landed.
 
-// In-memory tracker store (simple & fast). Your "other backend" is the source of truth.
+// "Landed" heuristics (AGL-based)
+const LANDED_ALTITUDE_AGL_FT = 1000; // Max altitude Above Ground Level (AGL)
+const LANDED_SPEED_KT = 40;     // Max ground speed (knots)
+const LANDED_PROXIMITY_KM = 10; // Max distance from an airport center (km)
+
+// In-memory tracker store
 const trackers = new Map(); // id -> tracker
 function newId() {
   try { return require('crypto').randomUUID(); } catch { return 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 }
 
-// -------- IF client --------
+/* =========================
+ * Axios client
+ * ========================= */
 const ifClient = axios.create({
   baseURL: IF_API_BASE_URL,
   timeout: 15000,
@@ -52,6 +52,87 @@ const ifClient = axios.create({
     Accept: 'application/json',
   },
 });
+
+/* =========================
+ * Airports data (robust loader + normalization)
+ * ========================= */
+let airports = [];
+
+function normalizeAirport(a) {
+  return {
+    icao: a.icao || a.ICAO || '',
+    name: a.name || a.airport_name || '',
+    lat: a.lat ?? a.latitude ?? null,
+    lon: a.lon ?? a.longitude ?? null,
+    elevation_ft: a.elevation_ft ?? a.elevation ?? 0,
+    country: a.country || a.cc || null,
+  };
+}
+
+(function loadAirports() {
+  try {
+    const filePath = path.join(__dirname, 'airports.json'); // robust path
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+
+    if (Array.isArray(parsed)) {
+      airports = parsed.map(normalizeAirport)
+        .filter(a => a.icao && a.lat != null && a.lon != null);
+    } else if (parsed && typeof parsed === 'object') {
+      airports = Object.entries(parsed)
+        .map(([icao, v]) => normalizeAirport({ icao, ...v }))
+        .filter(a => a.icao && a.lat != null && a.lon != null);
+    } else {
+      airports = [];
+    }
+
+    console.log(`✅ Loaded ${airports.length} airports (normalized) from airports.json`);
+  } catch (e) {
+    console.error('❌ Could not load airports.json. Proximity checks will be disabled.', e);
+    airports = [];
+  }
+})();
+
+/* =========================
+ * Helpers
+ * ========================= */
+
+/**
+ * Calculates the distance between two coordinates in kilometers using the Haversine formula.
+ */
+function getDistanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radius of the Earth in km
+  const toRad = (v) => (v * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Finds the closest airport to a given latitude and longitude.
+ */
+function findNearestAirport(lat, lon) {
+  if (!airports.length || typeof lat !== 'number' || typeof lon !== 'number') {
+    return { airport: null, distanceKm: Infinity };
+  }
+
+  let bestAirport = null;
+  let minDistance = Infinity;
+
+  for (const airport of airports) {
+    const distance = getDistanceKm(lat, lon, airport.lat, airport.lon);
+    if (distance < minDistance) {
+      minDistance = distance;
+      bestAirport = airport;
+    }
+  }
+  
+  return { airport: bestAirport, distanceKm: minDistance };
+}
 
 function unwrap(data) {
   if (!data) return [];
@@ -64,6 +145,9 @@ function err(status, message, extra = {}) {
   return { ok: false, error: { status, message, ...extra } };
 }
 
+/* =========================
+ * IF API Wrappers
+ * ========================= */
 async function getSessions() {
   const { data } = await ifClient.get('/sessions');
   const items = unwrap(data);
@@ -256,50 +340,10 @@ function simplifyFlightRoute(routeData) {
   }));
 }
 
-// -------- Helper functions for airport proximity --------
-/**
- * Calculates the distance between two coordinates in kilometers.
- */
-function getDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Radius of the Earth in km
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
 
-/**
- * Finds the closest airport to a given latitude and longitude.
- * Assumes airports.json is an array of objects with { lat, lon, icao, name, elevation_ft }.
- */
-function findNearestAirport(lat, lon) {
-  if (!airports.length || typeof lat !== 'number' || typeof lon !== 'number') {
-    return null;
-  }
-
-  let closestAirport = null;
-  let minDistance = Infinity;
-
-  for (const airport of airports) {
-    const distance = getDistanceKm(lat, lon, airport.lat, airport.lon);
-    if (distance < minDistance) {
-      minDistance = distance;
-      closestAirport = airport;
-    }
-  }
-  
-  return { airport: closestAirport, distanceKm: minDistance };
-}
-
-
-// ---------------------------------------------------------
-// Tracking worker (rewritten with dynamic polling)
-// ---------------------------------------------------------
-
+/* =========================
+ * Tracking engine
+ * ========================= */
 async function notifyCallback(tracker, payload) {
   const url = tracker.callbackUrl || DEFAULT_CALLBACK_URL;
   if (!url) return;
@@ -407,7 +451,6 @@ async function pollOnce() {
       continue;
     }
 
-    // NEW: Map flights by both username and flightId for more precise tracking.
     const byUsername = new Map();
     const byFlightId = new Map();
     for (const f of flights) {
@@ -424,37 +467,30 @@ async function pollOnce() {
       t.lastPolledAt = now;
       let match = null;
 
-      // CHANGED: Logic to find a flight is now state-dependent.
       if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
-        // If we are already tracking a flight, we must find it by its specific flightId.
         match = byFlightId.get(t.lastKnownFlight.flightId);
       } else if (t.status === 'searching') {
-        // If we are searching, find any flight matching the username.
         const userFlights = byUsername.get(t.username.toLowerCase());
         if (userFlights && userFlights.length) {
-            match = userFlights[0]; // Take the first one.
+            match = userFlights[0];
         }
       }
 
       if (match) {
-        // ✅ FLIGHT FOUND (either by username or specific flightId)
         const found = simplifyFlight(match);
 
         if (t.status !== 'tracking') {
-          // This block runs only once when a 'searching' tracker finds the user for the first time.
           t.history.push({ event: 'online', timestamp: now });
-          // NEW: Log the flightId we are locking onto.
           if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server} -> Locking onto flightId: ${found.flightId}`);
           
           console.log(`[ACARS Debug] User found online. Sending 'found' (departure) notification to callback URL for ${t.username}`);
           
           notifyCallback(t, { flight: { ...found, sessionId }, reason: 'user_online' });
-          // NEW: Lock the tracker to this specific flight instance.
           t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
         }
         t.status = 'tracking';
         t.lastSeenAt = now;
-        t.flight = { ...found, sessionId }; // Always update with the latest flight data.
+        t.flight = { ...found, sessionId };
         
         const isInBackground = found.pilotState === 3;
         t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
@@ -464,8 +500,6 @@ async function pollOnce() {
         }
 
       } else {
-        // ❌ FLIGHT NOT FOUND (the specific flightId is gone, or user never appeared)
-
         if (now >= t.timeoutAt) {
           t.status = 'not_found';
           if (TRACK_LOG) console.log(`[track] TIMEOUT ${t.username} on ${t.server}`);
@@ -473,7 +507,6 @@ async function pollOnce() {
           continue;
         }
         
-        // CHANGED: This logic now correctly triggers when the specific tracked flight disappears.
         if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
             
           if (TRACK_LOG) console.log(`[track] User ${t.username}'s flight ${t.lastKnownFlight.flightId} disappeared, checking last route for landing...`);
@@ -483,24 +516,23 @@ async function pollOnce() {
         
             if (simplifiedRoute.length > 0) {
               const lastPoint = simplifiedRoute[simplifiedRoute.length - 1];
-              const proximity = findNearestAirport(lastPoint.lat, lastPoint.lon);
+              const { airport, distanceKm } = findNearestAirport(lastPoint.lat, lastPoint.lon);
 
-              if (proximity && proximity.airport) {
-                // CHANGED: Calculate AGL for accurate landing detection at any elevation.
-                const airportElevationFt = proximity.airport.elevation_ft || 0;
+              if (airport) {
+                const airportElevationFt = airport.elevation_ft || 0;
                 const altitudeAgl = lastPoint.altitude - airportElevationFt;
                 
                 const isLowAndSlow = altitudeAgl < LANDED_ALTITUDE_AGL_FT && lastPoint.groundSpeed < LANDED_SPEED_KT;
-                const isNearAirport = proximity.distanceKm < LANDED_PROXIMITY_KM;
+                const isNearAirport = distanceKm < LANDED_PROXIMITY_KM;
                 
                 if (isLowAndSlow && isNearAirport) {
                   t.status = 'landed';
-                  t.history.push({ event: 'landed', timestamp: now, airport: proximity.airport.icao });
+                  t.history.push({ event: 'landed', timestamp: now, airport: airport.icao });
                   
                   const onlineEvent = t.history.slice().reverse().find(h => h.event === 'online');
                   const flightDurationMs = onlineEvent ? now - onlineEvent.timestamp : 0;
                   
-                  if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${proximity.airport.icao} after ${Math.round(flightDurationMs/60000)}m. Stopping tracker.`);
+                  if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${airport.icao} after ${Math.round(flightDurationMs/60000)}m. Stopping tracker.`);
                   
                   console.log(`[ACARS Debug] Flight has landed. Sending 'landed' notification to callback URL for ${t.username}`);
 
@@ -509,16 +541,16 @@ async function pollOnce() {
                     flightDurationMs, 
                     lastPosition: lastPoint,
                     airport: {
-                      icao: proximity.airport.icao,
-                      name: proximity.airport.name,
-                      distanceKm: proximity.distanceKm,
+                      icao: airport.icao,
+                      name: airport.name,
+                      distanceKm: distanceKm,
                     }
                   });
                   
                   trackers.set(t.id, t);
                   continue; 
                 } else if (TRACK_LOG) {
-                  console.log(`[track] ${t.username} is low & slow check failed: nearAirport=${isNearAirport}, AGL=${altitudeAgl.toFixed(0)}ft. Closest: ${proximity?.airport?.icao} at ${proximity?.distanceKm?.toFixed(1)}km`);
+                  console.log(`[track] ${t.username} is low & slow check failed: nearAirport=${isNearAirport}, AGL=${altitudeAgl.toFixed(0)}ft. Closest: ${airport?.icao} at ${distanceKm?.toFixed(1)}km`);
                 }
               }
             }
@@ -561,49 +593,11 @@ setInterval(() => {
 }, POLL_MS);
 
 
-// ---------------------------------------------------------
-// API Endpoints
-// ---------------------------------------------------------
-
-app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
-  const { sessionId, flightId } = req.params;
-  try {
-    const rawPlan = await getFlightPlan(sessionId, flightId);
-    if (!rawPlan) {
-      return res.status(404).json(err(404, 'Flight plan not found. The flight may not exist or has no filed plan.'));
-    }
-    const simplifiedPlan = simplifyFlightPlan(rawPlan);
-    res.json({ ok: true, flightId, plan: simplifiedPlan });
-  } catch (e) {
-    const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
-    res.status(status).json(
-      err(status, 'Failed to fetch flight plan', {
-        apiErrorCode: apiError?.errorCode,
-        detail: e?.message
-      })
-    );
-  }
-});
-
-app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
-  const { sessionId, flightId } = req.params;
-  try {
-    const rawRoute = await getFlightRoute(sessionId, flightId);
-    if (!rawRoute || rawRoute.length === 0) {
-      return res.status(404).json(err(404, 'Flight route not found. The flight may not exist or has no position reports available.'));
-    }
-    res.json({ ok: true, flightId, route: rawRoute });
-  } catch (e) {
-    const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
-    res.status(status).json(
-      err(status, 'Failed to fetch flight route', {
-        apiErrorCode: apiError?.errorCode,
-        detail: e?.message
-      })
-    );
-  }
+/* =========================
+ * API Endpoints
+ * ========================= */
+app.get('/health', (req, res) => {
+  res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
 });
 
 app.get('/if-key-debug', (req, res) => {
@@ -678,6 +672,47 @@ app.get('/flights/:sessionId', async (req, res) => {
   }
 });
 
+app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
+  const { sessionId, flightId } = req.params;
+  try {
+    const rawPlan = await getFlightPlan(sessionId, flightId);
+    if (!rawPlan) {
+      return res.status(404).json(err(404, 'Flight plan not found. The flight may not exist or has no filed plan.'));
+    }
+    const simplifiedPlan = simplifyFlightPlan(rawPlan);
+    res.json({ ok: true, flightId, plan: simplifiedPlan });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch flight plan', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
+app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
+  const { sessionId, flightId } = req.params;
+  try {
+    const rawRoute = await getFlightRoute(sessionId, flightId);
+    if (!rawRoute || rawRoute.length === 0) {
+      return res.status(404).json(err(404, 'Flight route not found. The flight may not exist or has no position reports available.'));
+    }
+    res.json({ ok: true, flightId, route: rawRoute });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch flight route', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
 app.get('/track/active', (req, res) => {
   const active = getActiveTrackers().map(t => ({
     id: t.id,
@@ -743,12 +778,15 @@ app.post('/track/:id/stop', (req, res) => {
   res.json({ ok: true, status: t.status });
 });
 
-app.get('/health', (req, res) => {
-  res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
-});
-
+/* =========================
+ * Startup
+ * ========================= */
 app.listen(PORT, () => {
   console.log(`✅ Live Flight Tracker ready: http://localhost:${PORT}`);
   console.log('🌐 Base URL:', IF_API_BASE_URL);
-  console.log(`🔁 Tracking: poll=${POLL_MS}ms timeout=${SEARCH_TIMEOUT_MS/ (60*60*1000)}h defaultServer="${DEFAULT_IF_SERVER}"`);
+  console.log(`🔁 Tracking: poll=${POLL_MS}ms background=${BACKGROUND_POLL_MS}ms timeout=${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h`);
+  console.log(`🛩️  Default IF Server: "${DEFAULT_IF_SERVER}"`);
+  if (!IF_API_KEY) {
+    console.warn('⚠️  IF API key is missing. Set INFINITE_FLIGHT_API_KEY in your .env file.');
+  }
 });
