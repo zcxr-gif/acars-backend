@@ -27,13 +27,14 @@ const IF_API_KEY = RAW_IF_KEY.trim();
 
 // -------- Tracking config (updated) --------
 const POLL_MS = parseInt(process.env.POLL_MS || '30000', 10); // 30s (for active flights)
+const BACKGROUND_POLL_MS = 15 * 60 * 1000; // 15 minutes (for backgrounded flights)
 const SEARCH_TIMEOUT_MS = parseInt(process.env.SEARCH_TIMEOUT_MS || (48 * 60 * 60 * 1000), 10); // 48 hours
 const DEFAULT_IF_SERVER = (process.env.DEFAULT_IF_SERVER || 'Expert Server').trim();
 const DEFAULT_CALLBACK_URL = (process.env.TRACK_CALLBACK_URL || '').trim();
 const TRACK_LOG = process.env.TRACK_LOG === '1';
-// NEW LOGIC: Constants to determine if a flight has landed.
-const LANDED_ALTITUDE_FT = 5000; // Max altitude (MSL) to be considered on the ground.
-const LANDED_SPEED_KT = 40;     // Max ground speed (knots) to be considered on the ground.
+// CHANGED: Constants to determine if a flight has landed now use AGL.
+const LANDED_ALTITUDE_AGL_FT = 1000; // Max altitude Above Ground Level (AGL) to be considered landed. Requires airport elevation data.
+const LANDED_SPEED_KT = 40;     // Max ground speed (knots) to be considered landed.
 const LANDED_PROXIMITY_KM = 10; // Max distance from an airport center (km) to be considered landed.
 
 // In-memory tracker store (simple & fast). Your "other backend" is the source of truth.
@@ -273,7 +274,7 @@ function getDistanceKm(lat1, lon1, lat2, lon2) {
 
 /**
  * Finds the closest airport to a given latitude and longitude.
- * Assumes airports.json is an array of objects with { lat, lon, icao, name }.
+ * Assumes airports.json is an array of objects with { lat, lon, icao, name, elevation_ft }.
  */
 function findNearestAirport(lat, lon) {
   if (!airports.length || typeof lat !== 'number' || typeof lon !== 'number') {
@@ -406,39 +407,64 @@ async function pollOnce() {
       continue;
     }
 
+    // NEW: Map flights by both username and flightId for more precise tracking.
     const byUsername = new Map();
+    const byFlightId = new Map();
     for (const f of flights) {
+      if (f.flightId) byFlightId.set(f.flightId, f);
       const u = (f.username || '').toLowerCase();
-      if (!u) continue;
-      if (!byUsername.has(u)) byUsername.set(u, []);
-      byUsername.get(u).push(f);
+      if (u) {
+          if (!byUsername.has(u)) byUsername.set(u, []);
+          byUsername.get(u).push(f);
+      }
     }
 
     for (const t of group) {
       t.attempts += 1;
       t.lastPolledAt = now;
-      const match = byUsername.get(t.username.toLowerCase());
+      let match = null;
 
-      if (match && match.length) {
-        // ✅ USER FOUND
-        const found = simplifyFlight(match[0]);
+      // CHANGED: Logic to find a flight is now state-dependent.
+      if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
+        // If we are already tracking a flight, we must find it by its specific flightId.
+        match = byFlightId.get(t.lastKnownFlight.flightId);
+      } else if (t.status === 'searching') {
+        // If we are searching, find any flight matching the username.
+        const userFlights = byUsername.get(t.username.toLowerCase());
+        if (userFlights && userFlights.length) {
+            match = userFlights[0]; // Take the first one.
+        }
+      }
+
+      if (match) {
+        // ✅ FLIGHT FOUND (either by username or specific flightId)
+        const found = simplifyFlight(match);
+
         if (t.status !== 'tracking') {
+          // This block runs only once when a 'searching' tracker finds the user for the first time.
           t.history.push({ event: 'online', timestamp: now });
-          if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server}`);
+          // NEW: Log the flightId we are locking onto.
+          if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server} -> Locking onto flightId: ${found.flightId}`);
           
-          // <<< DEBUGGER: Log sending departure notification >>>
           console.log(`[ACARS Debug] User found online. Sending 'found' (departure) notification to callback URL for ${t.username}`);
           
           notifyCallback(t, { flight: { ...found, sessionId }, reason: 'user_online' });
+          // NEW: Lock the tracker to this specific flight instance.
+          t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
         }
         t.status = 'tracking';
         t.lastSeenAt = now;
-        t.flight = { ...found, sessionId };
-        t.lastKnownFlight = { flightId: t.flight.flightId, sessionId: t.flight.sessionId };
-        t.nextPollAt = now + POLL_MS;
+        t.flight = { ...found, sessionId }; // Always update with the latest flight data.
+        
+        const isInBackground = found.pilotState === 3;
+        t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
+        
+        if (isInBackground && TRACK_LOG) {
+          console.log(`[track] ✈️ ${t.username} is in background. Next poll in ${BACKGROUND_POLL_MS / 60000}m.`);
+        }
 
       } else {
-        // ❌ USER NOT FOUND
+        // ❌ FLIGHT NOT FOUND (the specific flightId is gone, or user never appeared)
 
         if (now >= t.timeoutAt) {
           t.status = 'not_found';
@@ -447,23 +473,27 @@ async function pollOnce() {
           continue;
         }
         
+        // CHANGED: This logic now correctly triggers when the specific tracked flight disappears.
         if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
             
-          if (TRACK_LOG) console.log(`[track] User ${t.username} disappeared, checking last route...`);
+          if (TRACK_LOG) console.log(`[track] User ${t.username}'s flight ${t.lastKnownFlight.flightId} disappeared, checking last route for landing...`);
           try {
             const route = await getFlightRoute(t.lastKnownFlight.sessionId, t.lastKnownFlight.flightId);
             const simplifiedRoute = simplifyFlightRoute(route);
         
             if (simplifiedRoute.length > 0) {
               const lastPoint = simplifiedRoute[simplifiedRoute.length - 1];
-              
-              const isLowAndSlow = lastPoint.altitude < LANDED_ALTITUDE_FT && lastPoint.groundSpeed < LANDED_SPEED_KT;
-              
-              if (isLowAndSlow) {
-                const proximity = findNearestAirport(lastPoint.lat, lastPoint.lon);
-                const isNearAirport = proximity && proximity.distanceKm < LANDED_PROXIMITY_KM;
+              const proximity = findNearestAirport(lastPoint.lat, lastPoint.lon);
+
+              if (proximity && proximity.airport) {
+                // CHANGED: Calculate AGL for accurate landing detection at any elevation.
+                const airportElevationFt = proximity.airport.elevation_ft || 0;
+                const altitudeAgl = lastPoint.altitude - airportElevationFt;
                 
-                if (isNearAirport) {
+                const isLowAndSlow = altitudeAgl < LANDED_ALTITUDE_AGL_FT && lastPoint.groundSpeed < LANDED_SPEED_KT;
+                const isNearAirport = proximity.distanceKm < LANDED_PROXIMITY_KM;
+                
+                if (isLowAndSlow && isNearAirport) {
                   t.status = 'landed';
                   t.history.push({ event: 'landed', timestamp: now, airport: proximity.airport.icao });
                   
@@ -472,7 +502,6 @@ async function pollOnce() {
                   
                   if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${proximity.airport.icao} after ${Math.round(flightDurationMs/60000)}m. Stopping tracker.`);
                   
-                  // <<< DEBUGGER: Log sending landed notification >>>
                   console.log(`[ACARS Debug] Flight has landed. Sending 'landed' notification to callback URL for ${t.username}`);
 
                   notifyCallback(t, { 
@@ -487,9 +516,9 @@ async function pollOnce() {
                   });
                   
                   trackers.set(t.id, t);
-                  continue;
+                  continue; 
                 } else if (TRACK_LOG) {
-                  console.log(`[track] ${t.username} is low & slow but not near an airport. Closest: ${proximity?.airport?.icao} at ${proximity?.distanceKm?.toFixed(1)}km`);
+                  console.log(`[track] ${t.username} is low & slow check failed: nearAirport=${isNearAirport}, AGL=${altitudeAgl.toFixed(0)}ft. Closest: ${proximity?.airport?.icao} at ${proximity?.distanceKm?.toFixed(1)}km`);
                 }
               }
             }
