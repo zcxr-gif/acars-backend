@@ -649,6 +649,21 @@ app.get('/flights/:sessionId', async (req, res) => {
   }
 });
 
+app.get('/track/active', (req, res) => {
+  const active = getActiveTrackers().map(t => ({
+    id: t.id,
+    username: t.username,
+    server: t.server,
+    status: t.status,
+    startedAt: new Date(t.startedAt).toISOString(),
+    lastSeenAt: t.lastSeenAt ? new Date(t.lastSeenAt).toISOString() : null,
+    nextPollAt: t.nextPollAt ? new Date(t.nextPollAt).toISOString() : null,
+    timeoutAt: new Date(t.timeoutAt).toISOString(),
+    attempts: t.attempts
+  }));
+  res.json({ ok: true, count: active.length, trackers: active });
+});
+
 app.post('/track/start', async (req, res) => {
   try {
     const created = addTrackers(req.body || {});
@@ -697,21 +712,6 @@ app.post('/track/:id/stop', (req, res) => {
   trackers.set(t.id, t);
   notifyCallback(t, { reason: 'stopped_by_request' });
   res.json({ ok: true, status: t.status });
-});
-
-app.get('/track/active', (req, res) => {
-  const active = getActiveTrackers().map(t => ({
-    id: t.id,
-    username: t.username,
-    server: t.server,
-    status: t.status,
-    startedAt: new Date(t.startedAt).toISOString(),
-    lastSeenAt: t.lastSeenAt ? new Date(t.lastSeenAt).toISOString() : null,
-    nextPollAt: t.nextPollAt ? new Date(t.nextPollAt).toISOString() : null,
-    timeoutAt: new Date(t.timeoutAt).toISOString(),
-    attempts: t.attempts
-  }));
-  res.json({ ok: true, count: active.length, trackers: active });
 });
 
 app.get('/health', (req, res) => {

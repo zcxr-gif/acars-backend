@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ACARS Test Console</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #121a2b;
+      --muted: #9fb0d9;
+      --text: #e9eefc;
+      --accent: #5eead4;
+      --bad: #f87171;
+      --good: #86efac;
+      --warn: #fde68a;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    html, body { height: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    .container { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+    .card { background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02)); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.25); overflow: hidden; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    label { font-size: 12px; letter-spacing: 0.04em; color: var(--muted); }
+    input, select { width: 100%; box-sizing: border-box; background: #0e1626; color: var(--text); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 12px 12px; outline: none; font-size: 14px; }
+    input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(94,234,212,0.25); }
+    .btns { display: flex; flex-wrap: wrap; gap: 10px; }
+    button { background: #243145; color: var(--text); border: 1px solid rgba(255,255,255,0.12); padding: 10px 14px; border-radius: 10px; font-weight: 600; cursor: pointer; }
+    button.primary { background: linear-gradient(90deg, #06b6d4, #22d3ee); color: #001219; border: none; }
+    button.ghost { background: transparent; border-color: rgba(255,255,255,0.2); }
+    button.warn { background: #3b2f14; border-color: #f59e0b; color: #fde68a; }
+    button.stop { background: #3b1f1f; border-color: #ef4444; color: #fecaca; }
+    .stack { display: grid; gap: 6px; }
+    .pad { padding: 18px; }
+    .title { font-size: 18px; font-weight: 800; letter-spacing: 0.02em; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .flex { display: flex; align-items: center; gap: 10px; }
+    .mono { font-family: var(--mono); font-size: 13px; }
+    .log { height: 360px; background: #0a0f1a; border-top: 1px solid rgba(255,255,255,0.06); overflow: auto; padding: 12px 14px; }
+    .log pre { margin: 2px 0; white-space: pre-wrap; word-break: break-word; }
+    .pill { font-family: var(--mono); font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #142034; border: 1px solid rgba(255,255,255,0.08); }
+    .ok { color: var(--good); }
+    .fail { color: var(--bad); }
+    .warnc { color: var(--warn); }
+    .kv { display:grid; grid-template-columns: 140px 1fr; gap:6px; align-items:center; }
+    .divider { height: 1px; background: rgba(255,255,255,0.06); margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card pad">
+      <div class="title">ACARS Test Console</div>
+      <div class="muted" style="margin-bottom:14px">Start a tracker by username, then watch live status updates below. This simulates the call your other backend makes.</div>
+      <div class="stack" style="margin-bottom:16px">
+        <div class="row">
+          <div class="stack">
+            <label>ACARS Base URL</label>
+            <input id="baseUrl" placeholder="https://acars-backend-uxln.onrender.com" value="https://acars-backend-uxln.onrender.com" />
+          </div>
+          <div class="stack">
+            <label>Server</label>
+            <select id="server">
+              <option>Expert Server</option>
+              <option>Training Server</option>
+              <option>Casual Server</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="stack">
+            <label>Username to track (case-insensitive, punctuation matters)</label>
+            <input id="username" placeholder="_ServerNoob" />
+          </div>
+          <div class="stack">
+            <label>Callback URL (optional)</label>
+            <input id="callback" placeholder="https://example.com/webhook" />
+          </div>
+        </div>
+      </div>
+      <div class="btns" style="margin-bottom:10px">
+        <button class="primary" id="btnStart">Start tracking</button>
+        <button class="stop" id="btnStop" disabled>Stop tracker</button>
+        <button class="ghost" id="btnActive">Show active</button>
+        <button class="ghost" id="btnSessions">Test IF sessions</button>
+        <button class="warn" id="btnFlights" title="Requires a sessionId in the field below">Fetch flights (session)</button>
+      </div>
+      <div class="row">
+        <div class="stack">
+          <label>Tracker ID (auto-filled)</label>
+          <input id="trackerId" class="mono" placeholder="(none yet)" readonly />
+        </div>
+        <div class="stack">
+          <label>Session ID (from sessions test)</label>
+          <input id="sessionId" class="mono" placeholder="00000000-0000-0000-0000-000000000000" />
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:18px">
+      <div class="pad flex">
+        <div class="title">Live Log</div>
+        <span id="pollPill" class="pill muted">poll: off</span>
+      </div>
+      <div id="log" class="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const els = {
+      baseUrl: document.getElementById('baseUrl'),
+      server: document.getElementById('server'),
+      username: document.getElementById('username'),
+      callback: document.getElementById('callback'),
+      btnStart: document.getElementById('btnStart'),
+      btnStop: document.getElementById('btnStop'),
+      btnActive: document.getElementById('btnActive'),
+      btnSessions: document.getElementById('btnSessions'),
+      btnFlights: document.getElementById('btnFlights'),
+      trackerId: document.getElementById('trackerId'),
+      sessionId: document.getElementById('sessionId'),
+      log: document.getElementById('log'),
+      pollPill: document.getElementById('pollPill'),
+    };
+
+    let pollTimer = null;
+
+    function log(msg, level = 'info', obj) {
+      const time = new Date().toLocaleTimeString();
+      const pre = document.createElement('pre');
+      const color = level === 'error' ? 'var(--bad)' : level === 'warn' ? 'var(--warn)' : 'var(--text)';
+      pre.style.color = color;
+      const text = `[${time}] ${msg}` + (obj ? `\n${JSON.stringify(obj, null, 2)}` : '');
+      pre.textContent = text;
+      els.log.appendChild(pre);
+      els.log.scrollTop = els.log.scrollHeight;
+    }
+
+    async function api(path, opts = {}) {
+      const base = els.baseUrl.value.replace(/\/$/, '');
+      const url = base + path;
+      try {
+        const res = await fetch(url, {
+          method: opts.method || 'GET',
+          headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+          body: opts.body ? JSON.stringify(opts.body) : undefined,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw { status: res.status, data };
+        return data;
+      } catch (e) {
+        log(`HTTP ${opts.method || 'GET'} ${path} failed`, 'error', e.data || e);
+        throw e;
+      }
+    }
+
+    function setPolling(on) {
+      els.pollPill.textContent = on ? 'poll: on (5s / tracker)' : 'poll: off';
+    }
+
+    async function start() {
+      const username = els.username.value.trim();
+      if (!username) { log('Please enter a username', 'warn'); return; }
+      const body = { username, server: els.server.value };
+      const cb = els.callback.value.trim();
+      if (cb) body.callbackUrl = cb;
+      log(`POST /track/start for user ${username} on ${body.server}`);
+      const r = await api('/track/start', { method: 'POST', body });
+      log('Tracker created', 'info', r);
+      const id = (r.trackers && r.trackers[0] && r.trackers[0].id) || null;
+      if (!id) { log('No tracker id returned', 'error'); return; }
+      els.trackerId.value = id;
+      els.btnStop.disabled = false;
+      beginTrackerPolling(id);
+    }
+
+    function beginTrackerPolling(id) {
+      clearInterval(pollTimer);
+      setPolling(true);
+      pollTimer = setInterval(() => pollTracker(id), 5000);
+      pollTracker(id); // immediate
+    }
+
+    async function pollTracker(id) {
+      try {
+        const r = await api(`/track/${encodeURIComponent(id)}`);
+        log(`Tracker ${id} status: ${r.tracker.status}`, 'info', r.tracker);
+        if (r.tracker.status === 'landed' || r.tracker.status === 'stopped' || r.tracker.status === 'not_found') {
+          clearInterval(pollTimer); setPolling(false);
+        }
+      } catch (e) {
+        // If 404, maybe swallowed by route-order bug or tracker expired
+        if (e.status === 404) log('Tracker 404 (wrong id or route order?)', 'warn', e.data);
+        clearInterval(pollTimer); setPolling(false);
+      }
+    }
+
+    async function stop() {
+      const id = els.trackerId.value.trim();
+      if (!id) { log('No tracker id to stop', 'warn'); return; }
+      log(`POST /track/${id}/stop`);
+      const r = await api(`/track/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+      log('Stopped', 'info', r);
+      clearInterval(pollTimer); setPolling(false);
+      els.btnStop.disabled = true;
+    }
+
+    async function showActive() {
+      log('GET /track/active');
+      const r = await api('/track/active');
+      log(`Active trackers: ${r.count}`, 'info', r);
+    }
+
+    async function testSessions() {
+      const s = els.server.value;
+      log(`GET /if-sessions-test?server=${s}`);
+      const r = await api(`/if-sessions-test?server=${encodeURIComponent(s)}`);
+      log('Sessions test', 'info', r);
+      if (r.sessionId) els.sessionId.value = r.sessionId;
+    }
+
+    async function fetchFlights() {
+      const sid = els.sessionId.value.trim();
+      if (!sid) { log('Enter a sessionId first (use Sessions Test)', 'warn'); return; }
+      log(`GET /flights/${sid}`);
+      const r = await api(`/flights/${encodeURIComponent(sid)}`);
+      log(`Flights fetched: ${r.total}`, 'info', r);
+    }
+
+    els.btnStart.addEventListener('click', () => start().catch(() => {}));
+    els.btnStop.addEventListener('click', () => stop().catch(() => {}));
+    els.btnActive.addEventListener('click', () => showActive().catch(() => {}));
+    els.btnSessions.addEventListener('click', () => testSessions().catch(() => {}));
+    els.btnFlights.addEventListener('click', () => fetchFlights().catch(() => {}));
+  </script>
+</body>
+</html>
