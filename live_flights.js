@@ -783,6 +783,24 @@ app.post('/track/:id/stop', (req, res) => {
   res.json({ ok: true, status: t.status });
 });
 
+app.post('/track/:id/delay', (req, res) => {
+  const t = trackers.get(req.params.id);
+  if (!t) return res.status(404).json(err(404, 'tracker not found'));
+
+  // Delay the next poll by 5 minutes from now
+  const delayMs = 5 * 60 * 1000;
+  t.nextPollAt = Date.now() + delayMs;
+  
+  t.history.push({ event: 'delayed_by_test', timestamp: Date.now() });
+  trackers.set(t.id, t);
+  
+  res.json({ 
+    ok: true, 
+    status: t.status, 
+    nextPollAt: new Date(t.nextPollAt).toISOString() 
+  });
+});
+
 /* =========================
  * Startup
  * ========================= */
