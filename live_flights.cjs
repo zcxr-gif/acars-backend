@@ -473,30 +473,37 @@ async function pollOnce() {
       t.lastPolledAt = now;
       let match = null;
 
+      // Prioritize finding by flightId if we are already tracking
       if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
         match = byFlightId.get(t.lastKnownFlight.flightId);
-      } else if (t.status === 'searching') {
+      }
+      
+      // If not found by flightId, or if searching, try by username
+      if (!match && (t.status === 'searching' || t.status === 'tracking')) {
         const userFlights = byUsername.get(t.username.toLowerCase());
         if (userFlights && userFlights.length) {
-            match = userFlights[0];
+            // To handle multiple logins, re-lock onto the newest flight if the old one vanished
+            match = userFlights[0]; 
         }
       }
 
       if (match) {
         const found = simplifyFlight(match);
 
-        if (t.status !== 'tracking') {
+        // If the flightId changes (e.g., user started a new flight), treat it as a new "online" event
+        if (t.status !== 'tracking' || t.lastKnownFlight?.flightId !== found.flightId) {
           t.history.push({ event: 'online', timestamp: now });
           if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server} -> Locking onto flightId: ${found.flightId}`);
           
           console.log(`[ACARS Debug] User found online. Sending 'found' (departure) notification to callback URL for ${t.username}`);
           
           notifyCallback(t, { flight: { ...found, sessionId }, reason: 'user_online' });
-          t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
         }
+        
         t.status = 'tracking';
         t.lastSeenAt = now;
         t.flight = { ...found, sessionId };
+        t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId }; // Always update last known flight
         
         const isInBackground = found.pilotState === 3;
         t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
@@ -506,15 +513,16 @@ async function pollOnce() {
         }
 
       } else {
-        if (now >= t.timeoutAt) {
-          t.status = 'not_found';
-          if (TRACK_LOG) console.log(`[track] TIMEOUT ${t.username} on ${t.server}`);
-          notifyCallback(t, { reason: `timeout_${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h` });
-          continue;
-        }
+        // ==================================================================
+        //
+        // 🛑 START OF BUG FIX AREA 🛑
+        // This entire 'else' block contains the corrected logic.
+        //
+        // ==================================================================
         
-        if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
-            
+        // If we were tracking a flight and it has now disappeared,
+        // it might have landed. This is our primary chance to check.
+        if (t.lastKnownFlight?.flightId) {
           if (TRACK_LOG) console.log(`[track] User ${t.username}'s flight ${t.lastKnownFlight.flightId} disappeared, checking last route for landing...`);
           try {
             const route = await getFlightRoute(t.lastKnownFlight.sessionId, t.lastKnownFlight.flightId);
@@ -531,6 +539,7 @@ async function pollOnce() {
                 const isLowAndSlow = altitudeAgl < LANDED_ALTITUDE_AGL_FT && lastPoint.groundSpeed < LANDED_SPEED_KT;
                 const isNearAirport = distanceKm < LANDED_PROXIMITY_KM;
                 
+                // If it meets landing criteria, we're done!
                 if (isLowAndSlow && isNearAirport) {
                   t.status = 'landed';
                   t.history.push({ event: 'landed', timestamp: now, airport: airport.icao });
@@ -539,7 +548,6 @@ async function pollOnce() {
                   const flightDurationMs = onlineEvent ? now - onlineEvent.timestamp : 0;
                   
                   if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${airport.icao} after ${Math.round(flightDurationMs/60000)}m. Stopping tracker.`);
-                  
                   console.log(`[ACARS Debug] Flight has landed. Sending 'landed' notification to callback URL for ${t.username}`);
 
                   notifyCallback(t, { 
@@ -554,8 +562,9 @@ async function pollOnce() {
                   });
                   
                   trackers.set(t.id, t);
-                  continue; 
+                  continue; // Move to the next tracker
                 } else if (TRACK_LOG) {
+                  // Log why the landing check failed, for debugging.
                   console.log(`[track] ${t.username} is low & slow check failed: nearAirport=${isNearAirport}, AGL=${altitudeAgl.toFixed(0)}ft. Closest: ${airport?.icao} at ${distanceKm?.toFixed(1)}km`);
                 }
               }
@@ -565,23 +574,36 @@ async function pollOnce() {
           }
         }
         
+        // If we've reached this point, the flight either never existed or it disappeared mid-air.
+        
+        // Check for timeout
+        if (now >= t.timeoutAt) {
+          t.status = 'not_found';
+          if (TRACK_LOG) console.log(`[track] TIMEOUT ${t.username} on ${t.server}`);
+          notifyCallback(t, { reason: `timeout_${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h` });
+          continue;
+        }
+        
+        // If the status was 'tracking', this is the first poll where the user is missing.
+        // Log it as an offline event.
         if (t.status === 'tracking') {
           t.history.push({ event: 'offline', timestamp: now });
           if (TRACK_LOG) console.log(`[track] OFFLINE (mid-air) ${t.username} on ${t.server}`);
           notifyCallback(t, { reason: 'user_offline' });
         }
         
+        // Transition to 'searching' state and set a backoff poll interval.
         t.status = 'searching';
         t.flight = null;
 
         let nextInterval = POLL_MS;
         const timeSinceSeen = now - (t.lastSeenAt || t.startedAt);
-        if (timeSinceSeen < 15 * 60 * 1000) {
-          nextInterval = 2 * 60 * 1000;
-        } else if (timeSinceSeen < 6 * 60 * 60 * 1000) {
-          nextInterval = 15 * 60 * 1000;
-        } else {
-          nextInterval = 60 * 60 * 1000;
+        if (timeSinceSeen < 15 * 60 * 1000) { // If recently seen (<15m ago)
+          nextInterval = 2 * 60 * 1000; // Check again in 2m
+        } else if (timeSinceSeen < 6 * 60 * 60 * 1000) { // If seen in last 6h
+          nextInterval = 15 * 60 * 1000; // Check in 15m
+        } else { // It's been a while
+          nextInterval = 60 * 60 * 1000; // Check in 1h
         }
         t.nextPollAt = now + nextInterval;
         if (TRACK_LOG) console.log(`[track] searching ${t.username}, next poll in ${nextInterval/60000}m`);
