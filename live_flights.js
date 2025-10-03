@@ -1,4 +1,4 @@
-// live_flights.js
+// live_flights.js (Corrected & Updated)
 
 /* =========================
  * Imports & setup
@@ -341,6 +341,68 @@ function simplifyFlightRoute(routeData) {
   }));
 }
 
+async function getActiveATC(sessionId) {
+  if (!sessionId) throw new Error('Missing sessionId');
+  const url = `/sessions/${encodeURIComponent(sessionId)}/atc`;
+  try {
+    const { data } = await ifClient.get(url);
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+      err.response = { data: payload };
+      throw err;
+    }
+    return Array.isArray(payload.result) ? payload.result : [];
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+        err.response = { data: payload };
+        throw err;
+      }
+      return Array.isArray(payload.result) ? payload.result : [];
+    }
+    if (status === 404) {
+      return [];
+    }
+    throw e;
+  }
+}
+
+async function getNotams(sessionId) {
+  if (!sessionId) throw new Error('Missing sessionId');
+  const url = `/sessions/${encodeURIComponent(sessionId)}/notams`;
+  try {
+    const { data } = await ifClient.get(url);
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+      err.response = { data: payload };
+      throw err;
+    }
+    return Array.isArray(payload.result) ? payload.result : [];
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+        err.response = { data: payload };
+        throw err;
+      }
+      return Array.isArray(payload.result) ? payload.result : [];
+    }
+    if (status === 404) {
+      return [];
+    }
+    throw e;
+  }
+}
+
 
 /* =========================
  * Tracking engine
@@ -471,27 +533,50 @@ async function pollOnce() {
     for (const t of group) {
       t.attempts += 1;
       t.lastPolledAt = now;
+      
+      // ==================================================================
+      //
+      // 🛑 START OF FLIGHT ID LOCK-IN FIX 🛑
+      // This logic ensures that once a flight is being tracked, the tracker
+      // will ONLY look for that specific flightId. It will NOT fall back
+      // to a username search, preventing it from latching onto a new
+      // flight from the same user.
+      //
+      // ==================================================================
+
       let match = null;
 
-      // Prioritize finding by flightId if we are already tracking
       if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
-        match = byFlightId.get(t.lastKnownFlight.flightId);
+          // If we're already tracking a specific flight, ONLY look for that flight.
+          // Do NOT fall back to a username search.
+          match = byFlightId.get(t.lastKnownFlight.flightId);
+      } else if (t.status === 'searching') {
+          // If we're in the initial "searching" phase, find any flight for the user to begin tracking.
+          const userFlights = byUsername.get(t.username.toLowerCase());
+          if (userFlights && userFlights.length) {
+              match = userFlights[0];
+          }
       }
-      
-      // If not found by flightId, or if searching, try by username
-      if (!match && (t.status === 'searching' || t.status === 'tracking')) {
-        const userFlights = byUsername.get(t.username.toLowerCase());
-        if (userFlights && userFlights.length) {
-            // To handle multiple logins, re-lock onto the newest flight if the old one vanished
-            match = userFlights[0]; 
-        }
-      }
+
+      // ==================================================================
+      //
+      // 🛑 END OF FLIGHT ID LOCK-IN FIX 🛑
+      //
+      // ==================================================================
 
       if (match) {
         const found = simplifyFlight(match);
+        
+        const isFirstOnlineEvent = !t.history.some(h => h.event === 'online');
+        const hasNewFlightId = t.lastKnownFlight && t.lastKnownFlight.flightId !== found.flightId;
 
-        // If the flightId changes (e.g., user started a new flight), treat it as a new "online" event
-        if (t.status !== 'tracking' || t.lastKnownFlight?.flightId !== found.flightId) {
+        // This should now only trigger on the very first time a flight is found for a tracker.
+        if (isFirstOnlineEvent || hasNewFlightId) {
+          if (hasNewFlightId && TRACK_LOG) {
+            // This case is now rare, but could happen if a tracker was manually edited.
+            console.log(`[track] New flight detected for ${t.username}. Old: ${t.lastKnownFlight.flightId}, New: ${found.flightId}. Resetting timer.`);
+          }
+
           t.history.push({ event: 'online', timestamp: now });
           if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server} -> Locking onto flightId: ${found.flightId}`);
           
@@ -503,7 +588,7 @@ async function pollOnce() {
         t.status = 'tracking';
         t.lastSeenAt = now;
         t.flight = { ...found, sessionId };
-        t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId }; // Always update last known flight
+        t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
         
         const isInBackground = found.pilotState === 3;
         t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
@@ -513,13 +598,6 @@ async function pollOnce() {
         }
 
       } else {
-        // ==================================================================
-        //
-        // 🛑 START OF BUG FIX AREA 🛑
-        // This entire 'else' block contains the corrected logic.
-        //
-        // ==================================================================
-        
         // If we were tracking a flight and it has now disappeared,
         // it might have landed. This is our primary chance to check.
         if (t.lastKnownFlight?.flightId) {
@@ -564,8 +642,7 @@ async function pollOnce() {
                   trackers.set(t.id, t);
                   continue; // Move to the next tracker
                 } else if (TRACK_LOG) {
-                  // Log why the landing check failed, for debugging.
-                  console.log(`[track] ${t.username} is low & slow check failed: nearAirport=${isNearAirport}, AGL=${altitudeAgl.toFixed(0)}ft. Closest: ${airport?.icao} at ${distanceKm?.toFixed(1)}km`);
+                  console.log(`[track] ${t.username} landing check failed: isNearAirport=${isNearAirport}, isLowAndSlow=${isLowAndSlow}. AGL=${altitudeAgl.toFixed(0)}ft, GS=${lastPoint.groundSpeed.toFixed(0)}kt. Closest: ${airport?.icao} at ${distanceKm?.toFixed(1)}km`);
                 }
               }
             }
@@ -740,6 +817,42 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
     );
   }
 });
+
+app.get('/atc/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  try {
+    [cite_start]// Retrieve active Air Traffic Control frequencies for a session [cite: 1]
+    const atcFacilities = await getActiveATC(sessionId);
+    res.json({ ok: true, count: atcFacilities.length, atc: atcFacilities });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch ATC facilities', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
+app.get('/notams/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  try {
+    const notams = await getNotams(sessionId);
+    res.json({ ok: true, count: notams.length, notams: notams });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch NOTAMs', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
 
 app.get('/track/active', (req, res) => {
   const active = getActiveTrackers().map(t => ({
