@@ -821,7 +821,7 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
 app.get('/atc/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   try {
-    [cite_start]// Retrieve active Air Traffic Control frequencies for a session [cite: 1]
+    // Retrieve active Air Traffic Control frequencies for a session [cite: 1]
     const atcFacilities = await getActiveATC(sessionId);
     res.json({ ok: true, count: atcFacilities.length, atc: atcFacilities });
   } catch (e) {
