@@ -784,8 +784,11 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
     if (!rawPlan) {
       return res.status(404).json(err(404, 'Flight plan not found. The flight may not exist or has no filed plan.'));
     }
-    const simplifiedPlan = simplifyFlightPlan(rawPlan);
-    res.json({ ok: true, flightId, plan: simplifiedPlan });
+    // ==================================================================
+    // FIX APPLIED HERE: Return the raw plan instead of the simplified one.
+    // This provides the frontend with all the necessary data.
+    // ==================================================================
+    res.json({ ok: true, flightId, plan: rawPlan });
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
@@ -821,7 +824,7 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
 app.get('/atc/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   try {
-    // Retrieve active Air Traffic Control frequencies for a session [cite: 1]
+    // Retrieve active Air Traffic Control frequencies for a session
     const atcFacilities = await getActiveATC(sessionId);
     res.json({ ok: true, count: atcFacilities.length, atc: atcFacilities });
   } catch (e) {
