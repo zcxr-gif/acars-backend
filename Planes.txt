@@ -1,4 +1,4 @@
-GET https://api.infiniteflight.com/public/v2/sessions/{sessionId}/atc
+GET https://api.infiniteflight.com/public/v2/sessions/{sessionId}/flights/{flightId}/flightplan
 
 Authorization
 Include your API key (<apikey>) by either:
@@ -8,23 +8,71 @@ Sending a bearer authorization header with your API key. For example, Authorizat
 Parameters
 Name	Located in	Description	Required	Schema
 sessionId	path	ID of the session returned from the Sessions endpoint	Yes	string (uuid)
+flightId	path	ID of the flight. The flight must be in an active session and have a filed flight plan.	Yes	string (uuid)
 Response
 Sample Response
 {
-    "errorCode": 0,
-    "result": [
+  "errorCode": 0,
+  "result": {
+      "flightPlanId": "4a57de08-a3b1-48ba-a081-adeff0a5b503",
+      "flightId": "0b8cc273-d97d-4223-afac-907d09d8ca8b",
+      "waypoints": [
+        "AMAHE",
+        "L12R"
+      ],
+      "lastUpdate": "2021-01-06 15:35:04Z",
+      "flightPlanItems": [
         {
-            "frequencyId": "c2d7decc-2803-c905-5d88-81bc07626b1f",
-            "userId": "3f8b28bf-bbb1-4024-80ae-2a0ea9b30685",
-            "username": "Cameron",
-            "virtualOrganization": null,
-            "airportName": "LEPA",
-            "type": 1,
-            "latitude": 39.551575,
-            "longitude": 2.736811,
-            "startTime": "2020-10-02 15:47:25Z"
+          "name": "AMAHE",
+          "type": 0,
+          "children": null,
+          "identifier": null,
+          "altitude": -1,
+          "location": {
+            "latitude": 26.92723722,
+            "longitude": -77.47139889,
+            "altitude": 0
+          }
+        },
+        {
+          "name": "L12R",
+          "type": 2,
+          "children": [
+            {
+              "name": "ZESTY",
+              "type": 0,
+              "children": null,
+              "identifier": "ZESTY",
+              "altitude": 4000,
+              "location": {
+                "latitude": 44.97196917,
+                "longitude": -93.429735,
+                "altitude": 0
+              }
+            },
+            {
+              "name": "RW12R",
+              "type": 0,
+              "children": null,
+              "identifier": "RW12R",
+              "altitude": -1,
+              "location": {
+                "latitude": 44.887794494628906,
+                "longitude": -93.23413848876953,
+                "altitude": 0
+              }
+            }
+          ],
+          "identifier": "L12R",
+          "altitude": 0,
+          "location": {
+            "latitude": 0,
+            "longitude": 0,
+            "altitude": 0
+          }
         }
-    ]
+      ]
+    }
 }
 
 LiveAPIResponse
@@ -32,15 +80,25 @@ Response Type: application/json
 
 Name	Type	Description
 errorCode	integer	Enum: "Ok = 0", "UserNotFound = 1", "MissingRequestParameters = 2", "EndpointError = 3", "NotAuthorized = 4", "ServerNotFound = 5", "FlightNotFound = 6", "NoAtisAvailable = 7"
-result	[ActiveATCFacility]	Array of ActiveATCFacility objects
-ActiveATCFacility
+result	[FlightPlanInfo]	Array of FlightPlanInfo objects
+FlightPlanInfo
 Name	Type	Description
-frequencyId	string (uuid)	Unique identifier for the open frequency
-userId	string (uuid)	Unique identifier for the user controlling the frequency
-username	string	The user's forum username if the account is linked. If the account isn't linked, this will be null
-virtualOrganization	string	(not currently in use)
-airportName	string	The 4-character ICAO identifier for the airport. null for center
-type	integer	The type of frequency opened - not all of these are in use. Enum: "Ground = 0", "Tower = 1", "Unicom = 2", "Clearance = 3", "Approach = 4", "Departure = 5", "Center = 6", "ATIS = 7", "Aircraft = 8", "Recorded = 9", "Unknown = 10", "Unused = 11"
-latitude	float	Decimal latitude of the airport
-longitude	float	Decimal longitude of the airport
-startTime	string	Time at which the frequency was opened, in the following format: YYYY-MM-DD HH:mm:ssZ
+flightPlanId	string (uuid)	Unique identifier for the flight plan
+flightId	string (uuid)	Unique identifier for the flight. Associate with the response from the Get Flights endpoint
+waypoints	[string]	Deprecated. An array of waypoint names. You can correlate these with data from the Airport Editing Project
+lastUpdate	string	Last report time of the flight plan in the following format: YYYY-MM-DD HH:mm:ssZ
+flightPlanItems	[FlightPlanItem]	An array of FlightPlanItems which contain waypoint and procedure data for points in a flight plan.
+flightPlanType	integer	Type of flightplan. Enum: VFR = 0,IFR = 1
+FlightPlanItem
+Name	Type	Description
+name	string	Name of the waypoint or the procedure. In the children array, this is the name of a waypoint inside a procedure.
+type	integer	Type of procedure for this item. Only use this if the FlightPlanItem's children field is populated and not null. Enum: "Sid = 0", "STAR = 1", "Approach = 2", "Track = 3", "Unknown = 5"
+children	[FlightPlanItem]	An array of FlightPlanItems containing waypoint information about a procedure. Only present if this item defines a procedure (SID/STAR/Approach/Track). If not, assume this is a Fix/VOR/Custom User Waypoint.
+identifier	string	Identifier for the waypoint or the procedure. This is not unique.
+altitude	integer	The altitude in feet for this waypoint. This is optionally defined by the user and defaults to -1 if not set.
+location	Coordinate	A Coordinate object defining the position of this waypoint.
+Coordinate
+Name	Type	Description
+latitude	double	Current decimal latitude of the aircraft
+longitude	double	Current decimal longitude of the aircraft
+altitude	double	Current decimal altitude of the aircraft

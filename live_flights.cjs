@@ -36,6 +36,10 @@ const LANDED_ALTITUDE_AGL_FT = 1000; // Max altitude Above Ground Level (AGL)
 const LANDED_SPEED_KT = 40;     // Max ground speed (knots)
 const LANDED_PROXIMITY_KM = 10; // Max distance from an airport center (km)
 
+// "Takeoff" heuristics (AGL-based)
+const TAKEOFF_ALTITUDE_AGL_FT = 500; // Min altitude AGL to be considered airborne
+const TAKEOFF_SPEED_KT = 60;      // Min ground speed to be considered airborne
+
 // In-memory tracker store
 const trackers = new Map(); // id -> tracker
 function newId() {
@@ -536,45 +540,42 @@ async function pollOnce() {
       
       // ==================================================================
       //
-      // 🛑 START OF FLIGHT ID LOCK-IN FIX 🛑
-      // This logic ensures that once a flight is being tracked, the tracker
-      // will ONLY look for that specific flightId. It will NOT fall back
-      // to a username search, preventing it from latching onto a new
-      // flight from the same user.
+      // 🛑 START OF RESILIENT FLIGHT TRACKING FIX 🛑
+      // This logic ensures that a new, distinct flight session for a user
+      // resets the flight history to calculate duration correctly.
       //
       // ==================================================================
 
       let match = null;
 
+      // If already tracking, stick to the locked-in flightId
       if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
-          // If we're already tracking a specific flight, ONLY look for that flight.
-          // Do NOT fall back to a username search.
           match = byFlightId.get(t.lastKnownFlight.flightId);
       } else if (t.status === 'searching') {
-          // If we're in the initial "searching" phase, find any flight for the user to begin tracking.
+          // Otherwise, find any active flight for the user
           const userFlights = byUsername.get(t.username.toLowerCase());
           if (userFlights && userFlights.length) {
               match = userFlights[0];
           }
       }
 
-      // ==================================================================
-      //
-      // 🛑 END OF FLIGHT ID LOCK-IN FIX 🛑
-      //
-      // ==================================================================
-
       if (match) {
         const found = simplifyFlight(match);
         
-        const isFirstOnlineEvent = !t.history.some(h => h.event === 'online');
-        const hasNewFlightId = t.lastKnownFlight && t.lastKnownFlight.flightId !== found.flightId;
+        // This is a more explicit check for a new flight after a period of being offline.
+        const isNewFlightAfterOffline = t.status === 'searching' && t.lastKnownFlight?.flightId && t.lastKnownFlight.flightId !== found.flightId;
+        const isFirstEverOnlineEvent = !t.history.some(h => h.event === 'online');
 
-        // This should now only trigger on the very first time a flight is found for a tracker.
-        if (isFirstOnlineEvent || hasNewFlightId) {
-          if (hasNewFlightId && TRACK_LOG) {
-            // This case is now rare, but could happen if a tracker was manually edited.
-            console.log(`[track] New flight detected for ${t.username}. Old: ${t.lastKnownFlight.flightId}, New: ${found.flightId}. Resetting timer.`);
+        // If this is the very first time we've seen the user, or if it's a new flight after they were offline.
+        if (isFirstEverOnlineEvent || isNewFlightAfterOffline) {
+          
+          // If it's a new flight, we must reset the flight-specific history to avoid contamination.
+          if (isNewFlightAfterOffline) {
+            if (TRACK_LOG) {
+              console.log(`[track] ♻️ New flight detected for ${t.username}. Old: ${t.lastKnownFlight.flightId}, New: ${found.flightId}. Resetting flight history.`);
+            }
+            // Keep 'created' and other meta events, but clear flight-specific ones.
+            t.history = t.history.filter(h => h.event === 'created' || h.event === 'stopped');
           }
 
           t.history.push({ event: 'online', timestamp: now });
@@ -589,6 +590,37 @@ async function pollOnce() {
         t.lastSeenAt = now;
         t.flight = { ...found, sessionId };
         t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
+
+        // ==================================================================
+        //
+        // 🚀 START OF TAKEOFF DETECTION 🚀
+        //
+        // ==================================================================
+        const hasTakenOff = t.history.some(h => h.event === 'takeoff');
+
+        if (!hasTakenOff && found.position.lat && found.position.lon) {
+          const { airport, distanceKm } = findNearestAirport(found.position.lat, found.position.lon);
+          if (airport) {
+            const airportElevationFt = airport.elevation_ft || 0;
+            const altitudeAgl = found.position.alt_ft - airportElevationFt;
+            const groundSpeed = found.position.gs_kt;
+
+            const isAirborne = altitudeAgl > TAKEOFF_ALTITUDE_AGL_FT && groundSpeed > TAKEOFF_SPEED_KT;
+
+            if (isAirborne) {
+              t.history.push({ event: 'takeoff', timestamp: now, airport: airport.icao });
+              if (TRACK_LOG) console.log(`[track] TAKEOFF ${t.username} from near ${airport.icao}. Flight timer started.`);
+              
+              console.log(`[ACARS Debug] Flight has taken off. Sending 'takeoff' notification to callback URL for ${t.username}`);
+              notifyCallback(t, { reason: 'flight_takeoff', airport });
+            }
+          }
+        }
+        // ==================================================================
+        //
+        // 🚀 END OF TAKEOFF DETECTION 🚀
+        //
+        // ==================================================================
         
         const isInBackground = found.pilotState === 3;
         t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
@@ -622,8 +654,11 @@ async function pollOnce() {
                   t.status = 'landed';
                   t.history.push({ event: 'landed', timestamp: now, airport: airport.icao });
                   
-                  const onlineEvent = t.history.slice().reverse().find(h => h.event === 'online');
-                  const flightDurationMs = onlineEvent ? now - onlineEvent.timestamp : 0;
+                  const takeoffEvent = t.history.slice().reverse().find(h => h.event === 'takeoff');
+                  const onlineEvent = t.history.slice().reverse().find(h => h.event === 'online'); // Fallback
+                  
+                  const startTime = takeoffEvent?.timestamp || onlineEvent?.timestamp || 0;
+                  const flightDurationMs = startTime ? now - startTime : 0;
                   
                   if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${airport.icao} after ${Math.round(flightDurationMs/60000)}m. Stopping tracker.`);
                   console.log(`[ACARS Debug] Flight has landed. Sending 'landed' notification to callback URL for ${t.username}`);
