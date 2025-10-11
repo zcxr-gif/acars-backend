@@ -1,4 +1,4 @@
-// live_flights.js (Corrected & Updated)
+// live_flights.js (Updated with Route-Based Duration Calculation)
 
 /* =========================
  * Imports & setup
@@ -39,6 +39,9 @@ const LANDED_PROXIMITY_KM = 10; // Max distance from an airport center (km)
 // "Takeoff" heuristics (AGL-based)
 const TAKEOFF_ALTITUDE_AGL_FT = 500; // Min altitude AGL to be considered airborne
 const TAKEOFF_SPEED_KT = 60;      // Min ground speed to be considered airborne
+
+// Time calculation settings
+const MAX_ROUTE_GAP_MS = 5 * 60 * 1000; // 5 minutes: Ignore gaps in /route data longer than this.
 
 // In-memory tracker store
 const trackers = new Map(); // id -> tracker
@@ -138,6 +141,89 @@ function findNearestAirport(lat, lon) {
   
   return { airport: bestAirport, distanceKm: minDistance };
 }
+
+/**
+ * Analyzes a flight's complete route data to calculate the true flight duration,
+ * ignoring long gaps from disconnections.
+ */
+function calculateFlightDurationFromRoute(route, airports) {
+  if (!route || route.length < 2) {
+    return { durationMs: 0, takeoffPoint: null, landingPoint: null, takeoffAirport: null, landingAirport: null };
+  }
+
+  let takeoffPoint = null;
+  let takeoffAirport = null;
+  let landingPoint = null;
+  let landingAirport = null;
+
+  // 1. Find Takeoff Point (first point that is clearly airborne)
+  for (let i = 0; i < route.length; i++) {
+    const point = route[i];
+    const { airport } = findNearestAirport(point.lat, point.lon);
+    if (airport) {
+      const agl = point.altitude - airport.elevation_ft;
+      if (agl > TAKEOFF_ALTITUDE_AGL_FT && point.groundSpeed > TAKEOFF_SPEED_KT) {
+        takeoffPoint = point;
+        takeoffAirport = airport;
+        break; // Found the first airborne point, stop searching
+      }
+    }
+  }
+
+  // 2. Find Landing Point (last point that meets landing criteria)
+  for (let i = route.length - 1; i >= 0; i--) {
+    const point = route[i];
+    const { airport, distanceKm } = findNearestAirport(point.lat, point.lon);
+    if (airport) {
+      const agl = point.altitude - airport.elevation_ft;
+      if (agl < LANDED_ALTITUDE_AGL_FT && point.groundSpeed < LANDED_SPEED_KT && distanceKm < LANDED_PROXIMITY_KM) {
+        landingPoint = point;
+        landingAirport = airport;
+        break; // Found the last landing-like point, stop searching
+      }
+    }
+  }
+
+  // If we couldn't find a clear takeoff or landing, we can't calculate duration.
+  if (!takeoffPoint || !landingPoint) {
+    return { durationMs: 0, takeoffPoint, landingPoint, takeoffAirport, landingAirport };
+  }
+  
+  const takeoffTimestamp = new Date(takeoffPoint.timestamp).getTime();
+  const landingTimestamp = new Date(landingPoint.timestamp).getTime();
+
+  // Filter the route to only include points between the detected takeoff and landing.
+  const flightSegment = route.filter(p => {
+    const ts = new Date(p.timestamp).getTime();
+    return ts >= takeoffTimestamp && ts <= landingTimestamp;
+  });
+  
+  if (flightSegment.length < 2) {
+    return { durationMs: 0, takeoffPoint, landingPoint, takeoffAirport, landingAirport };
+  }
+  
+  // 3. Sum up the durations between consecutive points, ignoring large gaps.
+  let totalDurationMs = 0;
+  for (let i = 0; i < flightSegment.length - 1; i++) {
+    const t1 = new Date(flightSegment[i].timestamp).getTime();
+    const t2 = new Date(flightSegment[i + 1].timestamp).getTime();
+    const delta = t2 - t1;
+
+    // Only add the interval if it's positive and smaller than our defined max gap.
+    if (delta > 0 && delta < MAX_ROUTE_GAP_MS) {
+      totalDurationMs += delta;
+    }
+  }
+
+  return {
+    durationMs: totalDurationMs,
+    takeoffPoint,
+    landingPoint,
+    takeoffAirport,
+    landingAirport,
+  };
+}
+
 
 function unwrap(data) {
   if (!data) return [];
@@ -538,14 +624,6 @@ async function pollOnce() {
       t.attempts += 1;
       t.lastPolledAt = now;
       
-      // ==================================================================
-      //
-      // 🛑 START OF RESILIENT FLIGHT TRACKING FIX 🛑
-      // This logic ensures that a new, distinct flight session for a user
-      // resets the flight history to calculate duration correctly.
-      //
-      // ==================================================================
-
       let match = null;
 
       // If already tracking, stick to the locked-in flightId
@@ -562,19 +640,15 @@ async function pollOnce() {
       if (match) {
         const found = simplifyFlight(match);
         
-        // This is a more explicit check for a new flight after a period of being offline.
         const isNewFlightAfterOffline = t.status === 'searching' && t.lastKnownFlight?.flightId && t.lastKnownFlight.flightId !== found.flightId;
         const isFirstEverOnlineEvent = !t.history.some(h => h.event === 'online');
 
-        // If this is the very first time we've seen the user, or if it's a new flight after they were offline.
         if (isFirstEverOnlineEvent || isNewFlightAfterOffline) {
           
-          // If it's a new flight, we must reset the flight-specific history to avoid contamination.
           if (isNewFlightAfterOffline) {
             if (TRACK_LOG) {
               console.log(`[track] ♻️ New flight detected for ${t.username}. Old: ${t.lastKnownFlight.flightId}, New: ${found.flightId}. Resetting flight history.`);
             }
-            // Keep 'created' and other meta events, but clear flight-specific ones.
             t.history = t.history.filter(h => h.event === 'created' || h.event === 'stopped');
           }
 
@@ -591,11 +665,6 @@ async function pollOnce() {
         t.flight = { ...found, sessionId };
         t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
 
-        // ==================================================================
-        //
-        // 🚀 START OF TAKEOFF DETECTION 🚀
-        //
-        // ==================================================================
         const hasTakenOff = t.history.some(h => h.event === 'takeoff');
 
         if (!hasTakenOff && found.position.lat && found.position.lon) {
@@ -616,11 +685,6 @@ async function pollOnce() {
             }
           }
         }
-        // ==================================================================
-        //
-        // 🚀 END OF TAKEOFF DETECTION 🚀
-        //
-        // ==================================================================
         
         const isInBackground = found.pilotState === 3;
         t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
@@ -633,53 +697,52 @@ async function pollOnce() {
         // If we were tracking a flight and it has now disappeared,
         // it might have landed. This is our primary chance to check.
         if (t.lastKnownFlight?.flightId) {
-          if (TRACK_LOG) console.log(`[track] User ${t.username}'s flight ${t.lastKnownFlight.flightId} disappeared, checking last route for landing...`);
+          if (TRACK_LOG) console.log(`[track] User ${t.username}'s flight ${t.lastKnownFlight.flightId} disappeared, analyzing full route for duration...`);
           try {
             const route = await getFlightRoute(t.lastKnownFlight.sessionId, t.lastKnownFlight.flightId);
             const simplifiedRoute = simplifyFlightRoute(route);
         
-            if (simplifiedRoute.length > 0) {
-              const lastPoint = simplifiedRoute[simplifiedRoute.length - 1];
-              const { airport, distanceKm } = findNearestAirport(lastPoint.lat, lastPoint.lon);
-
-              if (airport) {
-                const airportElevationFt = airport.elevation_ft || 0;
-                const altitudeAgl = lastPoint.altitude - airportElevationFt;
+            if (simplifiedRoute.length > 1) {
+              // ==================================================================
+              //
+              // 📊 START OF FLIGHT DURATION ANALYSIS FROM /ROUTE 📊
+              // This replaces the simple last-point check with a full analysis of the
+              // flight route to accurately calculate flight time while ignoring gaps.
+              //
+              // ==================================================================
+              const flightAnalysis = calculateFlightDurationFromRoute(simplifiedRoute, airports);
+              
+              // We need a valid landing airport from the analysis to confirm the flight is over.
+              if (flightAnalysis.landingAirport) {
+                t.status = 'landed';
+                t.history.push({ event: 'landed', timestamp: now, airport: flightAnalysis.landingAirport.icao, method: 'route_analysis' });
                 
-                const isLowAndSlow = altitudeAgl < LANDED_ALTITUDE_AGL_FT && lastPoint.groundSpeed < LANDED_SPEED_KT;
-                const isNearAirport = distanceKm < LANDED_PROXIMITY_KM;
-                
-                // If it meets landing criteria, we're done!
-                if (isLowAndSlow && isNearAirport) {
-                  t.status = 'landed';
-                  t.history.push({ event: 'landed', timestamp: now, airport: airport.icao });
-                  
-                  const takeoffEvent = t.history.slice().reverse().find(h => h.event === 'takeoff');
-                  const onlineEvent = t.history.slice().reverse().find(h => h.event === 'online'); // Fallback
-                  
-                  const startTime = takeoffEvent?.timestamp || onlineEvent?.timestamp || 0;
-                  const flightDurationMs = startTime ? now - startTime : 0;
-                  
-                  if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${airport.icao} after ${Math.round(flightDurationMs/60000)}m. Stopping tracker.`);
-                  console.log(`[ACARS Debug] Flight has landed. Sending 'landed' notification to callback URL for ${t.username}`);
+                if (TRACK_LOG) console.log(`[track] LANDED (via route analysis) ${t.username} at ${flightAnalysis.landingAirport.icao}. Calculated flight time: ${Math.round(flightAnalysis.durationMs/60000)}m. Stopping tracker.`);
+                console.log(`[ACARS Debug] Flight has landed. Sending 'landed' notification with route-based duration for ${t.username}`);
 
-                  notifyCallback(t, { 
-                    reason: 'flight_landed', 
-                    flightDurationMs, 
-                    lastPosition: lastPoint,
-                    airport: {
-                      icao: airport.icao,
-                      name: airport.name,
-                      distanceKm: distanceKm,
-                    }
-                  });
-                  
-                  trackers.set(t.id, t);
-                  continue; // Move to the next tracker
-                } else if (TRACK_LOG) {
-                  console.log(`[track] ${t.username} landing check failed: isNearAirport=${isNearAirport}, isLowAndSlow=${isLowAndSlow}. AGL=${altitudeAgl.toFixed(0)}ft, GS=${lastPoint.groundSpeed.toFixed(0)}kt. Closest: ${airport?.icao} at ${distanceKm?.toFixed(1)}km`);
-                }
+                notifyCallback(t, { 
+                  reason: 'flight_landed', 
+                  flightDurationMs: flightAnalysis.durationMs,
+                  takeoffDetails: {
+                      airport: flightAnalysis.takeoffAirport,
+                      timestamp: flightAnalysis.takeoffPoint?.timestamp,
+                  },
+                  landingDetails: {
+                      airport: flightAnalysis.landingAirport,
+                      timestamp: flightAnalysis.landingPoint?.timestamp,
+                  },
+                });
+                
+                trackers.set(t.id, t);
+                continue; // Move to the next tracker
+              } else if (TRACK_LOG) {
+                console.log(`[track] ${t.username} route analysis did not confirm landing. No valid landing point found in route data.`);
               }
+              // ==================================================================
+              //
+              // 📊 END OF FLIGHT DURATION ANALYSIS FROM /ROUTE 📊
+              //
+              // ==================================================================
             }
           } catch(e) {
             if (TRACK_LOG) console.warn(`[track] Failed to get route for ${t.username}: ${e.message}`);
@@ -697,14 +760,12 @@ async function pollOnce() {
         }
         
         // If the status was 'tracking', this is the first poll where the user is missing.
-        // Log it as an offline event.
         if (t.status === 'tracking') {
           t.history.push({ event: 'offline', timestamp: now });
           if (TRACK_LOG) console.log(`[track] OFFLINE (mid-air) ${t.username} on ${t.server}`);
           notifyCallback(t, { reason: 'user_offline' });
         }
         
-        // Transition to 'searching' state and set a backoff poll interval.
         t.status = 'searching';
         t.flight = null;
 
@@ -819,10 +880,6 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
     if (!rawPlan) {
       return res.status(404).json(err(404, 'Flight plan not found. The flight may not exist or has no filed plan.'));
     }
-    // ==================================================================
-    // FIX APPLIED HERE: Return the raw plan instead of the simplified one.
-    // This provides the frontend with all the necessary data.
-    // ==================================================================
     res.json({ ok: true, flightId, plan: rawPlan });
   } catch (e) {
     const status = e?.response?.status || 500;
@@ -859,7 +916,6 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
 app.get('/atc/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   try {
-    // Retrieve active Air Traffic Control frequencies for a session
     const atcFacilities = await getActiveATC(sessionId);
     res.json({ ok: true, count: atcFacilities.length, atc: atcFacilities });
   } catch (e) {
