@@ -1,4 +1,4 @@
-// live_flights.js (Updated with Route-Based Duration Calculation)
+// live_flights.js (Updated with Aircraft & Livery Name Lookup)
 
 /* =========================
  * Imports & setup
@@ -62,9 +62,11 @@ const ifClient = axios.create({
 });
 
 /* =========================
- * Airports data (robust loader + normalization)
+ * Data Loaders (Airports, Aircraft & Liveries)
  * ========================= */
 let airports = [];
+const aircraftNameMap = new Map(); // Map to store aircraft names (ID -> Name)
+const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
 
 function normalizeAirport(a) {
   return {
@@ -100,6 +102,41 @@ function normalizeAirport(a) {
     airports = [];
   }
 })();
+
+// Load aircraft names on startup
+(async function loadAircraftNames() {
+  try {
+    if (!IF_API_KEY) {
+      console.warn('⚠️  Skipping aircraft name load: API key is missing.');
+      return;
+    }
+    const aircraftList = await getAircraftList();
+    for (const aircraft of aircraftList) {
+      aircraftNameMap.set(aircraft.id, aircraft.name);
+    }
+    console.log(`✅ Loaded ${aircraftNameMap.size} aircraft names.`);
+  } catch (e) {
+    console.error('❌ Could not load aircraft names. Names will be unavailable.', e.message);
+  }
+})();
+
+// Load livery names on startup
+(async function loadLiveryNames() {
+  try {
+    if (!IF_API_KEY) {
+      console.warn('⚠️  Skipping livery name load: API key is missing.');
+      return;
+    }
+    const liveryList = await getLiveryList();
+    for (const livery of liveryList) {
+      liveryNameMap.set(livery.id, livery.name);
+    }
+    console.log(`✅ Loaded ${liveryNameMap.size} livery names.`);
+  } catch (e) {
+    console.error('❌ Could not load livery names. Names will be unavailable.', e.message);
+  }
+})();
+
 
 /* =========================
  * Helpers
@@ -239,6 +276,24 @@ function err(status, message, extra = {}) {
 /* =========================
  * IF API Wrappers
  * ========================= */
+async function getAircraftList() {
+  const { data } = await ifClient.get('/aircraft');
+  const items = unwrap(data);
+  return items.map((a) => ({
+    id: a?.id || null,
+    name: a?.name || '',
+  })).filter(a => a.id && a.name);
+}
+
+async function getLiveryList() {
+  const { data } = await ifClient.get('/aircraft/liveries');
+  const items = unwrap(data);
+  return items.map((l) => ({
+    id: l?.id || null,
+    name: l?.liveryName || '',
+  })).filter(l => l.id && l.name);
+}
+
 async function getSessions() {
   const { data } = await ifClient.get('/sessions');
   const items = unwrap(data);
@@ -301,6 +356,8 @@ async function getFlightsForSession(sessionId) {
 }
 
 function simplifyFlight(f) {
+  const aircraftId = f?.aircraftId || null;
+  const liveryId = f?.liveryId || null;
   return {
     flightId: f?.flightId || null,
     userId: f?.userId || null,
@@ -319,8 +376,10 @@ function simplifyFlight(f) {
       lastReportMs: f?.lastReport ? Date.parse(f.lastReport) || null : null,
     },
     aircraft: {
-      aircraftId: f?.aircraftId || null,
-      liveryId: f?.liveryId || null,
+      aircraftId: aircraftId,
+      liveryId: liveryId,
+      aircraftName: aircraftNameMap.get(aircraftId) || null,
+      liveryName: liveryNameMap.get(liveryId) || null,
     },
     pilotState: typeof f?.pilotState === 'number' ? f.pilotState : null,
     isConnected: typeof f?.isConnected === 'boolean' ? f.isConnected : null,
