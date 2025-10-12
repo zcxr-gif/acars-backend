@@ -1,4 +1,4 @@
-// live_flights.js (Updated with Aircraft & Livery Name Lookup)
+// live_flights.js (Updated with User Stats & Grade Endpoints)
 
 /* =========================
  * Imports & setup
@@ -552,6 +552,72 @@ async function getNotams(sessionId) {
   }
 }
 
+async function getUserStats(params) {
+  const url = '/users';
+  if (!params || (!params.userIds && !params.discourseNames && !params.userHashes)) {
+    throw new Error('At least one search parameter (userIds, discourseNames, userHashes) is required.');
+  }
+
+  try {
+    // This is a POST request, so we send the params in the body
+    const { data } = await ifClient.post(url, params);
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+      err.response = { data: payload };
+      throw err;
+    }
+    return Array.isArray(payload.result) ? payload.result : [];
+  } catch (e) {
+    const status = e?.response?.status;
+    // Replicate the retry logic from your other functions for consistency
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.post(url, params, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+        err.response = { data: payload };
+        throw err;
+      }
+      return Array.isArray(payload.result) ? payload.result : [];
+    }
+    throw e;
+  }
+}
+
+async function getUserGrade(userId) {
+  if (!userId) throw new Error('Missing userId');
+  const url = `/users/${encodeURIComponent(userId)}`;
+  try {
+    const { data } = await ifClient.get(url);
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+      if (payload.errorCode === 1) return null; // UserNotFound
+      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+      err.response = { data: payload };
+      throw err;
+    }
+    return payload.result || null;
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+        if (payload.errorCode === 1) return null; // UserNotFound
+        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+        err.response = { data: payload };
+        throw err;
+      }
+      return payload.result || null;
+    }
+    if (status === 404) {
+      return null;
+    }
+    throw e;
+  }
+}
+
 
 /* =========================
  * Tracking engine
@@ -999,6 +1065,53 @@ app.get('/notams/:sessionId', async (req, res) => {
     const apiError = e?.response?.data;
     res.status(status).json(
       err(status, 'Failed to fetch NOTAMs', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
+app.post('/users', async (req, res) => {
+  const { userIds, discourseNames, userHashes } = req.body;
+
+  // Validate that at least one valid array is present in the request body
+  if (
+    (!Array.isArray(userIds) || userIds.length === 0) &&
+    (!Array.isArray(discourseNames) || discourseNames.length === 0) &&
+    (!Array.isArray(userHashes) || userHashes.length === 0)
+  ) {
+    return res.status(400).json(err(400, 'Request body must contain at least one of the following non-empty arrays: userIds, discourseNames, userHashes'));
+  }
+
+  try {
+    const stats = await getUserStats({ userIds, discourseNames, userHashes });
+    res.json({ ok: true, count: stats.length, users: stats });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch user stats', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
+app.get('/users/:userId/grade', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const gradeInfo = await getUserGrade(userId);
+    if (!gradeInfo) {
+      return res.status(404).json(err(404, 'User not found or has no grade information.'));
+    }
+    res.json({ ok: true, userId, gradeInfo });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch user grade information', {
         apiErrorCode: apiError?.errorCode,
         detail: e?.message
       })
