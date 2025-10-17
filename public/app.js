@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
-    const API_BASE_URL = 'https://acars-backend-uxln.onrender.com';
+    const API_BASE_URL = 'https://site--acars-backend--6dmjph8ltlhv.code.run';
     const trackersContainer = document.getElementById('trackers-container');
     const startTrackerForm = document.getElementById('start-tracker-form');
     const errorMessage = document.getElementById('error-message');
