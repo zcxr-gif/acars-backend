@@ -24,7 +24,7 @@ const IF_API_BASE_URL = (process.env.IF_API_BASE_URL || 'https://api.infinitefli
 const RAW_IF_KEY = process.env.INFINITE_FLIGHT_API_KEY || process.env.IF_API_KEY || '';
 const IF_API_KEY = RAW_IF_KEY.trim();
 
-const POLL_MS = parseInt(process.env.POLL_MS || '1500', 10); // 1.5s (for active flights) - Formerly 3s
+const POLL_MS = parseInt(process.env.POLL_MS || '500', 10); // 1.5s (for active flights) - Formerly 3s
 const BACKGROUND_POLL_MS = parseInt(process.env.BACKGROUND_POLL_MS || (15 * 60 * 1000), 10); // 15 minutes (for backgrounded flights)
 const SEARCH_TIMEOUT_MS = parseInt(process.env.SEARCH_TIMEOUT_MS || (48 * 60 * 60 * 1000), 10); // 48 hours
 const DEFAULT_IF_SERVER = (process.env.DEFAULT_IF_SERVER || 'Expert Server').trim();
