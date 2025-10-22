@@ -44,7 +44,7 @@ const BACKGROUND_POLL_MS = parseInt(process.env.BACKGROUND_POLL_MS || (15 * 60 *
 // ⬇️ NEW: Poll interval for broadcasting ALL flights to the front-end
 // WARNING: 500ms is EXTREMELY fast and may get you rate-limited or blocked by the IF API.
 // A safer value is 3000-5000ms (3-5 seconds).
-const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '3000', 10);
+const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '500', 10);
 
 const SEARCH_TIMEOUT_MS = parseInt(process.env.SEARCH_TIMEOUT_MS || (48 * 60 * 60 * 1000), 10); // 48 hours
 const DEFAULT_IF_SERVER = (process.env.DEFAULT_IF_SERVER || 'Expert Server').trim();
