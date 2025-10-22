@@ -911,12 +911,17 @@ async function pollOnce() {
   }
 }
 
-// Start the polling loop
-setInterval(() => {
-  pollOnce().catch(e => {
-    if (TRACK_LOG) console.error('[track] pollOnce error', e?.message);
-  });
-}, POLL_MS);
+(function runPoller() {
+  pollOnce()
+    .catch(e => {
+      // Log any errors from this poll run
+      if (TRACK_LOG) console.error('[track] pollOnce error', e?.message);
+    })
+    .finally(() => {
+      // Schedule the *next* poll only after this one is complete
+      setTimeout(runPoller, POLL_MS);
+    });
+})();
 
 
 /* =========================
