@@ -1,4 +1,4 @@
-// live_flights.js (Updated with User Stats & Grade Endpoints)
+// live_flights.js (Updated with Socket.IO Broadcaster)
 
 /* =========================
  * Imports & setup
@@ -10,7 +10,20 @@ const axios = require('axios');
 const cors = require('cors');
 require('dotenv').config();
 
+// ⬇️ 1. IMPORT HTTP and SOCKET.IO
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+
 const app = express();
+// ⬇️ 2. CREATE HTTP SERVER & ATTACH SOCKET.IO
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: "*", // Adjust for production
+    methods: ["GET", "POST"]
+  }
+});
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -24,8 +37,15 @@ const IF_API_BASE_URL = (process.env.IF_API_BASE_URL || 'https://api.infinitefli
 const RAW_IF_KEY = process.env.INFINITE_FLIGHT_API_KEY || process.env.IF_API_KEY || '';
 const IF_API_KEY = RAW_IF_KEY.trim();
 
-const POLL_MS = parseInt(process.env.POLL_MS || '500', 10); // 1.5s (for active flights) - Formerly 3s
+// ⬇️ MODIFIED: Poll interval for the ACARS/user-tracking engine
+const POLL_MS = parseInt(process.env.POLL_MS || '30000', 10); // 30s (for active flight *tracking*)
 const BACKGROUND_POLL_MS = parseInt(process.env.BACKGROUND_POLL_MS || (15 * 60 * 1000), 10); // 15 minutes (for backgrounded flights)
+
+// ⬇️ NEW: Poll interval for broadcasting ALL flights to the front-end
+// WARNING: 500ms is EXTREMELY fast and may get you rate-limited or blocked by the IF API.
+// A safer value is 3000-5000ms (3-5 seconds).
+const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '3000', 10);
+
 const SEARCH_TIMEOUT_MS = parseInt(process.env.SEARCH_TIMEOUT_MS || (48 * 60 * 60 * 1000), 10); // 48 hours
 const DEFAULT_IF_SERVER = (process.env.DEFAULT_IF_SERVER || 'Expert Server').trim();
 const DEFAULT_CALLBACK_URL = (process.env.TRACK_CALLBACK_URL || '').trim();
@@ -618,9 +638,101 @@ async function getUserGrade(userId) {
   }
 }
 
+/* =========================
+ * Socket.IO Connection Handling (NEW)
+ * ========================= */
+
+io.on('connection', (socket) => {
+  console.log(`[socket] ✅ User connected: ${socket.id}`);
+
+  // Listen for a client to request a specific server's flight data
+  socket.on('join_server_room', (serverName) => {
+    if (!serverName) return;
+    const roomName = String(serverName).toLowerCase();
+    socket.join(roomName);
+    console.log(`[socket] 🚪 ${socket.id} joined room: ${roomName}`);
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`[socket] ❌ User disconnected: ${socket.id}`);
+  });
+});
+
 
 /* =========================
- * Tracking engine
+ * All-Flights Broadcaster (NEW)
+ * ========================= */
+
+// This is a new, separate poller just for broadcasting all flights to front-ends
+async function pollAndBroadcastFlights() {
+  let sessions = [];
+  try {
+    sessions = await getSessions();
+  } catch (e) {
+    console.warn('[broadcast] Sessions fetch failed', e?.message);
+    return; // Try again on next poll
+  }
+
+  // You can modify this to loop through *all* sessions, but for now
+  // we'll just broadcast the default server (e.g., "Expert Server")
+  // You could also broadcast all 3 main servers (Expert, Training, Casual)
+  
+  const serverNames = [DEFAULT_IF_SERVER]; 
+  // Example for more: const serverNames = ["Expert Server", "Training Server", "Casual Server"];
+  
+  for (const serverName of serverNames) {
+    const sessionId = pickSessionIdByName(sessions, serverName);
+
+    if (!sessionId) {
+      if (TRACK_LOG) console.warn(`[broadcast] No sessionId for server "${serverName}"`);
+      continue; // Skip this server
+    }
+
+    const roomName = serverName.toLowerCase();
+    // Only fetch data if someone is actually listening in that room
+    const room = io.sockets.adapter.rooms.get(roomName);
+    if (!room || room.size === 0) {
+      // if (TRACK_LOG) console.log(`[broadcast] 😴 Skipping ${serverName}, no clients in room.`);
+      continue;
+    }
+
+    try {
+      const flights = await getFlightsForSession(sessionId);
+      const simplifiedFlights = flights.map(simplifyFlight);
+      
+      // 🚀 EMIT TO THE ROOM
+      // Send data only to clients who joined this server's room
+      io.to(roomName).emit('all_flights_update', {
+        server: serverName,
+        sessionId: sessionId,
+        count: simplifiedFlights.length,
+        flights: simplifiedFlights,
+        timestamp: new Date().toISOString()
+      });
+      
+      if (TRACK_LOG) {
+          console.log(`[broadcast] 📡 Sent ${simplifiedFlights.length} flights to ${room.size} client(s) for ${serverName}`);
+      }
+
+    } catch (e) {
+      console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
+    }
+  }
+}
+
+// Start the new broadcaster loop
+(function runBroadcastPoller() {
+  pollAndBroadcastFlights()
+    .catch(e => console.error('[broadcast] Unhandled poll error', e?.message))
+    .finally(() => {
+      // Schedule the next poll using the new fast interval
+      setTimeout(runBroadcastPoller, ALL_FLIGHTS_POLL_MS);
+    });
+})();
+
+
+/* =========================
+ * Tracking engine (UNCHANGED - Runs in parallel)
  * ========================= */
 async function notifyCallback(tracker, payload) {
   const url = tracker.callbackUrl || DEFAULT_CALLBACK_URL;
@@ -911,6 +1023,7 @@ async function pollOnce() {
   }
 }
 
+// This is the original poller loop for the tracking engine
 (function runPoller() {
   pollOnce()
     .catch(e => {
@@ -919,6 +1032,7 @@ async function pollOnce() {
     })
     .finally(() => {
       // Schedule the *next* poll only after this one is complete
+      // It uses the (now 30-second) POLL_MS variable
       setTimeout(runPoller, POLL_MS);
     });
 })();
@@ -1182,7 +1296,7 @@ app.get('/track/:id', (req, res) => {
 
 app.post('/track/:id/stop', (req, res) => {
   const t = trackers.get(req.params.id);
-  if (!t) return res.status(404).json(err(404, 'tracker not found'));
+  if (!t) return res.status(44).json(err(404, 'tracker not found'));
   t.status = 'stopped';
   t.history.push({ event: 'stopped', timestamp: Date.now() });
   trackers.set(t.id, t);
@@ -1211,10 +1325,13 @@ app.post('/track/:id/delay', (req, res) => {
 /* =========================
  * Startup
  * ========================= */
-app.listen(PORT, () => {
-  console.log(`✅ Live Flight Tracker ready: http://localhost:${PORT}`);
+
+// ⬇️ 3. Change app.listen to httpServer.listen
+httpServer.listen(PORT, () => {
+  console.log(`✅ Live Flight Tracker (with Sockets) ready: http://localhost:${PORT}`);
   console.log('🌐 Base URL:', IF_API_BASE_URL);
   console.log(`🔁 Tracking: poll=${POLL_MS}ms background=${BACKGROUND_POLL_MS}ms timeout=${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h`);
+  console.log(`📡 Broadcasting all flights every ${ALL_FLIGHTS_POLL_MS}ms (WARNING: 500ms is very fast!)`);
   console.log(`🛩️  Default IF Server: "${DEFAULT_IF_SERVER}"`);
   if (!IF_API_KEY) {
     console.warn('⚠️  IF API key is missing. Set INFINITE_FLIGHT_API_KEY in your .env file.');
