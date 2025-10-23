@@ -1,4 +1,4 @@
-// live_flights.js (Updated with Caching)
+// live_flights.js (Updated with Caching and Robust Takeoff/Landing/Duration)
 
 /* =========================
  * Imports & setup
@@ -51,17 +51,17 @@ const DEFAULT_IF_SERVER = (process.env.DEFAULT_IF_SERVER || 'Expert Server').tri
 const DEFAULT_CALLBACK_URL = (process.env.TRACK_CALLBACK_URL || '').trim();
 const TRACK_LOG = process.env.TRACK_LOG === '1';
 
-// "Landed" heuristics (AGL-based)
-const LANDED_ALTITUDE_AGL_FT = 1000; // Max altitude Above Ground Level (AGL)
-const LANDED_SPEED_KT = 40;     // Max ground speed (knots)
-const LANDED_PROXIMITY_KM = 10; // Max distance from an airport center (km)
+// ⬇️ MODIFIED: "Landed" heuristics (Speed/Location-based)
+const LANDED_SPEED_KT = 40;     // Max ground speed (knots) to be considered landed
 
-// "Takeoff" heuristics (AGL-based)
-const TAKEOFF_ALTITUDE_AGL_FT = 500; // Min altitude AGL to be considered airborne
-const TAKEOFF_SPEED_KT = 60;      // Min ground speed to be considered airborne
+// ⬇️ MODIFIED: "Takeoff" heuristics (Speed/Location-based)
+const TAKEOFF_SPEED_KT = 60;      // Min ground speed (knots) to be considered airborne/taking off
+
+// ⬇️ MODIFIED: Shared proximity check
+const AIRPORT_PROXIMITY_KM = 10; // Max distance from an airport center (km) for takeoff/landing detection
 
 // Time calculation settings
-const MAX_ROUTE_GAP_MS = 5 * 60 * 1000; // 5 minutes: Ignore gaps in /route data longer than this.
+const MAX_ROUTE_GAP_MS = 10 * 60 * 1000; // 5 minutes: Ignore gaps in /route data longer than this.
 
 // In-memory tracker store
 const trackers = new Map(); // id -> tracker
@@ -174,7 +174,7 @@ function normalizeAirport(a) {
 /* =========================
  * Helpers
  * ========================= */
-// ... (getDistanceKm, findNearestAirport, calculateFlightDurationFromRoute, unwrap, err functions are unchanged) ...
+// ... (getDistanceKm, findNearestAirport functions are unchanged) ...
 /**
  * Calculates the distance between two coordinates in kilometers using the Haversine formula.
  */
@@ -213,8 +213,10 @@ function findNearestAirport(lat, lon) {
 }
 
 /**
+ * ⬇️ REPLACED FUNCTION
  * Analyzes a flight's complete route data to calculate the true flight duration,
  * ignoring long gaps from disconnections.
+ * This is the "robust time keeper" function.
  */
 function calculateFlightDurationFromRoute(route, airports) {
   if (!route || route.length < 2) {
@@ -226,13 +228,13 @@ function calculateFlightDurationFromRoute(route, airports) {
   let landingPoint = null;
   let landingAirport = null;
 
-  // 1. Find Takeoff Point (first point that is clearly airborne)
+  // 1. Find Takeoff Point (first point near an airport matching takeoff speed)
   for (let i = 0; i < route.length; i++) {
     const point = route[i];
-    const { airport } = findNearestAirport(point.lat, point.lon);
+    const { airport, distanceKm } = findNearestAirport(point.lat, point.lon); // Get distance
     if (airport) {
-      const agl = point.altitude - airport.elevation_ft;
-      if (agl > TAKEOFF_ALTITUDE_AGL_FT && point.groundSpeed > TAKEOFF_SPEED_KT) {
+      // ⬇️ MODIFIED: Removed AGL check, added proximity check
+      if (point.groundSpeed > TAKEOFF_SPEED_KT && distanceKm < AIRPORT_PROXIMITY_KM) {
         takeoffPoint = point;
         takeoffAirport = airport;
         break; // Found the first airborne point, stop searching
@@ -240,13 +242,13 @@ function calculateFlightDurationFromRoute(route, airports) {
     }
   }
 
-  // 2. Find Landing Point (last point that meets landing criteria)
+  // 2. Find Landing Point (last point near an airport matching landing speed)
   for (let i = route.length - 1; i >= 0; i--) {
     const point = route[i];
     const { airport, distanceKm } = findNearestAirport(point.lat, point.lon);
     if (airport) {
-      const agl = point.altitude - airport.elevation_ft;
-      if (agl < LANDED_ALTITUDE_AGL_FT && point.groundSpeed < LANDED_SPEED_KT && distanceKm < LANDED_PROXIMITY_KM) {
+      // ⬇️ MODIFIED: Removed AGL check, updated constant
+      if (point.groundSpeed < LANDED_SPEED_KT && distanceKm < AIRPORT_PROXIMITY_KM) {
         landingPoint = point;
         landingAirport = airport;
         break; // Found the last landing-like point, stop searching
@@ -273,6 +275,8 @@ function calculateFlightDurationFromRoute(route, airports) {
   }
   
   // 3. Sum up the durations between consecutive points, ignoring large gaps.
+  //    This logic explicitly handles disconnections (gaps > MAX_ROUTE_GAP_MS are ignored)
+  //    and only counts time within the flightSegment (from takeoff to landing).
   let totalDurationMs = 0;
   for (let i = 0; i < flightSegment.length - 1; i++) {
     const t1 = new Date(flightSegment[i].timestamp).getTime();
@@ -888,7 +892,7 @@ function getActiveTrackers() {
 /**
  * ⬇️ REPLACED FUNCTION
  * This function now reads session and flight data from the `apiCache`
- * instead of fetching it from the API.
+ * and uses robust speed/proximity-based takeoff detection.
  */
 async function pollOnce() {
   const now = Date.now();
@@ -990,14 +994,19 @@ async function pollOnce() {
 
         const hasTakenOff = t.history.some(h => h.event === 'takeoff');
 
+        // ==================================
+        // ⬇️ TAKEOFF LOGIC MODIFIED HERE ⬇️
+        // ==================================
         if (!hasTakenOff && found.position.lat && found.position.lon) {
           const { airport, distanceKm } = findNearestAirport(found.position.lat, found.position.lon);
           if (airport) {
-            const airportElevationFt = airport.elevation_ft || 0;
-            const altitudeAgl = found.position.alt_ft - airportElevationFt;
+            // AGL calculation is no longer needed
+            // const airportElevationFt = airport.elevation_ft || 0;
+            // const altitudeAgl = found.position.alt_ft - airportElevationFt;
             const groundSpeed = found.position.gs_kt;
 
-            const isAirborne = altitudeAgl > TAKEOFF_ALTITUDE_AGL_FT && groundSpeed > TAKEOFF_SPEED_KT;
+            // MODIFIED: Check is now speed + proximity, no altitude
+            const isAirborne = groundSpeed > TAKEOFF_SPEED_KT && distanceKm < AIRPORT_PROXIMITY_KM;
 
             if (isAirborne) {
               t.history.push({ event: 'takeoff', timestamp: now, airport: airport.icao });
@@ -1008,6 +1017,9 @@ async function pollOnce() {
             }
           }
         }
+        // ==================================
+        // ⬆️ TAKEOFF LOGIC MODIFIED END ⬆️
+        // ==================================
         
         const isInBackground = found.pilotState === 3;
         t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
@@ -1029,10 +1041,13 @@ async function pollOnce() {
               // ==================================================================
               //
               // 📊 START OF FLIGHT DURATION ANALYSIS FROM /ROUTE 📊
-              // This replaces the simple last-point check with a full analysis of the
-              // flight route to accurately calculate flight time while ignoring gaps.
+              // This function (calculateFlightDurationFromRoute) is the "robust time keeper".
+              // It finds the exact takeoff/landing points from the route data
+              // and sums the time between them, ignoring disconnection gaps.
               //
               // ==================================================================
+              
+              // This function now uses the new speed/proximity logic
               const flightAnalysis = calculateFlightDurationFromRoute(simplifiedRoute, airports);
               
               // We need a valid landing airport from the analysis to confirm the flight is over.
