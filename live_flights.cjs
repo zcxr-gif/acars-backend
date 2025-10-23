@@ -1,4 +1,4 @@
-// live_flights.js (Updated with Socket.IO Broadcaster)
+// live_flights.js (Updated with Caching)
 
 /* =========================
  * Imports & setup
@@ -44,7 +44,7 @@ const BACKGROUND_POLL_MS = parseInt(process.env.BACKGROUND_POLL_MS || (15 * 60 *
 // ⬇️ NEW: Poll interval for broadcasting ALL flights to the front-end
 // WARNING: 500ms is EXTREMELY fast and may get you rate-limited or blocked by the IF API.
 // A safer value is 3000-5000ms (3-5 seconds).
-const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '1000', 10);
+const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '3000', 10);
 
 const SEARCH_TIMEOUT_MS = parseInt(process.env.SEARCH_TIMEOUT_MS || (48 * 60 * 60 * 1000), 10); // 48 hours
 const DEFAULT_IF_SERVER = (process.env.DEFAULT_IF_SERVER || 'Expert Server').trim();
@@ -70,8 +70,20 @@ function newId() {
 }
 
 /* =========================
+ * NEW: In-Memory API Cache
+ * ========================= */
+const apiCache = {
+  sessions: [],
+  flights: new Map(), // sessionId -> { server, sessionId, count, flights, rawFlights, timestamp }
+  lastSessionsUpdate: 0
+};
+// Cache sessions for 1 minute to prevent spamming the /sessions endpoint
+const SESSIONS_CACHE_TTL_MS = 60 * 1000; 
+
+/* =========================
  * Axios client
  * ========================= */
+// ... (this section is unchanged) ...
 const ifClient = axios.create({
   baseURL: IF_API_BASE_URL,
   timeout: 15000,
@@ -84,6 +96,7 @@ const ifClient = axios.create({
 /* =========================
  * Data Loaders (Airports, Aircraft & Liveries)
  * ========================= */
+// ... (this section is unchanged) ...
 let airports = [];
 const aircraftNameMap = new Map(); // Map to store aircraft names (ID -> Name)
 const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
@@ -161,7 +174,7 @@ function normalizeAirport(a) {
 /* =========================
  * Helpers
  * ========================= */
-
+// ... (getDistanceKm, findNearestAirport, calculateFlightDurationFromRoute, unwrap, err functions are unchanged) ...
 /**
  * Calculates the distance between two coordinates in kilometers using the Haversine formula.
  */
@@ -293,10 +306,12 @@ function err(status, message, extra = {}) {
   return { ok: false, error: { status, message, ...extra } };
 }
 
+
 /* =========================
  * IF API Wrappers
  * ========================= */
 async function getAircraftList() {
+// ... (this function is unchanged) ...
   const { data } = await ifClient.get('/aircraft');
   const items = unwrap(data);
   return items.map((a) => ({
@@ -306,6 +321,7 @@ async function getAircraftList() {
 }
 
 async function getLiveryList() {
+// ... (this function is unchanged) ...
   const { data } = await ifClient.get('/aircraft/liveries');
   const items = unwrap(data);
   return items.map((l) => ({
@@ -314,17 +330,35 @@ async function getLiveryList() {
   })).filter(l => l.id && l.name);
 }
 
+/**
+ * ⬇️ REPLACED FUNCTION
+ * This function now uses the in-memory cache to avoid spamming the API.
+ */
 async function getSessions() {
+  const now = Date.now();
+  // 1. Check if cache is valid (not older than TTL and not empty)
+  if (now - apiCache.lastSessionsUpdate < SESSIONS_CACHE_TTL_MS && apiCache.sessions.length > 0) {
+    if (TRACK_LOG) console.log('[getSessions] Returning cached sessions.');
+    return apiCache.sessions;
+  }
+  
+  if (TRACK_LOG) console.log('[getSessions] Fetching fresh sessions from API.');
   const { data } = await ifClient.get('/sessions');
   const items = unwrap(data);
-  return items.map((s) => ({
+  const sessions = items.map((s) => ({
     id: s?.id || s?.uuid || null,
     name: s?.name || s?.serverName || '',
     raw: s,
   })).filter(s => s.id && s.name);
+  
+  // 3. Update cache
+  apiCache.sessions = sessions;
+  apiCache.lastSessionsUpdate = now;
+  return sessions;
 }
 
 function pickSessionIdByName(sessions, desiredName = 'Expert Server') {
+// ... (this function is unchanged) ...
   if (!Array.isArray(sessions) || sessions.length === 0) return null;
   const want = String(desiredName || '').trim().toLowerCase();
   const exact = sessions.find(s => (s.name || '').toLowerCase() === want);
@@ -346,6 +380,7 @@ function pickSessionIdByName(sessions, desiredName = 'Expert Server') {
 }
 
 async function getFlightsForSession(sessionId) {
+// ... (this function is unchanged) ...
   if (!sessionId) throw new Error('Missing sessionId');
   try {
     const { data } = await ifClient.get(`/sessions/${encodeURIComponent(sessionId)}/flights`);
@@ -376,6 +411,7 @@ async function getFlightsForSession(sessionId) {
 }
 
 function simplifyFlight(f) {
+// ... (this function is unchanged) ...
   const aircraftId = f?.aircraftId || null;
   const liveryId = f?.liveryId || null;
   return {
@@ -406,6 +442,7 @@ function simplifyFlight(f) {
   };
 }
 
+// ... (All other IF API Wrappers like getFlightPlan, getFlightRoute, getActiveATC, getNotams, getUserStats, getUserGrade are unchanged) ...
 async function getFlightPlan(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/flightplan`;
@@ -573,6 +610,7 @@ async function getNotams(sessionId) {
 }
 
 async function getUserStats(params) {
+// ... (this function is unchanged) ...
   const url = '/users';
   if (!params || (!params.userIds && !params.discourseNames && !params.userHashes)) {
     throw new Error('At least one search parameter (userIds, discourseNames, userHashes) is required.');
@@ -606,6 +644,7 @@ async function getUserStats(params) {
 }
 
 async function getUserGrade(userId) {
+// ... (this function is unchanged) ...
   if (!userId) throw new Error('Missing userId');
   const url = `/users/${encodeURIComponent(userId)}`;
   try {
@@ -638,10 +677,11 @@ async function getUserGrade(userId) {
   }
 }
 
+
 /* =========================
  * Socket.IO Connection Handling (NEW)
  * ========================= */
-
+// ... (this section is unchanged) ...
 io.on('connection', (socket) => {
   console.log(`[socket] ✅ User connected: ${socket.id}`);
 
@@ -660,25 +700,29 @@ io.on('connection', (socket) => {
 
 
 /* =========================
- * All-Flights Broadcaster (NEW)
+ * All-Flights Broadcaster (MODIFIED)
  * ========================= */
 
-// This is a new, separate poller just for broadcasting all flights to front-ends
+// This function now fetches flights, updates the central cache, and broadcasts to clients.
+// It also includes error handling to back off if rate-limited.
+let nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS; // Dynamic poll interval
+
 async function pollAndBroadcastFlights() {
   let sessions = [];
   try {
+    // This will use the new cache-aware getSessions() function
     sessions = await getSessions();
   } catch (e) {
     console.warn('[broadcast] Sessions fetch failed', e?.message);
+    if (e?.message?.includes('429')) {
+      console.error(`[broadcast] 🛑 Sessions API Rate Limit (429) detected. Backing off for 60 seconds.`);
+      nextBroadcastPollMs = 60000; // 60s backoff
+    }
     return; // Try again on next poll
   }
 
-  // You can modify this to loop through *all* sessions, but for now
-  // we'll just broadcast the default server (e.g., "Expert Server")
-  // You could also broadcast all 3 main servers (Expert, Training, Casual)
-  
-  const serverNames = [DEFAULT_IF_SERVER]; 
-  // Example for more: const serverNames = ["Expert Server", "Training Server", "Casual Server"];
+  // We fetch data for the main servers to populate the cache for all services
+  const serverNames = ["Expert Server", "Training Server", "Casual Server"];
   
   for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
@@ -689,52 +733,85 @@ async function pollAndBroadcastFlights() {
     }
 
     const roomName = serverName.toLowerCase();
-    // Only fetch data if someone is actually listening in that room
+    // Check if anyone is listening (either a socket client or an ACARS tracker)
     const room = io.sockets.adapter.rooms.get(roomName);
-    if (!room || room.size === 0) {
-      // if (TRACK_LOG) console.log(`[broadcast] 😴 Skipping ${serverName}, no clients in room.`);
+    const acarsNeedsThisServer = getActiveTrackers().some(t => t.server.toLowerCase() === serverName.toLowerCase());
+
+    if ((!room || room.size === 0) && !acarsNeedsThisServer) {
+      // if (TRACK_LOG) console.log(`[broadcast] 😴 Skipping ${serverName}, no clients or trackers.`);
+      apiCache.flights.delete(sessionId); // Clear stale data
       continue;
     }
 
     try {
-      const flights = await getFlightsForSession(sessionId);
-      const simplifiedFlights = flights.map(simplifyFlight);
+      // This is the main API call we need to protect
+      const rawFlights = await getFlightsForSession(sessionId);
+      const simplifiedFlights = rawFlights.map(simplifyFlight);
       
-      // 🚀 EMIT TO THE ROOM
-      // Send data only to clients who joined this server's room
-      io.to(roomName).emit('all_flights_update', {
+      const payload = {
         server: serverName,
         sessionId: sessionId,
         count: simplifiedFlights.length,
         flights: simplifiedFlights,
         timestamp: new Date().toISOString()
-      });
+      };
       
-      if (TRACK_LOG) {
-          console.log(`[broadcast] 📡 Sent ${simplifiedFlights.length} flights to ${room.size} client(s) for ${serverName}`);
+      // 1. 🚀 UPDATE THE CACHE for other services (ACARS, API)
+      apiCache.flights.set(sessionId, {
+          ...payload,
+          rawFlights: rawFlights // Store raw flights for ACARS tracker
+      });
+
+      // 2. 📡 EMIT TO THE ROOM (if clients are present)
+      if (room && room.size > 0) {
+        io.to(roomName).emit('all_flights_update', payload);
+        
+        if (TRACK_LOG) {
+            console.log(`[broadcast] 📡 Sent ${simplifiedFlights.length} flights to ${room.size} client(s) for ${serverName}`);
+        }
       }
 
     } catch (e) {
       console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
+      // Clear cache for this server so ACARS doesn't use stale data
+      apiCache.flights.delete(sessionId);
+
+      if (e?.message?.includes('429')) {
+          console.error(`[broadcast] 🛑 Flights API Rate Limit (429) detected. Backing off for 60 seconds.`);
+          nextBroadcastPollMs = 60000; // 60s backoff
+      }
     }
   }
 }
 
-// Start the new broadcaster loop
+// Start the new broadcaster loop with dynamic backoff
 (function runBroadcastPoller() {
   pollAndBroadcastFlights()
-    .catch(e => console.error('[broadcast] Unhandled poll error', e?.message))
+    .catch(e => {
+        console.error('[broadcast] Unhandled poll error', e?.message);
+         if (e?.message?.includes('429')) {
+            console.error(`[broadcast] 🛑 Unhandled 429. Backing off for 60s.`);
+            nextBroadcastPollMs = 60000; // 60 seconds
+         }
+    })
     .finally(() => {
-      // Schedule the next poll using the new fast interval
-      setTimeout(runBroadcastPoller, ALL_FLIGHTS_POLL_MS);
+      // Schedule the next poll using the dynamic interval
+      setTimeout(runBroadcastPoller, nextBroadcastPollMs);
+
+      // Reset to default poll time for the *next* cycle (after the backoff)
+      if (nextBroadcastPollMs !== ALL_FLIGHTS_POLL_MS) {
+          console.log(`[broadcast] Resuming default poll interval of ${ALL_FLIGHTS_POLL_MS}ms after this backoff cycle.`);
+          nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS;
+      }
     });
 })();
 
 
 /* =========================
- * Tracking engine (UNCHANGED - Runs in parallel)
+ * Tracking engine (MODIFIED - Reads from cache)
  * ========================= */
 async function notifyCallback(tracker, payload) {
+// ... (this function is unchanged) ...
   const url = tracker.callbackUrl || DEFAULT_CALLBACK_URL;
   if (!url) return;
   try {
@@ -756,6 +833,7 @@ async function notifyCallback(tracker, payload) {
 }
 
 function addTrackers(input) {
+// ... (this function is unchanged) ...
   const now = Date.now();
   const created = [];
   const list = Array.isArray(input.usernames) && input.usernames.length
@@ -803,9 +881,15 @@ function addTrackers(input) {
 }
 
 function getActiveTrackers() {
+// ... (this function is unchanged) ...
   return [...trackers.values()].filter(t => t.status === 'searching' || t.status === 'tracking');
 }
 
+/**
+ * ⬇️ REPLACED FUNCTION
+ * This function now reads session and flight data from the `apiCache`
+ * instead of fetching it from the API.
+ */
 async function pollOnce() {
   const now = Date.now();
 
@@ -822,13 +906,13 @@ async function pollOnce() {
     return m;
   }, {});
 
-  let sessions = [];
-  try {
-    sessions = await getSessions();
-  } catch (e) {
-    if (TRACK_LOG) console.warn('[track] sessions fetch failed', e?.message);
+  // ⬇️ MODIFIED: Get sessions from cache
+  const sessions = apiCache.sessions;
+  if (!sessions || sessions.length === 0) {
+    if (TRACK_LOG) console.warn('[track] No cached sessions available. Skipping poll.');
     return;
   }
+  // ⬆️ MODIFIED
 
   for (const [serverKey, group] of Object.entries(byServer)) {
     const humanName = group[0]?.server || DEFAULT_IF_SERVER;
@@ -838,13 +922,14 @@ async function pollOnce() {
       continue;
     }
 
-    let flights = [];
-    try {
-      flights = await getFlightsForSession(sessionId);
-    } catch (e) {
-      if (TRACK_LOG) console.warn(`[track] flights fetch failed for server "${humanName}"`, e?.message);
-      continue;
+    // ⬇️ MODIFIED: Get flights from cache
+    const cachedData = apiCache.flights.get(sessionId);
+    if (!cachedData || !cachedData.rawFlights) {
+        if (TRACK_LOG) console.warn(`[track] No cached raw flights for "${humanName}". Broadcaster may be offline or rate-limited.`);
+        continue;
     }
+    const flights = cachedData.rawFlights; // Use the raw flights from the cache
+    // ⬆️ MODIFIED
 
     const byUsername = new Map();
     const byFlightId = new Map();
@@ -857,6 +942,7 @@ async function pollOnce() {
       }
     }
 
+    // ... (The rest of the tracking logic in pollOnce is UNCHANGED) ...
     for (const t of group) {
       t.attempts += 1;
       t.lastPolledAt = now;
@@ -1024,6 +1110,7 @@ async function pollOnce() {
 }
 
 // This is the original poller loop for the tracking engine
+// ... (this function is unchanged) ...
 (function runPoller() {
   pollOnce()
     .catch(e => {
@@ -1042,10 +1129,12 @@ async function pollOnce() {
  * API Endpoints
  * ========================= */
 app.get('/health', (req, res) => {
+// ... (this function is unchanged) ...
   res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
 });
 
 app.get('/if-key-debug', (req, res) => {
+// ... (this function is unchanged) ...
   const masked = IF_API_KEY ? `${IF_API_KEY.slice(0, 4)}...${IF_API_KEY.slice(-4)}` : '(missing)';
   res.json({
     ok: true,
@@ -1057,11 +1146,16 @@ app.get('/if-key-debug', (req, res) => {
   });
 });
 
+/**
+ * ⬇️ REPLACED FUNCTION
+ * This endpoint now uses the cache-aware getSessions() function.
+ */
 app.get('/if-sessions', async (req, res) => {
   try {
     if (!IF_API_KEY) return res.status(500).json(err(500, 'INFINITE_FLIGHT_API_KEY is not set'));
+    // This now uses the cache!
     const sessions = await getSessions();
-    res.json({ ok: true, count: sessions?.length || 0, sessions });
+    res.json({ ok: true, count: sessions?.length || 0, sessions, fromCache: (Date.now() - apiCache.lastSessionsUpdate < SESSIONS_CACHE_TTL_MS) });
   } catch (e) {
     const status = e?.response?.status || 500;
     res.status(status).json(err(status, 'Failed to fetch sessions', { detail: e?.message }));
@@ -1069,10 +1163,11 @@ app.get('/if-sessions', async (req, res) => {
 });
 
 app.get('/if-sessions-test', async (req, res) => {
+// ... (this function is unchanged, but benefits from getSessions() caching) ...
   try {
     if (!IF_API_KEY) return res.status(500).json(err(500, 'INFINITE_FLIGHT_API_KEY is not set'));
     const targetServer = (req.query.server || 'Expert Server').toString();
-    const sessions = await getSessions();
+    const sessions = await getSessions(); // Will use cache
     const sessionId = pickSessionIdByName(sessions, targetServer);
     if (!sessionId) {
       return res.status(404).json(err(404, `Server not found: ${targetServer}`, { sessions }));
@@ -1098,9 +1193,29 @@ app.get('/if-sessions-test', async (req, res) => {
   }
 });
 
+/**
+ * ⬇️ REPLACED FUNCTION
+ * This endpoint now reads from the flights cache first.
+ */
 app.get('/flights/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   const callsignFilter = req.query.callsignEndsWith;
+
+  // 1. Check cache first
+  const cachedData = apiCache.flights.get(sessionId);
+  if (cachedData) {
+    let simplified = cachedData.flights; // Already simplified
+    if (callsignFilter) {
+      const suffix = callsignFilter.toUpperCase();
+      simplified = simplified.filter(f =>
+        f.callsign && f.callsign.toUpperCase().endsWith(suffix)
+      );
+    }
+    return res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: true });
+  }
+
+  // 2. Fallback to live fetch if not in cache
+  if (TRACK_LOG) console.warn(`[api] /flights/${sessionId} cache miss. Fetching live.`);
   try {
     const flights = await getFlightsForSession(sessionId);
     let simplified = flights.map(simplifyFlight);
@@ -1110,7 +1225,7 @@ app.get('/flights/:sessionId', async (req, res) => {
         f.callsign && f.callsign.toUpperCase().endsWith(suffix)
       );
     }
-    res.json({ ok: true, total: simplified.length, flights: simplified });
+    res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: false });
   } catch (e) {
     const status = e?.response?.status || 500;
     res.status(status).json(err(status, 'Failed to fetch flights', { detail: e?.message }));
@@ -1118,6 +1233,7 @@ app.get('/flights/:sessionId', async (req, res) => {
 });
 
 app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
+// ... (this function is unchanged) ...
   const { sessionId, flightId } = req.params;
   try {
     const rawPlan = await getFlightPlan(sessionId, flightId);
@@ -1138,6 +1254,7 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
 });
 
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
+// ... (this function is unchanged) ...
   const { sessionId, flightId } = req.params;
   try {
     const rawRoute = await getFlightRoute(sessionId, flightId);
@@ -1158,6 +1275,7 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
 });
 
 app.get('/atc/:sessionId', async (req, res) => {
+// ... (this function is unchanged) ...
   const { sessionId } = req.params;
   try {
     const atcFacilities = await getActiveATC(sessionId);
@@ -1175,6 +1293,7 @@ app.get('/atc/:sessionId', async (req, res) => {
 });
 
 app.get('/notams/:sessionId', async (req, res) => {
+// ... (this function is unchanged) ...
   const { sessionId } = req.params;
   try {
     const notams = await getNotams(sessionId);
@@ -1192,6 +1311,7 @@ app.get('/notams/:sessionId', async (req, res) => {
 });
 
 app.post('/users', async (req, res) => {
+// ... (this function is unchanged) ...
   const { userIds, discourseNames, userHashes } = req.body;
 
   // Validate that at least one valid array is present in the request body
@@ -1219,6 +1339,7 @@ app.post('/users', async (req, res) => {
 });
 
 app.get('/users/:userId/grade', async (req, res) => {
+// ... (this function is unchanged) ...
   const { userId } = req.params;
   try {
     const gradeInfo = await getUserGrade(userId);
@@ -1240,6 +1361,7 @@ app.get('/users/:userId/grade', async (req, res) => {
 
 
 app.get('/track/active', (req, res) => {
+// ... (this function is unchanged) ...
   const active = getActiveTrackers().map(t => ({
     id: t.id,
     username: t.username,
@@ -1255,6 +1377,7 @@ app.get('/track/active', (req, res) => {
 });
 
 app.post('/track/start', async (req, res) => {
+// ... (this function is unchanged) ...
   try {
     const created = addTrackers(req.body || {});
     if (!created.length) return res.status(400).json(err(400, 'username or usernames required'));
@@ -1275,6 +1398,7 @@ app.post('/track/start', async (req, res) => {
 });
 
 app.get('/track/:id', (req, res) => {
+// ... (this function is unchanged) ...
   const t = trackers.get(req.params.id);
   if (!t) return res.status(404).json(err(404, 'tracker not found'));
   res.json({ ok: true, tracker: {
@@ -1295,6 +1419,7 @@ app.get('/track/:id', (req, res) => {
 });
 
 app.post('/track/:id/stop', (req, res) => {
+// ... (this function is unchanged) ...
   const t = trackers.get(req.params.id);
   if (!t) return res.status(44).json(err(404, 'tracker not found'));
   t.status = 'stopped';
@@ -1305,6 +1430,7 @@ app.post('/track/:id/stop', (req, res) => {
 });
 
 app.post('/track/:id/delay', (req, res) => {
+// ... (this function is unchanged) ...
   const t = trackers.get(req.params.id);
   if (!t) return res.status(404).json(err(404, 'tracker not found'));
 
@@ -1328,10 +1454,10 @@ app.post('/track/:id/delay', (req, res) => {
 
 // ⬇️ 3. Change app.listen to httpServer.listen
 httpServer.listen(PORT, () => {
-  console.log(`✅ Live Flight Tracker (with Sockets) ready: http://localhost:${PORT}`);
+  console.log(`✅ Live Flight Tracker (with Caching Sockets) ready: http://localhost:${PORT}`);
   console.log('🌐 Base URL:', IF_API_BASE_URL);
   console.log(`🔁 Tracking: poll=${POLL_MS}ms background=${BACKGROUND_POLL_MS}ms timeout=${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h`);
-  console.log(`📡 Broadcasting all flights every ${ALL_FLIGHTS_POLL_MS}ms (WARNING: 500ms is very fast!)`);
+  console.log(`📡 Broadcasting all flights every ${ALL_FLIGHTS_POLL_MS}ms (WARNING: 1000ms is still very fast!)`);
   console.log(`🛩️  Default IF Server: "${DEFAULT_IF_SERVER}"`);
   if (!IF_API_KEY) {
     console.warn('⚠️  IF API key is missing. Set INFINITE_FLIGHT_API_KEY in your .env file.');
