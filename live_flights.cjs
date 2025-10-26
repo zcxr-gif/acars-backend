@@ -37,6 +37,10 @@ const IF_API_BASE_URL = (process.env.IF_API_BASE_URL || 'https://api.infinitefli
 const RAW_IF_KEY = process.env.INFINITE_FLIGHT_API_KEY || process.env.IF_API_KEY || '';
 const IF_API_KEY = RAW_IF_KEY.trim();
 
+const VA_BACKEND_URL = (process.env.VA_BACKEND_URL || 'http://localhost:5000').trim();
+const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 1000), 10); // 5 minutes
+const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
+
 // ⬇️ MODIFIED: Poll interval for the ACARS/user-tracking engine
 const POLL_MS = parseInt(process.env.POLL_MS || '30000', 10); // 30s (for active flight *tracking*)
 const BACKGROUND_POLL_MS = parseInt(process.env.BACKGROUND_POLL_MS || (15 * 60 * 1000), 10); // 15 minutes (for backgrounded flights)
@@ -72,10 +76,21 @@ function newId() {
 /* =========================
  * NEW: In-Memory API Cache
  * ========================= */
+
+// ⬇️ NEW: Define staff roles (from server.js) for easy checking
+const VA_STAFF_ROLES = [
+  'staff', 'admin', 'chief executive officer (ceo)', 'chief operating officer (coo)',
+  'pirep manager (pm)', 'pilot relations & recruitment manager (pr)', 'technology & design manager (tdm)',
+  'head of training (cot)', 'chief marketing officer (cmo)', 'route manager (rm)',
+  'events manager (em)', 'flight instructor (fi)'
+];
+
 const apiCache = {
   sessions: [],
   flights: new Map(), // sessionId -> { server, sessionId, count, flights, rawFlights, timestamp }
-  lastSessionsUpdate: 0
+  lastSessionsUpdate: 0,
+  // ⬇️ NEW: Add a cache for the VA pilot roster
+  vaRosterCache: new Map(), // Stores { lowercase_username -> { role: '...' } }
 };
 // Cache sessions for 1 minute to prevent spamming the /sessions endpoint
 const SESSIONS_CACHE_TTL_MS = 60 * 1000; 
@@ -168,6 +183,67 @@ function normalizeAirport(a) {
   } catch (e) {
     console.error('❌ Could not load livery names. Names will be unavailable.', e.message);
   }
+})();
+
+/* =========================
+ * NEW: VA Roster Loader
+ * ========================= */
+
+/**
+ * Fetches the pilot roster (IF Username + Role) from the main VA backend
+ * and populates the in-memory vaRosterCache.
+ */
+async function fetchVaRoster() {
+  if (!VA_BACKEND_URL || !TRACK_WEBHOOK_SECRET) {
+    console.warn('[va-roster] Skipping fetch: VA_BACKEND_URL or TRACK_WEBHOOK_SECRET is not set.');
+    return;
+  }
+  
+  if (TRACK_LOG) console.log('[va-roster] Fetching VA pilot roster...');
+
+  try {
+    const { data: roster } = await axios.get(`${VA_BACKEND_URL}/api/internal/pilot-roster`, {
+      timeout: 10000,
+      headers: {
+        'x-acars-signature': TRACK_WEBHOOK_SECRET
+      }
+    });
+
+    if (!Array.isArray(roster)) {
+      console.warn('[va-roster] Failed to update: Response was not an array.');
+      return;
+    }
+    
+    // Clear old cache and repopulate
+    const newCache = new Map();
+    for (const pilot of roster) {
+      if (pilot.username) {
+        newCache.set(pilot.username.toLowerCase(), {
+          role: pilot.role || 'pilot'
+        });
+      }
+    }
+    
+    apiCache.vaRosterCache = newCache;
+    console.log(`✅ [va-roster] Successfully loaded ${apiCache.vaRosterCache.size} VA pilots into cache.`);
+
+  } catch (e) {
+    console.error(`❌ [va-roster] Failed to fetch VA roster from ${VA_BACKEND_URL}: ${e.message}`);
+  }
+}
+
+/**
+ * Starts the poller for the VA Roster
+ */
+(function runRosterPoller() {
+  fetchVaRoster()
+    .catch(e => {
+        console.error('[va-roster] Unhandled poller error', e?.message);
+    })
+    .finally(() => {
+      // Schedule the next poll
+      setTimeout(runRosterPoller, VA_ROSTER_POLL_MS);
+    });
 })();
 
 
@@ -425,16 +501,38 @@ async function getFlightsForSession(sessionId) {
   }
 }
 
+
 function simplifyFlight(f) {
-// ... (this function is unchanged) ...
   const aircraftId = f?.aircraftId || null;
   const liveryId = f?.liveryId || null;
+  const username = f?.username || null;
+  
+  // ⬇️ NEW: VA Roster Check
+  let isVAMember = false;
+  let isStaff = false;
+  let vaRole = null;
+
+  if (username) {
+    const profile = apiCache.vaRosterCache.get(username.toLowerCase());
+    if (profile) {
+      isVAMember = true;
+      vaRole = profile.role;
+      // Check if the role is one of the staff roles
+      isStaff = VA_STAFF_ROLES.includes(vaRole.toLowerCase());
+    }
+  }
+
   return {
     flightId: f?.flightId || null,
     userId: f?.userId || null,
     callsign: f?.callsign || '',
-    username: f?.username || null,
+    username: username,
     virtualOrganization: f?.virtualOrganization || null,
+    // ⬇️ NEW: Add the VA status fields
+    isVAMember,
+    isStaff,
+    vaRole,
+    // ⬆️ End of new fields
     position: {
       lat: typeof f?.latitude === 'number' ? f.latitude : null,
       lon: typeof f?.longitude === 'number' ? f.longitude : null,
@@ -693,8 +791,9 @@ async function getUserGrade(userId) {
 }
 
 /**
- * ⬇️ NEW FUNCTION
+ * ⬇️ CORRECTED FUNCTION
  * Fetches the recent flight history for a user.
+ * This version correctly parses the paginated response { result: { data: [...] } }
  */
 async function getUserFlightHistory(userId, page = 1) {
   if (!userId) throw new Error('Missing userId');
@@ -709,8 +808,8 @@ async function getUserFlightHistory(userId, page = 1) {
       err.response = { data: payload };
       throw err;
     }
-    // The API returns an array in 'result'
-    return Array.isArray(payload.result) ? payload.result : [];
+    // ⬇️ FIX: Return the 'data' array inside the 'result' object
+    return Array.isArray(payload.result?.data) ? payload.result.data : [];
   } catch (e) {
     const status = e?.response?.status;
     if (status === 401 || status === 403) {
@@ -723,7 +822,8 @@ async function getUserFlightHistory(userId, page = 1) {
         err.response = { data: payload };
         throw err;
       }
-      return Array.isArray(payload.result) ? payload.result : [];
+      // ⬇️ FIX: Return the 'data' array inside the 'result' object
+      return Array.isArray(payload.result?.data) ? payload.result.data : [];
     }
     if (status === 404) {
       return []; // 404 means user not found, so no flights.
@@ -953,6 +1053,11 @@ function getActiveTrackers() {
  * 1. Use /route analysis to CONFIRM landing.
  * 2. THEN, call /users/{userId}/flights to get the OFFICIAL duration.
  * 3. THEN, send the official duration in the callback.
+ *
+ * ❗️ THIS VERSION INCLUDES FIXES based on the provided API schema:
+ * - Uses `f.id` instead of `f.flightId` for history matching.
+ * - Converts `totalTime` from MINUTES (not seconds) to milliseconds.
+ * - Uses `completedFlight.created` as the official end timestamp.
  */
 async function pollOnce() {
   const now = Date.now();
@@ -1139,14 +1244,25 @@ async function pollOnce() {
                   t.history.push({ event: 'fetch_history', message: `Landing confirmed. Fetching official duration from /users API...`, timestamp: now });
                   if (TRACK_LOG) console.log(`[track] ${t.username} landing confirmed. Fetching official duration...`);
 
+                  // ⬇️ FIX: This function now correctly returns the array
                   const userFlights = await getUserFlightHistory(userId, 1);
-                  const completedFlight = userFlights.find(f => f.flightId === lastFlightId);
+                  
+                  // ⬇️ FIX: Compare against 'f.id' (from API) not 'f.flightId'
+                  const completedFlight = userFlights.find(f => f.id === lastFlightId);
 
-                  if (completedFlight && completedFlight.totalTime > 0) {
+                  // ⬇️ FIX: Check if totalTime is a number
+                  if (completedFlight && typeof completedFlight.totalTime === 'number') {
                     // Success! Use the official data.
-                    officialDurationMs = (completedFlight.totalTime || 0) * 1000;
-                    officialStartTime = completedFlight.startTime;
-                    officialEndTime = completedFlight.endTime;
+                    
+                    // ⬇️ FIX: Convert MINUTES to MS (totalTime * 60 * 1000)
+                    officialDurationMs = (completedFlight.totalTime || 0) * 60 * 1000;
+                    
+                    // officialStartTime remains from route analysis (flightAnalysis.takeoffPoint?.timestamp)
+                    // The history API does not provide a reliable start time.
+                    
+                    // ⬇️ FIX: Use 'created' as the official end timestamp
+                    officialEndTime = completedFlight.created; 
+                    
                     method = 'user_history'; // Update method
                     
                     t.history.push({ event: 'fetch_history_success', message: `Fetched official duration from user history (${Math.round(officialDurationMs/60000)}m).`, timestamp: now });
@@ -1178,14 +1294,14 @@ async function pollOnce() {
               
               notifyCallback(t, {
                 reason: 'flight_landed',
-                flightDurationMs: officialDurationMs, // Send the official duration
+                flightDurationMs: officialDurationMs, // Send the official (or fallback) duration
                 takeoffDetails: {
-                  airport: flightAnalysis.takeoffAirport, // Still use route analysis for airport
-                  timestamp: officialStartTime, // Use official time
+                  airport: flightAnalysis.takeoffAirport, 
+                  timestamp: officialStartTime, // Use official time (or route fallback)
                 },
                 landingDetails: {
-                  airport: flightAnalysis.landingAirport, // Still use route analysis for airport
-                  timestamp: officialEndTime, // Use official time
+                  airport: flightAnalysis.landingAirport, 
+                  timestamp: officialEndTime, // Use official time (or route fallback)
                 }
               });
 
