@@ -892,14 +892,14 @@ function getActiveTrackers() {
 
 
 /**
- * ⬇️ REPLACED FUNCTION (NEW FIX)
+ * ⬇️ REPLACED FUNCTION (WITH CORRECTED LANDING LOGIC)
  *
  * This version implements the *new* fix. We NO LONGER send the
  * 'user_offline' notification because the client ACARS was
  * interpreting it as a final state and "trashing" the tracker.
  *
- * The server will now *silently* switch to 'searching' and
- * only notify the client again when the user comes back online.
+ * It also corrects the bug where a pre-takeoff disconnect would
+ * be falsely flagged as a "landing".
  */
 async function pollOnce() {
   const now = Date.now();
@@ -1045,7 +1045,9 @@ async function pollOnce() {
           if (simplifiedRoute.length > 1) {
             const flightAnalysis = calculateFlightDurationFromRoute(simplifiedRoute, airports);
 
-            if (flightAnalysis.landingAirport) {
+            // ⬇️ THIS IS THE FIX.
+            // Only count as "landed" if we found BOTH a takeoff and a landing.
+            if (flightAnalysis.landingAirport && flightAnalysis.takeoffAirport) {
               // Confirmed landed via route analysis
               t.status = 'landed';
               t.history.push({ event: 'landed', timestamp: now, airport: flightAnalysis.landingAirport.icao, method: 'route_analysis' });
@@ -1068,7 +1070,7 @@ async function pollOnce() {
               trackers.set(t.id, t);
               continue; // move to next tracker (we're done with this one)
             } else {
-              if (TRACK_LOG) console.log(`[track] ${t.username} route analysis ran but did not confirm landing.`);
+              if (TRACK_LOG) console.log(`[track] ${t.username} route analysis ran but did not confirm landing (takeoffAirport=${flightAnalysis.takeoffAirport?.icao}, landingAirport=${flightAnalysis.landingAirport?.icao}).`);
             }
           } else {
             if (TRACK_LOG) console.log(`[track] ${t.username} route retrieved but not enough points for analysis.`);
@@ -1079,9 +1081,9 @@ async function pollOnce() {
       }
 
       // -----------------------------------------------------------------
-      // ⬇️ START: NEW FIX LOGIC
+      // ⬇️ START: NEW FIX LOGIC (Now reachable)
       //
-      // If we reach here: flight not in API and route analysis did not confirm landing.
+      // If we reach here: flight not in API and route analysis did NOT confirm landing.
       // We now silently transition to 'searching' and DO NOT notify the client.
       // -----------------------------------------------------------------
       
