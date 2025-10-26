@@ -848,7 +848,7 @@ async function notifyCallback(tracker, payload) {
 }
 
 function addTrackers(input) {
-// ... (this function is unchanged) ...
+// ... (this function is unchanged, but logs to history) ...
   const now = Date.now();
   const created = [];
   const list = Array.isArray(input.usernames) && input.usernames.length
@@ -886,7 +886,8 @@ function addTrackers(input) {
       lastKnownFlight: null,
       timeoutAt: now + SEARCH_TIMEOUT_MS,
       nextPollAt: now,
-      history: [{ event: 'created', timestamp: now }],
+      // ⬇️ MODIFIED: Add rich history message
+      history: [{ event: 'created', message: `Tracker created for ${username} on ${server}.`, timestamp: now }],
     };
     trackers.set(id, t);
     created.push(t);
@@ -903,14 +904,10 @@ function getActiveTrackers() {
 
 
 /**
- * ⬇️ REPLACED FUNCTION (WITH CORRECTED LANDING LOGIC)
+ * ⬇️ REPLACED FUNCTION (WITH RICH HISTORY LOGGING)
  *
- * This version implements the *new* fix. We NO LONGER send the
- * 'user_offline' notification because the client ACARS was
- * interpreting it as a final state and "trashing" the tracker.
- *
- * It also corrects the bug where a pre-takeoff disconnect would
- * be falsely flagged as a "landing".
+ * This version logs all its decisions into the `t.history` array,
+ * which will then be displayed in the new frontend modal.
  */
 async function pollOnce() {
   const now = Date.now();
@@ -1003,9 +1000,12 @@ async function pollOnce() {
         if (isFirstEverOnlineEvent || isNewFlightAfterOffline) {
           if (isNewFlightAfterOffline) {
             if (TRACK_LOG) console.log(`[track] ♻️ New flight detected for ${t.username}. Old: ${t.lastKnownFlight.flightId}, New: ${found.flightId}. Resetting flight history.`);
+            // ⬇️ MODIFIED: Add rich history message
             t.history = t.history.filter(h => h.event === 'created' || h.event === 'stopped');
+            t.history.push({ event: 'new_flight', message: `New flight detected. Old: ${t.lastKnownFlight.flightId}, New: ${found.flightId}. Resetting history.`, timestamp: now });
           }
-          t.history.push({ event: 'online', timestamp: now });
+           // ⬇️ MODIFIED: Add rich history message
+          t.history.push({ event: 'online', message: `User found ONLINE. Locking onto flightId: ${found.flightId}`, timestamp: now });
           if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server} -> Locking onto flightId: ${found.flightId}`);
           notifyCallback(t, { flight: { ...found, sessionId }, reason: 'user_online' });
         }
@@ -1023,7 +1023,8 @@ async function pollOnce() {
             const groundSpeed = found.position.gs_kt;
             const isAirborne = groundSpeed > TAKEOFF_SPEED_KT && distanceKm < AIRPORT_PROXIMITY_KM;
             if (isAirborne) {
-              t.history.push({ event: 'takeoff', timestamp: now, airport: airport.icao });
+              // ⬇️ MODIFIED: Add rich history message
+              t.history.push({ event: 'takeoff', message: `TAKEOFF detected near ${airport.icao}. Flight timer started.`, timestamp: now, airport: airport.icao });
               if (TRACK_LOG) console.log(`[track] TAKEOFF ${t.username} from near ${airport.icao}. Flight timer started.`);
               notifyCallback(t, { reason: 'flight_takeoff', airport });
             }
@@ -1033,9 +1034,16 @@ async function pollOnce() {
         // Schedule next poll (background vs active)
         const isInBackground = found.pilotState === 3;
         t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
-        if (isInBackground && TRACK_LOG) {
-          console.log(`[track] ✈️ ${t.username} is in background. Next poll in ${BACKGROUND_POLL_MS/60000}m.`);
+        
+        // ⬇️ NEW: Log background state change
+        const wasInBackground = t.history.at(-1)?.event === 'background';
+        if (isInBackground && !wasInBackground) {
+            t.history.push({ event: 'background', message: `User is in background. Switching to ${BACKGROUND_POLL_MS/60000}m poll interval.`, timestamp: now });
+            if (TRACK_LOG) console.log(`[track] ✈️ ${t.username} is in background. Next poll in ${BACKGROUND_POLL_MS/60000}m.`);
+        } else if (!isInBackground && wasInBackground) {
+            t.history.push({ event: 'active', message: `User is active. Resuming ${POLL_MS/1000}s poll interval.`, timestamp: now });
         }
+
 
         trackers.set(t.id, t);
         continue; // proceed to next tracker
@@ -1049,7 +1057,11 @@ async function pollOnce() {
       if (t.lastKnownFlight?.flightId) {
         try {
           routeAnalysisAttempted = true;
+          // ⬇️ MODIFIED: Add rich history message
+          const analysisMsg = `Flight ${t.lastKnownFlight.flightId} not in /flights. Attempting route analysis for landing.`;
+          t.history.push({ event: 'analysis_start', message: analysisMsg, timestamp: now });
           if (TRACK_LOG) console.log(`[track] ${t.username}'s flight ${t.lastKnownFlight.flightId} not in /flights; attempting route analysis...`);
+          
           const route = await getFlightRoute(t.lastKnownFlight.sessionId, t.lastKnownFlight.flightId);
           const simplifiedRoute = simplifyFlightRoute(route);
 
@@ -1061,7 +1073,9 @@ async function pollOnce() {
             if (flightAnalysis.landingAirport && flightAnalysis.takeoffAirport) {
               // Confirmed landed via route analysis
               t.status = 'landed';
-              t.history.push({ event: 'landed', timestamp: now, airport: flightAnalysis.landingAirport.icao, method: 'route_analysis' });
+              // ⬇️ MODIFIED: Add rich history message
+              const landedMsg = `LANDED (via route analysis) at ${flightAnalysis.landingAirport.icao}. Duration: ${Math.round(flightAnalysis.durationMs/60000)}m. Stopping tracker.`;
+              t.history.push({ event: 'landed', message: landedMsg, timestamp: now, airport: flightAnalysis.landingAirport.icao, method: 'route_analysis' });
 
               if (TRACK_LOG) console.log(`[track] LANDED (via route analysis) ${t.username} at ${flightAnalysis.landingAirport.icao}. Duration: ${Math.round(flightAnalysis.durationMs/60000)}m. Stopping tracker.`);
               notifyCallback(t, {
@@ -1081,12 +1095,20 @@ async function pollOnce() {
               trackers.set(t.id, t);
               continue; // move to next tracker (we're done with this one)
             } else {
+              // ⬇️ MODIFIED: Add rich history message
+              const failMsg = `Route analysis ran but did not confirm landing (Takeoff: ${flightAnalysis.takeoffAirport?.icao || 'N/A'}, Landing: ${flightAnalysis.landingAirport?.icao || 'N/A'}).`;
+              t.history.push({ event: 'analysis_fail', message: failMsg, timestamp: now });
               if (TRACK_LOG) console.log(`[track] ${t.username} route analysis ran but did not confirm landing (takeoffAirport=${flightAnalysis.takeoffAirport?.icao}, landingAirport=${flightAnalysis.landingAirport?.icao}).`);
             }
           } else {
+            // ⬇️ MODIFIED: Add rich history message
+            const noDataMsg = `Route retrieved but had insufficient data points (${simplifiedRoute.length}) for analysis.`;
+            t.history.push({ event: 'analysis_nodata', message: noDataMsg, timestamp: now });
             if (TRACK_LOG) console.log(`[track] ${t.username} route retrieved but not enough points for analysis.`);
           }
         } catch (e) {
+          // ⬇️ MODIFIED: Add rich history message
+          t.history.push({ event: 'analysis_error', message: `Route analysis failed: ${e.message}`, timestamp: now });
           if (TRACK_LOG) console.warn(`[track] route analysis failed for ${t.username}: ${e.message}`);
         }
       }
@@ -1100,7 +1122,8 @@ async function pollOnce() {
       
       if (t.status === 'tracking') {
         // This was a 'tracking' -> 'searching' transition
-        t.history.push({ event: 'offline', timestamp: now });
+        // ⬇️ MODIFIED: Add rich history message
+        t.history.push({ event: 'offline', message: `User went OFFLINE (mid-air). Switching to 'searching' mode.`, timestamp: now });
         if (TRACK_LOG) console.log(`[track] OFFLINE (mid-air) ${t.username} on ${t.server}. Switching to 'searching'.`);
         
         // 1. Set status to 'searching' internally.
@@ -1148,6 +1171,8 @@ async function pollOnce() {
       // If we've exceeded the search timeout, mark not_found and optionally clear last-known data
       if (now >= t.timeoutAt) {
         t.status = 'not_found';
+        // ⬇️ MODIFIED: Add rich history message
+        t.history.push({ event: 'timeout', message: `Search TIMEOUT exceeded (${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h). Stopping tracker.`, timestamp: now });
         if (TRACK_LOG) console.log(`[track] TIMEOUT ${t.username} on ${t.server}`);
         notifyCallback(t, { reason: `timeout_${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h` });
 
@@ -1155,6 +1180,12 @@ async function pollOnce() {
         // t.flight = null;
         // t.lastKnownFlight = null;
       } else {
+         // ⬇️ MODIFIED: Add rich history message
+         const searchingMsg = `User not found. Continuing search. Next poll in ${nextInterval/60000}m.`;
+         // Only log this if it's not redundant (i.e., not the same as the last message)
+         if (t.history.at(-1)?.event !== 'searching') {
+            t.history.push({ event: 'searching', message: searchingMsg, timestamp: now });
+         }
         if (TRACK_LOG) {
           const willTimeoutAt = new Date(t.timeoutAt).toISOString();
           console.log(`[track] searching ${t.username}, next poll in ${nextInterval/60000}m (will timeout at ${willTimeoutAt})`);
@@ -1473,23 +1504,27 @@ app.get('/track/:id', (req, res) => {
     flight: t.flight,
     lastKnownFlight: t.lastKnownFlight,
     timeoutAt: new Date(t.timeoutAt).toISOString(),
-    history: t.history.map(h => ({...h, timestamp: new Date(h.timestamp).toISOString()})),
+    // ⬇️ MODIFIED: Ensure history is always sorted by timestamp (newest first for client)
+    history: t.history
+      .map(h => ({...h, timestamp: new Date(h.timestamp).toISOString()}))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
   }});
 });
 
 app.post('/track/:id/stop', (req, res) => {
-// ... (this function is unchanged) ...
+// ... (this function is unchanged, but logs to history) ...
   const t = trackers.get(req.params.id);
   if (!t) return res.status(44).json(err(404, 'tracker not found'));
   t.status = 'stopped';
-  t.history.push({ event: 'stopped', timestamp: Date.now() });
+  // ⬇️ MODIFIED: Add rich history message
+  t.history.push({ event: 'stopped', message: 'Tracker stopped by manual API request.', timestamp: Date.now() });
   trackers.set(t.id, t);
   notifyCallback(t, { reason: 'stopped_by_request' });
   res.json({ ok: true, status: t.status });
 });
 
 app.post('/track/:id/delay', (req, res) => {
-// ... (this function is unchanged) ...
+// ... (this function is unchanged, but logs to history) ...
   const t = trackers.get(req.params.id);
   if (!t) return res.status(404).json(err(404, 'tracker not found'));
 
@@ -1497,7 +1532,8 @@ app.post('/track/:id/delay', (req, res) => {
   const delayMs = 5 * 60 * 1000;
   t.nextPollAt = Date.now() + delayMs;
   
-  t.history.push({ event: 'delayed_by_test', timestamp: Date.now() });
+  // ⬇️ MODIFIED: Add rich history message
+  t.history.push({ event: 'delayed', message: `Next poll delayed by 5 minutes via API.`, timestamp: Date.now() });
   trackers.set(t.id, t);
   
   res.json({ 

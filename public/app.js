@@ -8,6 +8,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const modal = document.getElementById('details-modal');
     const modalContent = document.getElementById('modal-details-content');
     const closeModal = document.querySelector('.close-button');
+    
+    // --- NEW: Interval timer for the details modal poll ---
+    let detailsPollInterval = null;
 
     // --- NEW: Live Log Elements ---
     const logContainer = document.getElementById('live-log-container');
@@ -156,31 +159,144 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (e.target.classList.contains('btn-delay')) {
             logToConsole(`Sending DELAY request for tracker ${trackerId}...`, 'warn');
             handleApiAction(`${API_BASE_URL}/track/${trackerId}/delay`, 'POST');
-        } else if (e.target.classList.contents('btn-details')) {
+        } else if (e.target.classList.contains('btn-details')) {
             logToConsole(`Fetching details for tracker ${trackerId}...`, 'info');
             showDetailsModal(trackerId);
         }
     });
 
-    const showDetailsModal = async (trackerId) => {
+
+    // --- ⬇️ NEW: Modal Rendering Functions ---
+
+    /**
+     * Renders the detailed tracker data into the modal.
+     * @param {object} tracker The full tracker object from the API.
+     */
+    const renderTrackerDetails = (tracker) => {
+        // Clear old content
+        modalContent.innerHTML = '';
+
+        // --- 1. State Summary ---
+        const stateDiv = document.createElement('div');
+        stateDiv.className = 'modal-section';
+        stateDiv.innerHTML = `
+            <h3>Current State</h3>
+            <div class="state-grid">
+                <p><strong>Username:</strong> ${tracker.username}</p>
+                <p><strong>Server:</strong> ${tracker.server}</p>
+                <p><strong>Status:</strong> <span class="status-${tracker.status.toLowerCase()}">${tracker.status}</span></p>
+                <p><strong>Tracker ID:</strong> ${tracker.id}</p>
+                <p><strong>Last Seen:</strong> ${tracker.lastSeenAt ? new Date(tracker.lastSeenAt).toLocaleString() : 'N/A'}</p>
+                <p><strong>Next Poll:</strong> ${tracker.nextPollAt ? new Date(tracker.nextPollAt).toLocaleString() : 'N/A'}</p>
+            </div>
+        `;
+        modalContent.appendChild(stateDiv);
+
+        // --- 2. Event Log ---
+        const logDiv = document.createElement('div');
+        logDiv.className = 'modal-section';
+        logDiv.innerHTML = '<h3>Event Log (Newest First)</h3>';
+        
+        const logList = document.createElement('ul');
+        logList.className = 'modal-log-list';
+
+        if (tracker.history && tracker.history.length > 0) {
+            // Backend already sorts newest first
+            tracker.history.forEach(entry => {
+                const li = document.createElement('li');
+                // Use event type for color coding
+                li.className = `log-${entry.event.toLowerCase()}`;
+                
+                // Sanitize message
+                const messageText = document.createTextNode(entry.message || entry.event);
+                const timeSpan = document.createElement('span');
+                timeSpan.className = 'log-time';
+                timeSpan.textContent = `[${new Date(entry.timestamp).toLocaleString()}]`;
+                
+                li.appendChild(timeSpan);
+                li.appendChild(document.createTextNode(' ')); // space
+                li.appendChild(messageText);
+
+                // Add extra details if they exist
+                if (entry.airport) {
+                    const detailSpan = document.createElement('span');
+                    detailSpan.className = 'log-detail';
+                    detailSpan.textContent = ` (Airport: ${entry.airport})`;
+                    li.appendChild(detailSpan);
+                }
+                
+                logList.appendChild(li);
+            });
+        } else {
+            logList.innerHTML = '<li>No history events found.</li>';
+        }
+        
+        logDiv.appendChild(logList);
+        modalContent.appendChild(logDiv);
+
+        // --- 3. Raw Flight Data (for debugging) ---
+        const flightDiv = document.createElement('div');
+        flightDiv.className = 'modal-section';
+        flightDiv.innerHTML = '<h3>Raw Flight Data (Last Known)</h3>';
+        
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(tracker.flight || tracker.lastKnownFlight || { info: "No flight data available." }, null, 2);
+        flightDiv.appendChild(pre);
+        modalContent.appendChild(flightDiv);
+    };
+
+    /**
+     * Fetches and renders tracker details. This is separated
+     * to be called by an interval.
+     */
+    const fetchAndRenderDetails = async (trackerId) => {
         try {
             const response = await fetch(`${API_BASE_URL}/track/${trackerId}`);
             if (!response.ok) throw new Error(`Server returned status ${response.status}`);
             const data = await response.json();
             
-            logToConsole(`Successfully fetched details for ${trackerId}.`, 'success');
-            modalContent.textContent = JSON.stringify(data.tracker, null, 2);
-            modal.style.display = 'block';
+            renderTrackerDetails(data.tracker);
         } catch (error) {
             logToConsole(`Could not fetch details for ${trackerId}: ${error.message}`, 'error');
-            errorMessage.textContent = 'Could not fetch tracker details.';
+            // Show error in modal instead of just console
+            modalContent.innerHTML = `<p class="error-text">Could not fetch tracker details: ${error.message}</p>`;
+            // Stop polling if it fails
+            if (detailsPollInterval) clearInterval(detailsPollInterval);
         }
     };
+
+    /**
+     * ⬇️ MODIFIED: This function now opens the modal and starts a 3-second
+     * polling interval to keep the data live.
+     */
+    const showDetailsModal = async (trackerId) => {
+        // Clear any previous interval
+        if (detailsPollInterval) {
+            clearInterval(detailsPollInterval);
+        }
+
+        // Set loading state
+        modalContent.innerHTML = '<p>Loading tracker details...</p>';
+        modal.style.display = 'block';
+
+        // Fetch and render immediately
+        await fetchAndRenderDetails(trackerId);
+
+        // Start polling for live updates
+        detailsPollInterval = setInterval(() => fetchAndRenderDetails(trackerId), 3000);
+    };
     
-    closeModal.onclick = () => { modal.style.display = 'none'; };
+    // ⬇️ MODIFIED: Must clear interval when modal is closed
+    closeModal.onclick = () => { 
+        modal.style.display = 'none'; 
+        if (detailsPollInterval) clearInterval(detailsPollInterval);
+    };
+    
+    // ⬇️ MODIFIED: Must clear interval when modal is closed
     window.onclick = (event) => {
         if (event.target === modal) {
             modal.style.display = 'none';
+            if (detailsPollInterval) clearInterval(detailsPollInterval);
         }
     };
 

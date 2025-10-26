@@ -9,6 +9,28 @@
     --status-landed: #2196f3;
     --status-stopped: #f44336;
     --text-dim: #888;
+
+    /* --- NEW: Shadows --- */
+    --shadow-soft: 0 4px 12px rgba(0, 0, 0, 0.25);
+    --shadow-inset: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* --- NEW: Custom Scrollbar --- */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-track {
+    background: var(--bg-color);
+    border-radius: 10px;
+}
+::-webkit-scrollbar-thumb {
+    background: #444;
+    border-radius: 10px;
+    border: 2px solid var(--bg-color);
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #555;
 }
 
 body {
@@ -26,6 +48,7 @@ header {
 
 h1, h2 {
     color: var(--primary-color);
+    text-shadow: 0 0 8px rgba(3, 218, 198, 0.2);
 }
 
 main {
@@ -35,12 +58,13 @@ main {
     gap: 30px;
 }
 
-/* Updated to include new .live-log panel */
+/* --- UPDATED: Panels --- */
 .control-panel, .tracker-list, .live-log {
     background-color: var(--surface-color);
-    padding: 20px;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
+    padding: 25px; /* More padding */
+    border-radius: 12px; /* Softer radius */
+    border: none; /* Removed border */
+    box-shadow: var(--shadow-soft); /* Added shadow */
 }
 
 form {
@@ -57,41 +81,55 @@ form {
 label {
     margin-bottom: 5px;
     font-weight: bold;
+    color: var(--text-dim);
 }
 
 input[type="text"] {
-    padding: 10px;
-    border-radius: 4px;
+    padding: 12px; /* More padding */
+    border-radius: 6px;
     border: 1px solid var(--border-color);
     background-color: var(--bg-color);
     color: var(--text-color);
     font-size: 1rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-button {
-    padding: 10px 15px;
+input[type="text"]:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 8px rgba(3, 218, 198, 0.3);
+}
+
+/* --- UPDATED: Main Action Button --- */
+form button[type="submit"] {
+    padding: 12px 15px;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     background-color: var(--primary-color);
-    color: var(--bg-color);
-    font-size: 1rem;
+    color: #000; /* Better contrast */
+    font-size: 1.05rem;
     font-weight: bold;
     cursor: pointer;
-    transition: background-color 0.2s;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    margin-top: 10px;
+    box-shadow: 0 2px 8px rgba(3, 218, 198, 0.3); /* Glow */
 }
 
-button:hover {
+form button[type="submit"]:hover {
     background-color: #018786;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(3, 218, 198, 0.5); /* More glow */
 }
 
-/* --- NEW: Live Log Styles --- */
+/* --- UPDATED: Live Log --- */
 #live-log-container {
-    background-color: var(--bg-color); /* Darker console background */
-    border-radius: 4px;
+    background-color: var(--bg-color);
+    border-radius: 6px;
     padding: 15px;
     max-height: 250px;
-    overflow-y: auto; /* Adds scrolling */
-    border: 1px solid var(--border-color);
+    overflow-y: auto;
+    border: none; /* Removed border */
+    box-shadow: var(--shadow-inset); /* Use inset shadow */
 }
 
 #live-log-list {
@@ -103,8 +141,8 @@ button:hover {
 }
 
 #live-log-list li {
-    padding: 4px 0;
-    border-bottom: 1px dashed var(--border-color);
+    padding: 6px 2px;
+    border-bottom: 1px solid #2a2a2a; /* Softer solid line */
     animation: fadeIn 0.3s ease-in;
     line-height: 1.4;
     word-break: break-word;
@@ -121,23 +159,10 @@ button:hover {
     white-space: nowrap;
 }
 
-.log-info {
-    color: var(--text-color);
-}
-
-.log-success {
-    color: var(--status-tracking);
-    font-weight: bold;
-}
-
-.log-error {
-    color: var(--status-stopped);
-    font-weight: bold;
-}
-
-.log-warn {
-    color: var(--status-searching);
-}
+.log-info { color: var(--text-color); }
+.log-success { color: var(--status-tracking); font-weight: bold; }
+.log-error { color: var(--status-stopped); font-weight: bold; }
+.log-warn { color: var(--status-searching); }
 
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(5px); }
@@ -146,13 +171,31 @@ button:hover {
 /* --- End of Live Log Styles --- */
 
 
+/* --- UPDATED: Tracker Cards --- */
 .tracker-card {
     background-color: #2a2a2a;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 15px;
-    margin-bottom: 10px;
+    border: none; /* Removed border */
+    border-radius: 8px;
+    padding: 15px 20px;
+    margin-bottom: 15px;
+    box-shadow: var(--shadow-soft);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    border-left: 5px solid var(--border-color); /* Default border */
+    overflow: hidden; /* Ensure border-radius clips */
 }
+
+.tracker-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+
+/* --- NEW: Status-colored card border (using :has) --- */
+.tracker-card:has(.status-tracking) { border-left-color: var(--status-tracking); }
+.tracker-card:has(.status-searching) { border-left-color: var(--status-searching); }
+.tracker-card:has(.status-landed) { border-left-color: var(--status-landed); }
+.tracker-card:has(.status-stopped),
+.tracker-card:has(.status-not_found) { border-left-color: var(--status-stopped); }
+
 
 .tracker-header {
     display: flex;
@@ -162,85 +205,126 @@ button:hover {
 }
 
 .tracker-title {
-    font-size: 1.2rem;
-    font-weight: bold;
+    font-size: 1.3rem; /* Larger */
+    font-weight: 600; /* Bolder */
+    color: #fff;
 }
 
+/* --- UPDATED: Status Pills --- */
 .tracker-status {
-    padding: 4px 8px;
-    border-radius: 12px;
+    padding: 5px 12px;
+    border-radius: 15px; /* Pill shape */
     font-size: 0.8rem;
     font-weight: bold;
     color: #fff;
     text-transform: uppercase;
+    box-shadow: 0 0 10px rgba(0,0,0,0.3); /* Base shadow */
 }
 
-.status-tracking { background-color: var(--status-tracking); }
-.status-searching { background-color: var(--status-searching); }
-.status-landed { background-color: var(--status-landed); }
-.status-stopped, .status-not_found { background-color: var(--status-stopped); }
+.status-tracking { background-color: var(--status-tracking); box-shadow: 0 0 10px var(--status-tracking); }
+.status-searching { background-color: var(--status-searching); box-shadow: 0 0 10px var(--status-searching); animation: pulse-warn 1.5s infinite; }
+.status-landed { background-color: var(--status-landed); box-shadow: 0 0 10px var(--status-landed); }
+.status-stopped, .status-not_found { background-color: var(--status-stopped); box-shadow: 0 0 10px var(--status-stopped); }
+
+/* --- NEW: Pulse Animation for "Searching" --- */
+@keyframes pulse-warn {
+    0% { box-shadow: 0 0 10px var(--status-searching); }
+    50% { box-shadow: 0 0 18px var(--status-searching); }
+    100% { box-shadow: 0 0 10px var(--status-searching); }
+}
+
 
 .tracker-info {
-    font-size: 0.9rem;
+    font-size: 0.95rem; /* Slightly larger */
     color: #aaa;
     margin-bottom: 15px;
 }
 
 .tracker-info p {
-    margin: 4px 0;
+    margin: 5px 0;
 }
 
+/* --- UPDATED: Card Action Buttons --- */
 .tracker-actions button {
     margin-right: 10px;
     font-size: 0.9rem;
-    padding: 8px 12px;
+    padding: 8px 14px;
+    border-radius: 15px; /* Pill shape */
+    border: none;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    cursor: pointer;
 }
 
-.btn-details { background-color: #6200ee; color: white; }
-.btn-delay { background-color: #ffa000; color: black; }
-.btn-stop { background-color: #c62828; color: white; }
-.error-text { color: var(--status-stopped); }
+.tracker-actions button:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.15);
+}
 
-/* Modal styles */
+.btn-details { background-color: #6200ee; color: white; box-shadow: 0 2px 5px rgba(98, 0, 238, 0.3); }
+.btn-delay { background-color: #ffa000; color: black; box-shadow: 0 2px 5px rgba(255, 160, 0, 0.3); }
+.btn-stop { background-color: #c62828; color: white; box-shadow: 0 2px 5px rgba(198, 40, 40, 0.3); }
+
+.error-text { 
+    color: var(--status-stopped); 
+    font-weight: bold;
+    text-shadow: 0 0 8px var(--status-stopped);
+}
+
+/* --- UPDATED: Modal --- */
 .modal {
     display: none;
     position: fixed;
-    z-index: 1;
+    z-index: 1000; /* Ensure on top */
     left: 0;
     top: 0;
     width: 100%;
     height: 100%;
     overflow: auto;
-    background-color: rgba(0, 0, 0, 0.6);
+    background-color: rgba(0, 0, 0, 0.7); /* Darker backdrop */
+    backdrop-filter: blur(5px); /* Frosted glass */
 }
 
 .modal-content {
     background-color: var(--surface-color);
     margin: 10% auto;
-    padding: 20px;
-    border: 1px solid var(--border-color);
+    padding: 25px;
+    border: none; /* Removed border */
     width: 80%;
     max-width: 700px;
-    border-radius: 8px;
+    border-radius: 12px;
     position: relative;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); /* Stronger shadow */
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from { opacity: 0; transform: translateY(-30px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 .close-button {
     color: #aaa;
     position: absolute;
-    top: 10px;
-    right: 20px;
-    font-size: 28px;
+    top: 15px;
+    right: 25px;
+    font-size: 32px;
     font-weight: bold;
     cursor: pointer;
+    transition: color 0.2s;
+}
+.close-button:hover {
+    color: white;
 }
 
 #modal-details-content {
     background-color: var(--bg-color);
     padding: 15px;
-    border-radius: 4px;
+    border-radius: 6px;
     max-height: 60vh;
     overflow-y: auto;
     white-space: pre-wrap;
     word-wrap: break-word;
+    box-shadow: var(--shadow-inset);
+    color: #c0c0c0;
 }
