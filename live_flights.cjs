@@ -889,6 +889,15 @@ function getActiveTrackers() {
   return [...trackers.values()].filter(t => t.status === 'searching' || t.status === 'tracking');
 }
 
+
+
+/**
+ * ⬇️ REPLACED FUNCTION
+ *
+ * This function contains the fix for the ACARS tracker being "trashed"
+ * when a user goes offline. The status is now set to 'searching' *before*
+ * the 'user_offline' notification is sent.
+ */
 async function pollOnce() {
   const now = Date.now();
 
@@ -1066,15 +1075,36 @@ async function pollOnce() {
         }
       }
 
-      // If we reach here: flight not in API and route analysis did not confirm landing (or not available)
-      // Mark as offline and keep searching up to timeout (SEARCH_TIMEOUT_MS)
+      // -----------------------------------------------------------------
+      // ⬇️ START: MODIFIED LOGIC
+      //
+      // If we reach here: flight not in API and route analysis did not confirm landing.
+      // We must now transition to 'searching' status and NOTIFY the ACARS of this change.
+      // -----------------------------------------------------------------
+      
       if (t.status === 'tracking') {
+        // This was a 'tracking' -> 'searching' transition
         t.history.push({ event: 'offline', timestamp: now });
-        if (TRACK_LOG) console.log(`[track] OFFLINE (mid-air) ${t.username} on ${t.server}`);
+        if (TRACK_LOG) console.log(`[track] OFFLINE (mid-air) ${t.username} on ${t.server}. Switching to 'searching'.`);
+        
+        // FIX: Set status to 'searching' *before* notifying the callback.
+        t.status = 'searching'; 
+        
+        // This now sends { status: 'searching', reason: 'user_offline' }
+        // This tells your ACARS to *keep* the tracker and wait for updates.
         notifyCallback(t, { reason: 'user_offline' });
+        
+      } else {
+        // If status was already 'searching', just ensure it stays 'searching'.
+        t.status = 'searching';
       }
+      
+      // The original `t.status = 'searching';` at line 1090 is now handled above.
+      
+      // -----------------------------------------------------------------
+      // ⬆️ END: MODIFIED LOGIC
+      // -----------------------------------------------------------------
 
-      t.status = 'searching';
 
       // Preserve last known flight in t.flight for frontend display while searching
       if (!t.flight && t.lastKnownFlight) {
