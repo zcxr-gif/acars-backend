@@ -892,11 +892,14 @@ function getActiveTrackers() {
 
 
 /**
- * ⬇️ REPLACED FUNCTION
+ * ⬇️ REPLACED FUNCTION (NEW FIX)
  *
- * This function contains the fix for the ACARS tracker being "trashed"
- * when a user goes offline. The status is now set to 'searching' *before*
- * the 'user_offline' notification is sent.
+ * This version implements the *new* fix. We NO LONGER send the
+ * 'user_offline' notification because the client ACARS was
+ * interpreting it as a final state and "trashing" the tracker.
+ *
+ * The server will now *silently* switch to 'searching' and
+ * only notify the client again when the user comes back online.
  */
 async function pollOnce() {
   const now = Date.now();
@@ -1076,10 +1079,10 @@ async function pollOnce() {
       }
 
       // -----------------------------------------------------------------
-      // ⬇️ START: MODIFIED LOGIC
+      // ⬇️ START: NEW FIX LOGIC
       //
       // If we reach here: flight not in API and route analysis did not confirm landing.
-      // We must now transition to 'searching' status and NOTIFY the ACARS of this change.
+      // We now silently transition to 'searching' and DO NOT notify the client.
       // -----------------------------------------------------------------
       
       if (t.status === 'tracking') {
@@ -1087,22 +1090,23 @@ async function pollOnce() {
         t.history.push({ event: 'offline', timestamp: now });
         if (TRACK_LOG) console.log(`[track] OFFLINE (mid-air) ${t.username} on ${t.server}. Switching to 'searching'.`);
         
-        // FIX: Set status to 'searching' *before* notifying the callback.
+        // 1. Set status to 'searching' internally.
         t.status = 'searching'; 
         
-        // This now sends { status: 'searching', reason: 'user_offline' }
-        // This tells your ACARS to *keep* the tracker and wait for updates.
-        notifyCallback(t, { reason: 'user_offline' });
+        // 2. DO NOT NOTIFY THE CLIENT.
+        //    This was the problem line. By commenting it out, the client
+        //    is not told about the 'user_offline' event and will not
+        //    "trash" the tracker.
+        //
+        // notifyCallback(t, { reason: 'user_offline' }); // <-- THIS LINE IS THE PROBLEM
         
       } else {
         // If status was already 'searching', just ensure it stays 'searching'.
         t.status = 'searching';
       }
       
-      // The original `t.status = 'searching';` at line 1090 is now handled above.
-      
       // -----------------------------------------------------------------
-      // ⬆️ END: MODIFIED LOGIC
+      // ⬆️ END: NEW FIX LOGIC
       // -----------------------------------------------------------------
 
 
