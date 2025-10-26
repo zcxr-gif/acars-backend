@@ -8,6 +8,7 @@
     --status-searching: #ff9800;
     --status-landed: #2196f3;
     --status-stopped: #f44336;
+    --text-dim: #888;
 }
 
 body {
@@ -34,7 +35,8 @@ main {
     gap: 30px;
 }
 
-.control-panel, .tracker-list {
+/* Updated to include new .live-log panel */
+.control-panel, .tracker-list, .live-log {
     background-color: var(--surface-color);
     padding: 20px;
     border-radius: 8px;
@@ -81,6 +83,68 @@ button {
 button:hover {
     background-color: #018786;
 }
+
+/* --- NEW: Live Log Styles --- */
+#live-log-container {
+    background-color: var(--bg-color); /* Darker console background */
+    border-radius: 4px;
+    padding: 15px;
+    max-height: 250px;
+    overflow-y: auto; /* Adds scrolling */
+    border: 1px solid var(--border-color);
+}
+
+#live-log-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    font-family: 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace;
+    font-size: 0.9rem;
+}
+
+#live-log-list li {
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--border-color);
+    animation: fadeIn 0.3s ease-in;
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+#live-log-list li:last-child {
+    border-bottom: none;
+}
+
+.log-time {
+    color: var(--text-dim);
+    margin-right: 10px;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.log-info {
+    color: var(--text-color);
+}
+
+.log-success {
+    color: var(--status-tracking);
+    font-weight: bold;
+}
+
+.log-error {
+    color: var(--status-stopped);
+    font-weight: bold;
+}
+
+.log-warn {
+    color: var(--status-searching);
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+/* --- End of Live Log Styles --- */
+
 
 .tracker-card {
     background-color: #2a2a2a;
