@@ -217,6 +217,8 @@ function findNearestAirport(lat, lon) {
  * Analyzes a flight's complete route data to calculate the true flight duration,
  * ignoring long gaps from disconnections.
  * This is the "robust time keeper" function.
+ *
+ * NEW: This version now ensures the landing airport is not the same as the takeoff airport.
  */
 function calculateFlightDurationFromRoute(route, airports) {
   if (!route || route.length < 2) {
@@ -233,22 +235,30 @@ function calculateFlightDurationFromRoute(route, airports) {
     const point = route[i];
     const { airport, distanceKm } = findNearestAirport(point.lat, point.lon); // Get distance
     if (airport) {
-      // ⬇️ MODIFIED: Removed AGL check, added proximity check
       if (point.groundSpeed > TAKEOFF_SPEED_KT && distanceKm < AIRPORT_PROXIMITY_KM) {
         takeoffPoint = point;
-        takeoffAirport = airport;
+        takeoffAirport = airport; // We've marked the departure airport
         break; // Found the first airborne point, stop searching
       }
     }
   }
 
   // 2. Find Landing Point (last point near an airport matching landing speed)
+  //    This point MUST NOT be the same as the takeoff airport.
   for (let i = route.length - 1; i >= 0; i--) {
     const point = route[i];
     const { airport, distanceKm } = findNearestAirport(point.lat, point.lon);
     if (airport) {
-      // ⬇️ MODIFIED: Removed AGL check, updated constant
-      if (point.groundSpeed < LANDED_SPEED_KT && distanceKm < AIRPORT_PROXIMITY_KM) {
+      const isLandedSpeed = point.groundSpeed < LANDED_SPEED_KT;
+      const isNearAirport = distanceKm < AIRPORT_PROXIMITY_KM;
+
+      // ⬇️ NEW LOGIC: Check if this airport is the *same* as the one we took off from.
+      // We only check this if a takeoffAirport was successfully identified.
+      const isDepartureAirport = takeoffAirport && airport.icao === takeoffAirport.icao;
+
+      // The point is valid only if it's at landed speed, near an airport,
+      // AND it's NOT the departure airport.
+      if (isLandedSpeed && isNearAirport && !isDepartureAirport) {
         landingPoint = point;
         landingAirport = airport;
         break; // Found the last landing-like point, stop searching
@@ -256,7 +266,8 @@ function calculateFlightDurationFromRoute(route, airports) {
     }
   }
 
-  // If we couldn't find a clear takeoff or landing, we can't calculate duration.
+  // If we couldn't find a clear takeoff or landing (that meets our criteria),
+  // we can't calculate duration.
   if (!takeoffPoint || !landingPoint) {
     return { durationMs: 0, takeoffPoint, landingPoint, takeoffAirport, landingAirport };
   }
