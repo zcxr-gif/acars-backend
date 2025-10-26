@@ -692,6 +692,46 @@ async function getUserGrade(userId) {
   }
 }
 
+/**
+ * ⬇️ NEW FUNCTION
+ * Fetches the recent flight history for a user.
+ */
+async function getUserFlightHistory(userId, page = 1) {
+  if (!userId) throw new Error('Missing userId');
+  const url = `/users/${encodeURIComponent(userId)}/flights`;
+  try {
+    // Add 'page' to params
+    const { data } = await ifClient.get(url, { params: { page } });
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+      if (payload.errorCode === 1) return []; // UserNotFound (or no flights)
+      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+      err.response = { data: payload };
+      throw err;
+    }
+    // The API returns an array in 'result'
+    return Array.isArray(payload.result) ? payload.result : [];
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status === 401 || status === 403) {
+      // Add page to retry params
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY, page } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+        if (payload.errorCode === 1) return []; // UserNotFound
+        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+        err.response = { data: payload };
+        throw err;
+      }
+      return Array.isArray(payload.result) ? payload.result : [];
+    }
+    if (status === 404) {
+      return []; // 404 means user not found, so no flights.
+    }
+    throw e;
+  }
+}
+
 
 /* =========================
  * Socket.IO Connection Handling (NEW)
@@ -908,6 +948,11 @@ function getActiveTrackers() {
  *
  * This version logs all its decisions into the `t.history` array,
  * which will then be displayed in the new frontend modal.
+ *
+ * THIS VERSION IS MODIFIED to:
+ * 1. Use /route analysis to CONFIRM landing.
+ * 2. THEN, call /users/{userId}/flights to get the OFFICIAL duration.
+ * 3. THEN, send the official duration in the callback.
  */
 async function pollOnce() {
   const now = Date.now();
@@ -1012,7 +1057,7 @@ async function pollOnce() {
 
         t.status = 'tracking';
         t.lastSeenAt = now;
-        t.flight = { ...found, sessionId };
+        t.flight = { ...found, sessionId }; // This .flight object contains the userId
         t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
 
         // Takeoff detection (speed + proximity)
@@ -1068,26 +1113,79 @@ async function pollOnce() {
           if (simplifiedRoute.length > 1) {
             const flightAnalysis = calculateFlightDurationFromRoute(simplifiedRoute, airports);
 
-            // ⬇️ THIS IS THE FIX.
+            // ⬇️ THIS IS THE ORIGINAL FIX.
             // Only count as "landed" if we found BOTH a takeoff and a landing.
             if (flightAnalysis.landingAirport && flightAnalysis.takeoffAirport) {
-              // Confirmed landed via route analysis
-              t.status = 'landed';
-              // ⬇️ MODIFIED: Add rich history message
-              const landedMsg = `LANDED (via route analysis) at ${flightAnalysis.landingAirport.icao}. Duration: ${Math.round(flightAnalysis.durationMs/60000)}m. Stopping tracker.`;
-              t.history.push({ event: 'landed', message: landedMsg, timestamp: now, airport: flightAnalysis.landingAirport.icao, method: 'route_analysis' });
+              
+              // -----------------------------------------------------------------
+              // ⬇️ START: NEW LOGIC (as requested)
+              // We've confirmed landing via route. NOW, get official duration.
+              // -----------------------------------------------------------------
+              
+              t.status = 'landed'; // Set status to landed immediately
 
-              if (TRACK_LOG) console.log(`[track] LANDED (via route analysis) ${t.username} at ${flightAnalysis.landingAirport.icao}. Duration: ${Math.round(flightAnalysis.durationMs/60000)}m. Stopping tracker.`);
+              // Set defaults based on our route analysis
+              let officialDurationMs = flightAnalysis.durationMs;
+              let officialStartTime = flightAnalysis.takeoffPoint?.timestamp;
+              let officialEndTime = flightAnalysis.landingPoint?.timestamp;
+              let method = 'route_analysis'; // Default method
+
+              // Now, try to get the official data from the user history API
+              if (t.flight?.userId) {
+                try {
+                  const userId = t.flight.userId;
+                  const lastFlightId = t.lastKnownFlight.flightId;
+                  
+                  t.history.push({ event: 'fetch_history', message: `Landing confirmed. Fetching official duration from /users API...`, timestamp: now });
+                  if (TRACK_LOG) console.log(`[track] ${t.username} landing confirmed. Fetching official duration...`);
+
+                  const userFlights = await getUserFlightHistory(userId, 1);
+                  const completedFlight = userFlights.find(f => f.flightId === lastFlightId);
+
+                  if (completedFlight && completedFlight.totalTime > 0) {
+                    // Success! Use the official data.
+                    officialDurationMs = (completedFlight.totalTime || 0) * 1000;
+                    officialStartTime = completedFlight.startTime;
+                    officialEndTime = completedFlight.endTime;
+                    method = 'user_history'; // Update method
+                    
+                    t.history.push({ event: 'fetch_history_success', message: `Fetched official duration from user history (${Math.round(officialDurationMs/60000)}m).`, timestamp: now });
+                    if (TRACK_LOG) console.log(`[track] ${t.username} official duration found: ${officialDurationMs}ms`);
+
+                  } else {
+                    t.history.push({ event: 'fetch_history_fail', message: 'Could not find matching flight in user history. Using route analysis duration.', timestamp: now });
+                    if (TRACK_LOG) console.warn(`[track] ${t.username} flight ${lastFlightId} not in user history. Using route duration.`);
+                  }
+                } catch (historyError) {
+                  t.history.push({ event: 'fetch_history_error', message: `Failed to fetch user history: ${historyError.message}. Using route analysis duration.`, timestamp: now });
+                  if (TRACK_LOG) console.error(`[track] ${t.username} failed to fetch user history: ${historyError.message}`);
+                }
+              } else {
+                t.history.push({ event: 'fetch_history_skip', message: 'No userId available to fetch official history. Using route analysis duration.', timestamp: now });
+                if (TRACK_LOG) console.warn(`[track] ${t.username} has no userId. Using route duration.`);
+              }
+
+              // -----------------------------------------------------------------
+              // ⬆️ END: NEW LOGIC
+              // -----------------------------------------------------------------
+
+
+              // Confirmed landed. Now send the callback with the (potentially updated) duration.
+              const landedMsg = `LANDED (via ${method}) at ${flightAnalysis.landingAirport.icao}. Duration: ${Math.round(officialDurationMs/60000)}m. Stopping tracker.`;
+              t.history.push({ event: 'landed', message: landedMsg, timestamp: now, airport: flightAnalysis.landingAirport.icao, method: method });
+
+              if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${flightAnalysis.landingAirport.icao}. Duration: ${Math.round(officialDurationMs/60000)}m (method: ${method}). Stopping tracker.`);
+              
               notifyCallback(t, {
                 reason: 'flight_landed',
-                flightDurationMs: flightAnalysis.durationMs,
+                flightDurationMs: officialDurationMs, // Send the official duration
                 takeoffDetails: {
-                  airport: flightAnalysis.takeoffAirport,
-                  timestamp: flightAnalysis.takeoffPoint?.timestamp,
+                  airport: flightAnalysis.takeoffAirport, // Still use route analysis for airport
+                  timestamp: officialStartTime, // Use official time
                 },
                 landingDetails: {
-                  airport: flightAnalysis.landingAirport,
-                  timestamp: flightAnalysis.landingPoint?.timestamp,
+                  airport: flightAnalysis.landingAirport, // Still use route analysis for airport
+                  timestamp: officialEndTime, // Use official time
                 }
               });
 
@@ -1114,7 +1212,7 @@ async function pollOnce() {
       }
 
       // -----------------------------------------------------------------
-      // ⬇️ START: NEW FIX LOGIC (Now reachable)
+      // ⬇️ START: EXISTING FIX LOGIC (Now reachable)
       //
       // If we reach here: flight not in API and route analysis did NOT confirm landing.
       // We now silently transition to 'searching' and DO NOT notify the client.
@@ -1142,7 +1240,7 @@ async function pollOnce() {
       }
       
       // -----------------------------------------------------------------
-      // ⬆️ END: NEW FIX LOGIC
+      // ⬆️ END: EXISTING FIX LOGIC
       // -----------------------------------------------------------------
 
 
