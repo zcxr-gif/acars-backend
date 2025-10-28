@@ -589,26 +589,39 @@ async function getFlightPlan(sessionId, flightId) {
   }
 }
 
+
 function simplifyFlightPlan(plan) {
   if (!plan || !Array.isArray(plan.flightPlanItems)) {
     return { flightPlanId: plan?.flightPlanId || null, waypoints: [] };
   }
+  
   const waypoints = [];
+  
   const extractWaypoints = (items) => {
+    if (!Array.isArray(items)) return; // Safety check
+    
     for (const item of items) {
-      if (item.location && (item.location.latitude !== 0 || item.location.longitude !== 0)) {
-        waypoints.push({
-          name: item.name,
-          lat: item.location.latitude,
-          lon: item.location.longitude,
-        });
-      }
-      if (Array.isArray(item.children)) {
+      // According to the documentation, an item is a procedure IF it has children.
+      if (Array.isArray(item.children) && item.children.length > 0) {
+        // This is a procedure (e.g., "L12R").
+        // Do NOT add this item itself; just process its children.
         extractWaypoints(item.children);
+      } else {
+        // This is a waypoint (e.g., "AMAHE", "ZESTY", "RW12R").
+        // Add it, but keep the safety check for (0,0) locations just in case.
+        if (item.location && (item.location.latitude !== 0 || item.location.longitude !== 0)) {
+          waypoints.push({
+            name: item.name,
+            lat: item.location.latitude,
+            lon: item.location.longitude,
+          });
+        }
       }
     }
   };
+  
   extractWaypoints(plan.flightPlanItems);
+  
   return {
     flightPlanId: plan.flightPlanId,
     waypoints,
