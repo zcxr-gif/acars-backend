@@ -1057,20 +1057,22 @@ function getActiveTrackers() {
 
 
 /**
- * ⬇️ REPLACED FUNCTION (WITH RICH HISTORY LOGGING)
+ * ⬇️ REPLACED FUNCTION (WITH "PERMANENT LOCK" LOGIC)
  *
- * This version logs all its decisions into the `t.history` array,
- * which will then be displayed in the new frontend modal.
+ * This version implements the user's critical requirement:
+ * Once a tracker's status becomes 'tracking' (i.e., it has locked onto a
+ * flightId), it can NEVER revert to 'searching'.
  *
- * THIS VERSION IS MODIFIED to:
- * 1. Use /route analysis to CONFIRM landing.
- * 2. THEN, call /users/{userId}/flights to get the OFFICIAL duration.
- * 3. THEN, send the official duration in the callback.
+ * If the user goes offline (flight disappears from /flights) and a landing
+ * cannot be immediately confirmed, the tracker's status REMAINS 'tracking'.
  *
- * ❗️ THIS VERSION INCLUDES FIXES based on the provided API schema:
- * - Uses `f.id` instead of `f.flightId` for history matching.
- * - Converts `totalTime` from MINUTES (not seconds) to milliseconds.
- * - Uses `completedFlight.created` as the official end timestamp.
+ * It will continue to poll, bound to the original flightId, and will
+ * re-run the landing checks (History API, then Route Analysis) on each
+ * poll.
+ *
+ * This makes it *impossible* for the tracker to accidentally attach to a
+ * new flight started by the same user, as the code block for
+ * "searching by username" will never be executed again.
  */
 async function pollOnce() {
   const now = Date.now();
@@ -1142,41 +1144,50 @@ async function pollOnce() {
 
       let match = null;
 
+      // --- FLIGHT MATCHING LOGIC ---
+      
       // If already tracking, prefer the locked flightId
       if (t.status === 'tracking' && t.lastKnownFlight?.flightId) {
         match = byFlightId.get(t.lastKnownFlight.flightId);
-      } else if (t.status === 'searching') {
-        // otherwise look for flights by username
+      } 
+      // ONLY if status is 'searching' (pre-lock) do we look by username
+      else if (t.status === 'searching') {
         const userFlights = byUsername.get(t.username.toLowerCase());
         if (userFlights && userFlights.length) {
           match = userFlights[0];
         }
       }
+      
+      // --- END FLIGHT MATCHING LOGIC ---
+
 
       if (match) {
-        // Flight is present in API -> update tracking state
+        // ---------------------------------
+        // FLIGHT IS PRESENT (ONLINE)
+        // ---------------------------------
         const found = simplifyFlight(match);
 
-        const isNewFlightAfterOffline = t.status === 'searching' && t.lastKnownFlight?.flightId && t.lastKnownFlight.flightId !== found.flightId;
-        const isFirstEverOnlineEvent = !t.history.some(h => h.event === 'online');
-
-        if (isFirstEverOnlineEvent || isNewFlightAfterOffline) {
-          if (isNewFlightAfterOffline) {
-            if (TRACK_LOG) console.log(`[track] ♻️ New flight detected for ${t.username}. Old: ${t.lastKnownFlight.flightId}, New: ${found.flightId}. Resetting flight history.`);
-            // ⬇️ MODIFIED: Add rich history message
-            t.history = t.history.filter(h => h.event === 'created' || h.event === 'stopped');
-            t.history.push({ event: 'new_flight', message: `New flight detected. Old: ${t.lastKnownFlight.flightId}, New: ${found.flightId}. Resetting history.`, timestamp: now });
-          }
-           // ⬇️ MODIFIED: Add rich history message
-          t.history.push({ event: 'online', message: `User found ONLINE. Locking onto flightId: ${found.flightId}`, timestamp: now });
-          if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server} -> Locking onto flightId: ${found.flightId}`);
-          notifyCallback(t, { flight: { ...found, sessionId }, reason: 'user_online' });
+        // This is the "first lock" event.
+        // It happens when status *was* 'searching' and we found a flight.
+        const isFirstLock = t.status === 'searching';
+        
+        if (isFirstLock) {
+           t.history.push({ event: 'online', message: `User found ONLINE. Locking onto flightId: ${found.flightId}`, timestamp: now });
+           if (TRACK_LOG) console.log(`[track] ONLINE ${t.username} on ${t.server} -> Locking onto flightId: ${found.flightId}`);
+           notifyCallback(t, { flight: { ...found, sessionId }, reason: 'user_online' });
+           
+           // THIS IS THE MOMENT OF "PERMANENT LOCK"
+           t.status = 'tracking'; 
+           t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
         }
 
-        t.status = 'tracking';
         t.lastSeenAt = now;
         t.flight = { ...found, sessionId }; // This .flight object contains the userId
-        t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
+        
+        // This check is redundant due to isFirstLock, but safe to keep
+        if (!t.lastKnownFlight) {
+             t.lastKnownFlight = { flightId: found.flightId, sessionId: sessionId };
+        }
 
         // Takeoff detection (speed + proximity)
         const hasTakenOff = t.history.some(h => h.event === 'takeoff');
@@ -1186,7 +1197,6 @@ async function pollOnce() {
             const groundSpeed = found.position.gs_kt;
             const isAirborne = groundSpeed > TAKEOFF_SPEED_KT && distanceKm < AIRPORT_PROXIMITY_KM;
             if (isAirborne) {
-              // ⬇️ MODIFIED: Add rich history message
               t.history.push({ event: 'takeoff', message: `TAKEOFF detected near ${airport.icao}. Flight timer started.`, timestamp: now, airport: airport.icao });
               if (TRACK_LOG) console.log(`[track] TAKEOFF ${t.username} from near ${airport.icao}. Flight timer started.`);
               notifyCallback(t, { reason: 'flight_takeoff', airport });
@@ -1198,7 +1208,6 @@ async function pollOnce() {
         const isInBackground = found.pilotState === 3;
         t.nextPollAt = now + (isInBackground ? BACKGROUND_POLL_MS : POLL_MS);
         
-        // ⬇️ NEW: Log background state change
         const wasInBackground = t.history.at(-1)?.event === 'background';
         if (isInBackground && !wasInBackground) {
             t.history.push({ event: 'background', message: `User is in background. Switching to ${BACKGROUND_POLL_MS/60000}m poll interval.`, timestamp: now });
@@ -1212,170 +1221,181 @@ async function pollOnce() {
         continue; // proceed to next tracker
       }
 
-      // -----------------------
-      // match is falsy (flight not present in current API response)
-      // -----------------------
-      // Always attempt route/landing analysis if we have a lastKnownFlight
-      let routeAnalysisAttempted = false;
-      if (t.lastKnownFlight?.flightId) {
-        try {
-          routeAnalysisAttempted = true;
-          // ⬇️ MODIFIED: Add rich history message
-          const analysisMsg = `Flight ${t.lastKnownFlight.flightId} not in /flights. Attempting route analysis for landing.`;
-          t.history.push({ event: 'analysis_start', message: analysisMsg, timestamp: now });
-          if (TRACK_LOG) console.log(`[track] ${t.username}'s flight ${t.lastKnownFlight.flightId} not in /flights; attempting route analysis...`);
-          
-          const route = await getFlightRoute(t.lastKnownFlight.sessionId, t.lastKnownFlight.flightId);
-          const simplifiedRoute = simplifyFlightRoute(route);
-
-          if (simplifiedRoute.length > 1) {
-            const flightAnalysis = calculateFlightDurationFromRoute(simplifiedRoute, airports);
-
-            // ⬇️ THIS IS THE ORIGINAL FIX.
-            // Only count as "landed" if we found BOTH a takeoff and a landing.
-            if (flightAnalysis.landingAirport && flightAnalysis.takeoffAirport) {
-              
-              // -----------------------------------------------------------------
-              // ⬇️ START: NEW LOGIC (as requested)
-              // We've confirmed landing via route. NOW, get official duration.
-              // -----------------------------------------------------------------
-              
-              t.status = 'landed'; // Set status to landed immediately
-
-              // Set defaults based on our route analysis
-              let officialDurationMs = flightAnalysis.durationMs;
-              let officialStartTime = flightAnalysis.takeoffPoint?.timestamp;
-              let officialEndTime = flightAnalysis.landingPoint?.timestamp;
-              let method = 'route_analysis'; // Default method
-
-              // Now, try to get the official data from the user history API
-              if (t.flight?.userId) {
-                try {
-                  const userId = t.flight.userId;
-                  const lastFlightId = t.lastKnownFlight.flightId;
-                  
-                  t.history.push({ event: 'fetch_history', message: `Landing confirmed. Fetching official duration from /users API...`, timestamp: now });
-                  if (TRACK_LOG) console.log(`[track] ${t.username} landing confirmed. Fetching official duration...`);
-
-                  // ⬇️ FIX: This function now correctly returns the array
-                  const userFlights = await getUserFlightHistory(userId, 1);
-                  
-                  // ⬇️ FIX: Compare against 'f.id' (from API) not 'f.flightId'
-                  const completedFlight = userFlights.find(f => f.id === lastFlightId);
-
-                  // ⬇️ FIX: Check if totalTime is a number
-                  if (completedFlight && typeof completedFlight.totalTime === 'number') {
-                    // Success! Use the official data.
-                    
-                    // ⬇️ FIX: Convert MINUTES to MS (totalTime * 60 * 1000)
-                    officialDurationMs = (completedFlight.totalTime || 0) * 60 * 1000;
-                    
-                    // officialStartTime remains from route analysis (flightAnalysis.takeoffPoint?.timestamp)
-                    // The history API does not provide a reliable start time.
-                    
-                    // ⬇️ FIX: Use 'created' as the official end timestamp
-                    officialEndTime = completedFlight.created; 
-                    
-                    method = 'user_history'; // Update method
-                    
-                    t.history.push({ event: 'fetch_history_success', message: `Fetched official duration from user history (${Math.round(officialDurationMs/60000)}m).`, timestamp: now });
-                    if (TRACK_LOG) console.log(`[track] ${t.username} official duration found: ${officialDurationMs}ms`);
-
-                  } else {
-                    t.history.push({ event: 'fetch_history_fail', message: 'Could not find matching flight in user history. Using route analysis duration.', timestamp: now });
-                    if (TRACK_LOG) console.warn(`[track] ${t.username} flight ${lastFlightId} not in user history. Using route duration.`);
-                  }
-                } catch (historyError) {
-                  t.history.push({ event: 'fetch_history_error', message: `Failed to fetch user history: ${historyError.message}. Using route analysis duration.`, timestamp: now });
-                  if (TRACK_LOG) console.error(`[track] ${t.username} failed to fetch user history: ${historyError.message}`);
-                }
-              } else {
-                t.history.push({ event: 'fetch_history_skip', message: 'No userId available to fetch official history. Using route analysis duration.', timestamp: now });
-                if (TRACK_LOG) console.warn(`[track] ${t.username} has no userId. Using route duration.`);
-              }
-
-              // -----------------------------------------------------------------
-              // ⬆️ END: NEW LOGIC
-              // -----------------------------------------------------------------
-
-
-              // Confirmed landed. Now send the callback with the (potentially updated) duration.
-              const landedMsg = `LANDED (via ${method}) at ${flightAnalysis.landingAirport.icao}. Duration: ${Math.round(officialDurationMs/60000)}m. Stopping tracker.`;
-              t.history.push({ event: 'landed', message: landedMsg, timestamp: now, airport: flightAnalysis.landingAirport.icao, method: method });
-
-              if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${flightAnalysis.landingAirport.icao}. Duration: ${Math.round(officialDurationMs/60000)}m (method: ${method}). Stopping tracker.`);
-              
-              notifyCallback(t, {
-                reason: 'flight_landed',
-                flightDurationMs: officialDurationMs, // Send the official (or fallback) duration
-                takeoffDetails: {
-                  airport: flightAnalysis.takeoffAirport, 
-                  timestamp: officialStartTime, // Use official time (or route fallback)
-                },
-                landingDetails: {
-                  airport: flightAnalysis.landingAirport, 
-                  timestamp: officialEndTime, // Use official time (or route fallback)
-                }
-              });
-
-              // Finalize and persist the tracker state (do not clear history yet)
-              trackers.set(t.id, t);
-              continue; // move to next tracker (we're done with this one)
-            } else {
-              // ⬇️ MODIFIED: Add rich history message
-              const failMsg = `Route analysis ran but did not confirm landing (Takeoff: ${flightAnalysis.takeoffAirport?.icao || 'N/A'}, Landing: ${flightAnalysis.landingAirport?.icao || 'N/A'}).`;
-              t.history.push({ event: 'analysis_fail', message: failMsg, timestamp: now });
-              if (TRACK_LOG) console.log(`[track] ${t.username} route analysis ran but did not confirm landing (takeoffAirport=${flightAnalysis.takeoffAirport?.icao}, landingAirport=${flightAnalysis.landingAirport?.icao}).`);
-            }
-          } else {
-            // ⬇️ MODIFIED: Add rich history message
-            const noDataMsg = `Route retrieved but had insufficient data points (${simplifiedRoute.length}) for analysis.`;
-            t.history.push({ event: 'analysis_nodata', message: noDataMsg, timestamp: now });
-            if (TRACK_LOG) console.log(`[track] ${t.username} route retrieved but not enough points for analysis.`);
-          }
-        } catch (e) {
-          // ⬇️ MODIFIED: Add rich history message
-          t.history.push({ event: 'analysis_error', message: `Route analysis failed: ${e.message}`, timestamp: now });
-          if (TRACK_LOG) console.warn(`[track] route analysis failed for ${t.username}: ${e.message}`);
-        }
-      }
-
-      // -----------------------------------------------------------------
-      // ⬇️ START: EXISTING FIX LOGIC (Now reachable)
-      //
-      // If we reach here: flight not in API and route analysis did NOT confirm landing.
-      // We now silently transition to 'searching' and DO NOT notify the client.
-      // -----------------------------------------------------------------
+      // ---------------------------------
+      // FLIGHT IS NOT PRESENT (OFFLINE)
+      // ---------------------------------
       
-      if (t.status === 'tracking') {
-        // This was a 'tracking' -> 'searching' transition
-        // ⬇️ MODIFIED: Add rich history message
-        t.history.push({ event: 'offline', message: `User went OFFLINE (mid-air). Switching to 'searching' mode.`, timestamp: now });
-        if (TRACK_LOG) console.log(`[track] OFFLINE (mid-air) ${t.username} on ${t.server}. Switching to 'searching'.`);
+      // We now check if the tracker was *ever* locked to a flight.
+      if (t.lastKnownFlight?.flightId) {
         
-        // 1. Set status to 'searching' internally.
-        t.status = 'searching'; 
+        // --- START: "POST-LOCK" OFFLINE LOGIC ---
+        // The tracker is locked. Its job is *only* to find the fate of
+        // t.lastKnownFlight.flightId.
         
-        // 2. DO NOT NOTIFY THE CLIENT.
-        //    This was the problem line. By commenting it out, the client
-        //    is not told about the 'user_offline' event and will not
-        //    "trash" the tracker.
-        //
-        // notifyCallback(t, { reason: 'user_offline' }); // <-- THIS LINE IS THE PROBLEM
+        let landingConfirmed = false;
+        let method = 'unknown';
+        let officialDurationMs = 0;
+        let officialStartTime = null;
+        let officialEndTime = null;
+        let takeoffAirport = null;
+        let landingAirport = null;
+        
+        const lastFlightId = t.lastKnownFlight.flightId;
+
+        // 1. CHECK OFFICIAL USER HISTORY FIRST
+        if (t.flight?.userId) {
+          try {
+            const userId = t.flight.userId;
+            t.history.push({ event: 'fetch_history', message: `Flight ${lastFlightId} not in /flights. Checking official user history...`, timestamp: now });
+            if (TRACK_LOG) console.log(`[track] ${t.username} flight ${lastFlightId} not in /flights. Checking official history...`);
+            
+            const userFlights = await getUserFlightHistory(userId, 1);
+            const completedFlight = userFlights.find(f => f.id === lastFlightId);
+
+            if (completedFlight && typeof completedFlight.totalTime === 'number') {
+              // SUCCESS: Flight is 100% confirmed as LANDED
+              landingConfirmed = true;
+              method = 'user_history';
+              officialDurationMs = (completedFlight.totalTime || 0) * 60 * 1000; // minutes to ms
+              officialEndTime = completedFlight.created; // Official landing time
+              
+              t.history.push({ event: 'fetch_history_success', message: `Official history CONFIRMED landing. Duration: ${Math.round(officialDurationMs/60000)}m.`, timestamp: now });
+              if (TRACK_LOG) console.log(`[track] ${t.username} official history CONFIRMED landing. Duration ${officialDurationMs}ms.`);
+
+              // Now, we run route analysis *only to get airport data*
+              try {
+                const route = await getFlightRoute(t.lastKnownFlight.sessionId, lastFlightId);
+                const simplifiedRoute = simplifyFlightRoute(route);
+                const flightAnalysis = calculateFlightDurationFromRoute(simplifiedRoute, airports);
+                
+                takeoffAirport = flightAnalysis.takeoffAirport; 
+                landingAirport = flightAnalysis.landingAirport;
+                officialStartTime = flightAnalysis.takeoffPoint?.timestamp; // Use route takeoff time
+
+                t.history.push({ event: 'analysis_for_airports', message: `Route analysis ran to find airports. Takeoff: ${takeoffAirport?.icao || 'N/A'}, Landing: ${landingAirport?.icao || 'N/A'}.`, timestamp: now });
+              } catch (routeError) {
+                t.history.push({ event: 'analysis_for_airports_fail', message: `Route analysis for airports failed (${routeError.message}). Airports will be unknown.`, timestamp: now });
+                if (TRACK_LOG) console.warn(`[track] ${t.username} route analysis for airports failed: ${routeError.message}`);
+              }
+            } else {
+              t.history.push({ event: 'fetch_history_fail', message: 'Flight not found in user history. Falling back to route analysis.', timestamp: now });
+              if (TRACK_LOG) console.warn(`[track] ${t.username} flight ${lastFlightId} not in user history. Falling back to route analysis.`);
+            }
+          } catch (historyError) {
+            t.history.push({ event: 'fetch_history_error', message: `Failed to fetch user history: ${historyError.message}. Falling back to route analysis.`, timestamp: now });
+            if (TRACK_LOG) console.error(`[track] ${t.username} failed to fetch user history: ${historyError.message}`);
+          }
+        } else {
+            t.history.push({ event: 'fetch_history_skip', message: 'No userId available. Skipping official history check. Using route analysis.', timestamp: now });
+            if (TRACK_LOG) console.warn(`[track] ${t.username} has no userId. Using route analysis.`);
+        }
+
+
+        // 2. FALLBACK TO ROUTE ANALYSIS (if not already confirmed)
+        if (!landingConfirmed) {
+          try {
+            t.history.push({ event: 'analysis_start', message: `Attempting landing confirmation via route analysis...`, timestamp: now });
+            if (TRACK_LOG) console.log(`[track] ${t.username} attempting route analysis for landing...`);
+          
+            const route = await getFlightRoute(t.lastKnownFlight.sessionId, lastFlightId);
+            const simplifiedRoute = simplifyFlightRoute(route);
+
+            if (simplifiedRoute.length > 1) {
+              const flightAnalysis = calculateFlightDurationFromRoute(simplifiedRoute, airports);
+
+              if (flightAnalysis.landingAirport && flightAnalysis.takeoffAirport) {
+                // SUCCESS: Route analysis confirmed landing
+                landingConfirmed = true;
+                method = 'route_analysis';
+                officialDurationMs = flightAnalysis.durationMs;
+                officialStartTime = flightAnalysis.takeoffPoint?.timestamp;
+                officialEndTime = flightAnalysis.landingPoint?.timestamp;
+                takeoffAirport = flightAnalysis.takeoffAirport;
+                landingAirport = flightAnalysis.landingAirport;
+                
+                t.history.push({ event: 'analysis_success', message: `Route analysis CONFIRMED landing at ${landingAirport.icao}.`, timestamp: now });
+                if (TRACK_LOG) console.log(`[track] ${t.username} route analysis CONFIRMED landing at ${landingAirport.icao}.`);
+
+              } else {
+                const failMsg = `Route analysis did not confirm landing (Takeoff: ${flightAnalysis.takeoffAirport?.icao || 'N/A'}, Landing: ${flightAnalysis.landingAirport?.icao || 'N/A'}).`;
+                t.history.push({ event: 'analysis_fail', message: failMsg, timestamp: now });
+                if (TRACK_LOG) console.log(`[track] ${t.username} ${failMsg}`);
+              }
+            } else {
+              const noDataMsg = `Route retrieved but had insufficient data points (${simplifiedRoute.length}) for analysis.`;
+              t.history.push({ event: 'analysis_nodata', message: noDataMsg, timestamp: now });
+              if (TRACK_LOG) console.log(`[track] ${t.username} ${noDataMsg}`);
+            }
+          } catch (e) {
+            t.history.push({ event: 'analysis_error', message: `Route analysis failed: ${e.message}`, timestamp: now });
+            if (TRACK_LOG) console.warn(`[track] route analysis failed for ${t.username}: ${e.message}`);
+          }
+        }
+
+
+        // 3. FINAL DECISION: Notify or Continue Polling
+        if (landingConfirmed) {
+          if (!landingAirport) landingAirport = { icao: 'UNKN', name: 'Unknown' };
+          if (!takeoffAirport) takeoffAirport = { icao: 'UNKN', name: 'Unknown' };
+
+          // LANDING CONFIRMED. Stop the tracker.
+          t.status = 'landed'; 
+
+          const landedMsg = `LANDED (via ${method}) at ${landingAirport.icao}. Duration: ${Math.round(officialDurationMs/60000)}m. Stopping tracker.`;
+          t.history.push({ event: 'landed', message: landedMsg, timestamp: now, airport: landingAirport.icao, method: method });
+
+          if (TRACK_LOG) console.log(`[track] LANDED ${t.username} at ${landingAirport.icao}. Duration: ${Math.round(officialDurationMs/60000)}m (method: ${method}). Stopping tracker.`);
+          
+          notifyCallback(t, {
+            reason: 'flight_landed',
+            flightDurationMs: officialDurationMs,
+            takeoffDetails: {
+              airport: takeoffAirport, 
+              timestamp: officialStartTime,
+            },
+            landingDetails: {
+              airport: landingAirport, 
+              timestamp: officialEndTime,
+            }
+          });
+
+          trackers.set(t.id, t);
+          continue; // move to next tracker
+        }
+        
+        // -----------------------------------------------------------------
+        // CRITICAL FIX: BOTH landing checks failed.
+        // DO NOT change status. It remains 'tracking'.
+        // -----------------------------------------------------------------
+        
+        const offlineMsg = `User is OFFLINE. Landing not yet confirmed. Continuing to poll for ${lastFlightId}.`;
+        if (t.history.at(-1)?.event !== 'offline_polling') { // Avoid spamming log
+           t.history.push({ event: 'offline_polling', message: offlineMsg, timestamp: now });
+           if (TRACK_LOG) console.log(`[track] OFFLINE ${t.username}. Status remains 'tracking', polling for ${lastFlightId}.`);
+        }
+        
+        // --- END: "POST-LOCK" OFFLINE LOGIC ---
         
       } else {
-        // If status was already 'searching', just ensure it stays 'searching'.
-        t.status = 'searching';
+        // --- START: "PRE-LOCK" OFFLINE LOGIC ---
+        // The tracker is still 'searching' and hasn't found the user.
+        // This is fine. It remains 'searching'.
+         const searchingMsg = `User not found. Continuing search.`;
+         if (t.history.at(-1)?.event !== 'searching') {
+            t.history.push({ event: 'searching', message: searchingMsg, timestamp: now });
+         }
+         // t.status remains 'searching'
+         // --- END: "PRE-LOCK" OFFLINE LOGIC ---
       }
+
+
+      // ---------------------------------
+      // TIMEOUT & NEXT POLL LOGIC
+      // (Applies to both 'searching' and 'tracking' states)
+      // ---------------------------------
       
-      // -----------------------------------------------------------------
-      // ⬆️ END: EXISTING FIX LOGIC
-      // -----------------------------------------------------------------
-
-
-      // Preserve last known flight in t.flight for frontend display while searching
+      // Preserve last known flight in t.flight for frontend display
       if (!t.flight && t.lastKnownFlight) {
-        // Keep minimal last-known info; if you want richer data, copy the full last-known object here.
         t.flight = {
           flightId: t.lastKnownFlight.flightId,
           sessionId: t.lastKnownFlight.sessionId,
@@ -1395,28 +1415,19 @@ async function pollOnce() {
       }
       t.nextPollAt = now + nextInterval;
 
-      // If we've exceeded the search timeout, mark not_found and optionally clear last-known data
+      // Check for final timeout
       if (now >= t.timeoutAt) {
+        // Tracker timed out. Stop it.
         t.status = 'not_found';
-        // ⬇️ MODIFIED: Add rich history message
         t.history.push({ event: 'timeout', message: `Search TIMEOUT exceeded (${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h). Stopping tracker.`, timestamp: now });
         if (TRACK_LOG) console.log(`[track] TIMEOUT ${t.username} on ${t.server}`);
         notifyCallback(t, { reason: `timeout_${SEARCH_TIMEOUT_MS / (60 * 60 * 1000)}h` });
-
-        // It's safe to clear the flight after the final timeout if you want:
-        // t.flight = null;
-        // t.lastKnownFlight = null;
       } else {
-         // ⬇️ MODIFIED: Add rich history message
-         const searchingMsg = `User not found. Continuing search. Next poll in ${nextInterval/60000}m.`;
-         // Only log this if it's not redundant (i.e., not the same as the last message)
-         if (t.history.at(-1)?.event !== 'searching') {
-            t.history.push({ event: 'searching', message: searchingMsg, timestamp: now });
+         // Log the next poll time
+         if (TRACK_LOG) {
+           const willTimeoutAt = new Date(t.timeoutAt).toISOString();
+           console.log(`[track] ${t.status} ${t.username}, next poll in ${nextInterval/60000}m (will timeout at ${willTimeoutAt})`);
          }
-        if (TRACK_LOG) {
-          const willTimeoutAt = new Date(t.timeoutAt).toISOString();
-          console.log(`[track] searching ${t.username}, next poll in ${nextInterval/60000}m (will timeout at ${willTimeoutAt})`);
-        }
       }
 
       // persist updated tracker
