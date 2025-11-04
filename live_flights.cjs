@@ -1228,6 +1228,8 @@ async function pollOnce() {
       // We now check if the tracker was *ever* locked to a flight.
       if (t.lastKnownFlight?.flightId) {
         
+        // ⬇️ ⬇️ ⬇️ THIS IS THE MODIFIED BLOCK ⬇️ ⬇️ ⬇️
+
         // --- START: "POST-LOCK" OFFLINE LOGIC ---
         // The tracker is locked. Its job is *only* to find the fate of
         // t.lastKnownFlight.flightId.
@@ -1252,14 +1254,23 @@ async function pollOnce() {
             const userFlights = await getUserFlightHistory(userId, 1);
             const completedFlight = userFlights.find(f => f.id === lastFlightId);
 
-            if (completedFlight && typeof completedFlight.totalTime === 'number') {
+            // ⬇️ MODIFIED LOGIC
+            // We must check that the flight has a duration GREATER THAN 0.
+            // An "abandoned" flight may be logged with totalTime: 0.
+            if (completedFlight && typeof completedFlight.totalTime === 'number' && completedFlight.totalTime > 0) {
               // SUCCESS: Flight is 100% confirmed as LANDED
               landingConfirmed = true;
               method = 'user_history';
               officialDurationMs = (completedFlight.totalTime || 0) * 60 * 1000; // minutes to ms
               officialEndTime = completedFlight.created; // Official landing time
               
-              t.history.push({ event: 'fetch_history_success', message: `Official history CONFIRMED landing. Duration: ${Math.round(officialDurationMs/60000)}m.`, timestamp: now });
+              // ⬇️ MODIFIED LOGIC: Add the data to the history for debugging
+              t.history.push({ 
+                event: 'fetch_history_success', 
+                message: `Official history CONFIRMED landing. Duration: ${Math.round(officialDurationMs/60000)}m.`, 
+                timestamp: now,
+                data: completedFlight // This lets you debug from the frontend
+              });
               if (TRACK_LOG) console.log(`[track] ${t.username} official history CONFIRMED landing. Duration ${officialDurationMs}ms.`);
 
               // Now, we run route analysis *only to get airport data*
@@ -1278,8 +1289,15 @@ async function pollOnce() {
                 if (TRACK_LOG) console.warn(`[track] ${t.username} route analysis for airports failed: ${routeError.message}`);
               }
             } else {
-              t.history.push({ event: 'fetch_history_fail', message: 'Flight not found in user history. Falling back to route analysis.', timestamp: now });
-              if (TRACK_LOG) console.warn(`[track] ${t.username} flight ${lastFlightId} not in user history. Falling back to route analysis.`);
+              // ⬇️ MODIFIED LOGIC: Add the data (or null) to the history for debugging
+              const reason = completedFlight ? `Flight found but duration was ${completedFlight.totalTime}m.` : 'Flight not found in history.';
+              t.history.push({ 
+                event: 'fetch_history_fail', 
+                message: `${reason} Falling back to route analysis.`, 
+                timestamp: now,
+                data: completedFlight || null
+              });
+              if (TRACK_LOG) console.warn(`[track] ${t.username} flight ${lastFlightId} not in user history or duration was 0. Falling back to route analysis.`);
             }
           } catch (historyError) {
             t.history.push({ event: 'fetch_history_error', message: `Failed to fetch user history: ${historyError.message}. Falling back to route analysis.`, timestamp: now });
@@ -1313,12 +1331,31 @@ async function pollOnce() {
                 takeoffAirport = flightAnalysis.takeoffAirport;
                 landingAirport = flightAnalysis.landingAirport;
                 
-                t.history.push({ event: 'analysis_success', message: `Route analysis CONFIRMED landing at ${landingAirport.icao}.`, timestamp: now });
+                // ⬇️ MODIFIED LOGIC: Add the analysis data for debugging
+                t.history.push({ 
+                  event: 'analysis_success', 
+                  message: `Route analysis CONFIRMED landing at ${landingAirport.icao}.`, 
+                  timestamp: now,
+                  data: { 
+                    takeoff: flightAnalysis.takeoffAirport?.icao, 
+                    landing: flightAnalysis.landingAirport?.icao, 
+                    durationMs: flightAnalysis.durationMs 
+                  }
+                });
                 if (TRACK_LOG) console.log(`[track] ${t.username} route analysis CONFIRMED landing at ${landingAirport.icao}.`);
 
               } else {
                 const failMsg = `Route analysis did not confirm landing (Takeoff: ${flightAnalysis.takeoffAirport?.icao || 'N/A'}, Landing: ${flightAnalysis.landingAirport?.icao || 'N/A'}).`;
-                t.history.push({ event: 'analysis_fail', message: failMsg, timestamp: now });
+                // ⬇️ MODIFIED LOGIC: Add the analysis data for debugging
+                t.history.push({ 
+                  event: 'analysis_fail', 
+                  message: failMsg, 
+                  timestamp: now,
+                  data: {
+                    takeoff: flightAnalysis.takeoffAirport?.icao, 
+                    landing: flightAnalysis.landingAirport?.icao
+                  }
+                });
                 if (TRACK_LOG) console.log(`[track] ${t.username} ${failMsg}`);
               }
             } else {
@@ -1375,6 +1412,8 @@ async function pollOnce() {
         }
         
         // --- END: "POST-LOCK" OFFLINE LOGIC ---
+        
+        // ⬆️ ⬆️ ⬆️ END OF THE MODIFIED BLOCK ⬆️ ⬆️ ⬆️
         
       } else {
         // --- START: "PRE-LOCK" OFFLINE LOGIC ---
