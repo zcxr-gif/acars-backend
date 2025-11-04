@@ -1,4 +1,4 @@
-// live_flights.js (Updated with Caching and Robust Takeoff/Landing/Duration)
+// live_flights.js (Updated with Caching and History-Only Validation)
 
 /* =========================
  * Imports & setup
@@ -1057,22 +1057,21 @@ function getActiveTrackers() {
 
 
 /**
- * ⬇️ REPLACED FUNCTION (WITH "PERMANENT LOCK" LOGIC)
+ * ⬇️ REPLACED FUNCTION (HISTORY-ONLY VALIDATION)
  *
  * This version implements the user's critical requirement:
  * Once a tracker's status becomes 'tracking' (i.e., it has locked onto a
  * flightId), it can NEVER revert to 'searching'.
  *
- * If the user goes offline (flight disappears from /flights) and a landing
- * cannot be immediately confirmed, the tracker's status REMAINS 'tracking'.
+ * This version relies *exclusively* on the User History API for landing
+ * confirmation. It will not use Route Analysis as a fallback.
  *
- * It will continue to poll, bound to the original flightId, and will
- * re-run the landing checks (History API, then Route Analysis) on each
- * poll.
+ * It will poll, bound to the original flightId, and re-run the history
+ * check until the 48-hour timeout is reached or a valid log is found.
  *
- * This makes it *impossible* for the tracker to accidentally attach to a
- * new flight started by the same user, as the code block for
- * "searching by username" will never be executed again.
+ * A valid log MUST have:
+ * 1. `landingCount` === 1
+ * 2. `totalTime` >= 30 minutes
  */
 async function pollOnce() {
   const now = Date.now();
@@ -1228,11 +1227,9 @@ async function pollOnce() {
       // We now check if the tracker was *ever* locked to a flight.
       if (t.lastKnownFlight?.flightId) {
         
-        // ⬇️ ⬇️ ⬇️ THIS IS THE MODIFIED BLOCK ⬇️ ⬇️ ⬇️
+        // ⬇️ ⬇️ ⬇️ THIS IS THE MODIFIED BLOCK (History-Only) ⬇️ ⬇️ ⬇️
 
         // --- START: "POST-LOCK" OFFLINE LOGIC ---
-        // The tracker is locked. Its job is *only* to find the fate of
-        // t.lastKnownFlight.flightId.
         
         let landingConfirmed = false;
         let method = 'unknown';
@@ -1244,7 +1241,7 @@ async function pollOnce() {
         
         const lastFlightId = t.lastKnownFlight.flightId;
 
-        // 1. CHECK OFFICIAL USER HISTORY FIRST
+        // 1. CHECK OFFICIAL USER HISTORY (ONLY SOURCE OF TRUTH)
         if (t.flight?.userId) {
           try {
             const userId = t.flight.userId;
@@ -1254,26 +1251,31 @@ async function pollOnce() {
             const userFlights = await getUserFlightHistory(userId, 1);
             const completedFlight = userFlights.find(f => f.id === lastFlightId);
 
-            // ⬇️ MODIFIED LOGIC
-            // We must check that the flight has a duration GREATER THAN 0.
-            // An "abandoned" flight may be logged with totalTime: 0.
-            if (completedFlight && typeof completedFlight.totalTime === 'number' && completedFlight.totalTime > 0) {
+            // Stricter validation logic as requested.
+            // Flight must exist, have duration >= 30m, and landingCount === 1.
+            const flightTime = completedFlight?.totalTime;
+            const landings = completedFlight?.landingCount;
+            const isDurationValid = typeof flightTime === 'number' && flightTime >= 30;
+            const isLandingCountValid = typeof landings === 'number' && landings === 1;
+
+            if (completedFlight && isDurationValid && isLandingCountValid) {
+              
               // SUCCESS: Flight is 100% confirmed as LANDED
               landingConfirmed = true;
               method = 'user_history';
               officialDurationMs = (completedFlight.totalTime || 0) * 60 * 1000; // minutes to ms
               officialEndTime = completedFlight.created; // Official landing time
               
-              // ⬇️ MODIFIED LOGIC: Add the data to the history for debugging
               t.history.push({ 
                 event: 'fetch_history_success', 
-                message: `Official history CONFIRMED landing. Duration: ${Math.round(officialDurationMs/60000)}m.`, 
+                message: `Official history CONFIRMED landing. Duration: ${Math.round(officialDurationMs/60000)}m, Landings: 1.`, 
                 timestamp: now,
-                data: completedFlight // This lets you debug from the frontend
+                data: completedFlight 
               });
               if (TRACK_LOG) console.log(`[track] ${t.username} official history CONFIRMED landing. Duration ${officialDurationMs}ms.`);
 
               // Now, we run route analysis *only to get airport data*
+              // This does NOT confirm the landing, it only enriches the data.
               try {
                 const route = await getFlightRoute(t.lastKnownFlight.sessionId, lastFlightId);
                 const simplifiedRoute = simplifyFlightRoute(route);
@@ -1289,85 +1291,34 @@ async function pollOnce() {
                 if (TRACK_LOG) console.warn(`[track] ${t.username} route analysis for airports failed: ${routeError.message}`);
               }
             } else {
-              // ⬇️ MODIFIED LOGIC: Add the data (or null) to the history for debugging
-              const reason = completedFlight ? `Flight found but duration was ${completedFlight.totalTime}m.` : 'Flight not found in history.';
+              // Detailed failure reasoning for the log
+              let reason = 'Flight not found in history.';
+              if (completedFlight) {
+                // Flight was found, but failed the new checks.
+                reason = `Flight found but failed validation. Duration: ${flightTime}m (Req: >=30, Pass: ${isDurationValid}). Landings: ${landings} (Req: 1, Pass: ${isLandingCountValid}).`;
+              }
+                
               t.history.push({ 
                 event: 'fetch_history_fail', 
-                message: `${reason} Falling back to route analysis.`, 
+                message: `${reason} Will continue polling.`, 
                 timestamp: now,
                 data: completedFlight || null
               });
-              if (TRACK_LOG) console.warn(`[track] ${t.username} flight ${lastFlightId} not in user history or duration was 0. Falling back to route analysis.`);
+              if (TRACK_LOG) console.warn(`[track] ${t.username} flight ${lastFlightId} failed history check: ${reason}`);
             }
           } catch (historyError) {
-            t.history.push({ event: 'fetch_history_error', message: `Failed to fetch user history: ${historyError.message}. Falling back to route analysis.`, timestamp: now });
+            t.history.push({ event: 'fetch_history_error', message: `Failed to fetch user history: ${historyError.message}. Will continue polling.`, timestamp: now });
             if (TRACK_LOG) console.error(`[track] ${t.username} failed to fetch user history: ${historyError.message}`);
           }
         } else {
-            t.history.push({ event: 'fetch_history_skip', message: 'No userId available. Skipping official history check. Using route analysis.', timestamp: now });
-            if (TRACK_LOG) console.warn(`[track] ${t.username} has no userId. Using route analysis.`);
+            t.history.push({ event: 'fetch_history_skip', message: 'No userId available. Cannot check official history. Will continue polling.', timestamp: now });
+            if (TRACK_LOG) console.warn(`[track] ${t.username} has no userId. Cannot check history.`);
         }
 
 
-        // 2. FALLBACK TO ROUTE ANALYSIS (if not already confirmed)
-        if (!landingConfirmed) {
-          try {
-            t.history.push({ event: 'analysis_start', message: `Attempting landing confirmation via route analysis...`, timestamp: now });
-            if (TRACK_LOG) console.log(`[track] ${t.username} attempting route analysis for landing...`);
-          
-            const route = await getFlightRoute(t.lastKnownFlight.sessionId, lastFlightId);
-            const simplifiedRoute = simplifyFlightRoute(route);
-
-            if (simplifiedRoute.length > 1) {
-              const flightAnalysis = calculateFlightDurationFromRoute(simplifiedRoute, airports);
-
-              if (flightAnalysis.landingAirport && flightAnalysis.takeoffAirport) {
-                // SUCCESS: Route analysis confirmed landing
-                landingConfirmed = true;
-                method = 'route_analysis';
-                officialDurationMs = flightAnalysis.durationMs;
-                officialStartTime = flightAnalysis.takeoffPoint?.timestamp;
-                officialEndTime = flightAnalysis.landingPoint?.timestamp;
-                takeoffAirport = flightAnalysis.takeoffAirport;
-                landingAirport = flightAnalysis.landingAirport;
-                
-                // ⬇️ MODIFIED LOGIC: Add the analysis data for debugging
-                t.history.push({ 
-                  event: 'analysis_success', 
-                  message: `Route analysis CONFIRMED landing at ${landingAirport.icao}.`, 
-                  timestamp: now,
-                  data: { 
-                    takeoff: flightAnalysis.takeoffAirport?.icao, 
-                    landing: flightAnalysis.landingAirport?.icao, 
-                    durationMs: flightAnalysis.durationMs 
-                  }
-                });
-                if (TRACK_LOG) console.log(`[track] ${t.username} route analysis CONFIRMED landing at ${landingAirport.icao}.`);
-
-              } else {
-                const failMsg = `Route analysis did not confirm landing (Takeoff: ${flightAnalysis.takeoffAirport?.icao || 'N/A'}, Landing: ${flightAnalysis.landingAirport?.icao || 'N/A'}).`;
-                // ⬇️ MODIFIED LOGIC: Add the analysis data for debugging
-                t.history.push({ 
-                  event: 'analysis_fail', 
-                  message: failMsg, 
-                  timestamp: now,
-                  data: {
-                    takeoff: flightAnalysis.takeoffAirport?.icao, 
-                    landing: flightAnalysis.landingAirport?.icao
-                  }
-                });
-                if (TRACK_LOG) console.log(`[track] ${t.username} ${failMsg}`);
-              }
-            } else {
-              const noDataMsg = `Route retrieved but had insufficient data points (${simplifiedRoute.length}) for analysis.`;
-              t.history.push({ event: 'analysis_nodata', message: noDataMsg, timestamp: now });
-              if (TRACK_LOG) console.log(`[track] ${t.username} ${noDataMsg}`);
-            }
-          } catch (e) {
-            t.history.push({ event: 'analysis_error', message: `Route analysis failed: ${e.message}`, timestamp: now });
-            if (TRACK_LOG) console.warn(`[track] route analysis failed for ${t.username}: ${e.message}`);
-          }
-        }
+        // 2. FALLBACK TO ROUTE ANALYSIS (REMOVED)
+        // This block has been intentionally removed as per the new logic.
+        // We no longer use route analysis to confirm a landing.
 
 
         // 3. FINAL DECISION: Notify or Continue Polling
@@ -1401,11 +1352,11 @@ async function pollOnce() {
         }
         
         // -----------------------------------------------------------------
-        // CRITICAL FIX: BOTH landing checks failed.
+        // CRITICAL: Landing check failed.
         // DO NOT change status. It remains 'tracking'.
         // -----------------------------------------------------------------
         
-        const offlineMsg = `User is OFFLINE. Landing not yet confirmed. Continuing to poll for ${lastFlightId}.`;
+        const offlineMsg = `User is OFFLINE. Landing not yet confirmed via User History. Continuing to poll for ${lastFlightId}.`;
         if (t.history.at(-1)?.event !== 'offline_polling') { // Avoid spamming log
            t.history.push({ event: 'offline_polling', message: offlineMsg, timestamp: now });
            if (TRACK_LOG) console.log(`[track] OFFLINE ${t.username}. Status remains 'tracking', polling for ${lastFlightId}.`);
@@ -1413,7 +1364,7 @@ async function pollOnce() {
         
         // --- END: "POST-LOCK" OFFLINE LOGIC ---
         
-        // ⬆️ ⬆️ ⬆️ END OF THE MODIFIED BLOCK ⬆️ ⬆️ ⬆️
+        // ⬆️ ⬆️ T END OF THE MODIFIED BLOCK ⬆️ ⬆️ ⬆️
         
       } else {
         // --- START: "PRE-LOCK" OFFLINE LOGIC ---
