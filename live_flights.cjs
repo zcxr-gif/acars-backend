@@ -892,11 +892,6 @@ async function pollAndBroadcastFlights() {
   // We fetch data for the main servers to populate the cache for all services
   const serverNames = ["Expert Server", "Training Server", "Casual Server"];
   
-  // ⬇️ NEW: Define these for the smarter ACARS check
-  const now = Date.now();
-  // Check if an ACARS tracker is due within its own poll interval + a buffer
-  const ACARS_WAKEUP_BUFFER = (POLL_MS || 30000) + 10000; // 40s
-  
   for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
 
@@ -908,15 +903,7 @@ async function pollAndBroadcastFlights() {
     const roomName = serverName.toLowerCase();
     // Check if anyone is listening (either a socket client or an ACARS tracker)
     const room = io.sockets.adapter.rooms.get(roomName);
-
-    // ⬇️ MODIFIED: This check is now much smarter
-    // It checks if any tracker for this server is due to be polled "soon".
-    const acarsNeedsThisServer = getActiveTrackers().some(t => {
-      if (t.server.toLowerCase() !== serverName.toLowerCase()) return false;
-      // If it's due to be polled within our buffer, we need data.
-      return t.nextPollAt <= (now + ACARS_WAKEUP_BUFFER);
-    });
-    // ⬆️ END OF MODIFIED BLOCK
+    const acarsNeedsThisServer = getActiveTrackers().some(t => t.server.toLowerCase() === serverName.toLowerCase());
 
     if ((!room || room.size === 0) && !acarsNeedsThisServer) {
       // if (TRACK_LOG) console.log(`[broadcast] 😴 Skipping ${serverName}, no clients or trackers.`);
@@ -965,7 +952,6 @@ async function pollAndBroadcastFlights() {
   }
 }
 
-// ⬇️ REPLACED: This is the new, smarter poller loop
 // Start the new broadcaster loop with dynamic backoff
 (function runBroadcastPoller() {
   pollAndBroadcastFlights()
@@ -977,71 +963,11 @@ async function pollAndBroadcastFlights() {
          }
     })
     .finally(() => {
-      // --- START NEW DYNAMIC POLLING LOGIC ---
-
-      // 1. Check for 429 error (already handled by 'catch' block)
-      if (nextBroadcastPollMs !== 60000) { 
-        
-        // 2. Check for active socket.io clients
-        const activeSocketRooms = io.sockets.adapter.rooms;
-        let hasSocketListeners = false;
-        for (const [roomName, sids] of activeSocketRooms.entries()) {
-           // We just care if *any* client is in *any* of our tracked rooms
-           if (sids.size > 0 && (roomName.includes('server'))) { 
-               hasSocketListeners = true;
-               break;
-           }
-        }
-        
-        if (hasSocketListeners) {
-          // Sockets are active, poll fast.
-          nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS;
-        } else {
-          // 3. No sockets. Check ACARS trackers.
-          const activeTrackers = getActiveTrackers();
-          if (activeTrackers.length === 0) {
-            // No sockets, no trackers. Sleep for a while.
-            nextBroadcastPollMs = 5 * 60 * 1000; // 5 minutes
-            if (TRACK_LOG) console.log(`[broadcast] 😴 No clients or trackers. Sleeping for 5m.`);
-          } else {
-            // Find the *soonest* any tracker needs to be polled.
-            const now = Date.now();
-            let soonestPollAt = Infinity;
-            for (const t of activeTrackers) {
-               if (t.nextPollAt < soonestPollAt) {
-                 soonestPollAt = t.nextPollAt;
-               }
-            }
-            
-            // Calculate time from now until the soonest poll.
-            const timeUntilSoonest = Math.max(0, soonestPollAt - now);
-            
-            // Our next poll interval will be the time until the soonest tracker
-            // needs data. We'll clamp this value between our fastest
-            // poll speed (3s) and our max background speed (15m).
-            
-            const newInterval = Math.max(
-               ALL_FLIGHTS_POLL_MS, // At least 3s
-               Math.min(timeUntilSoonest, BACKGROUND_POLL_MS) // At most 15m
-            );
-            
-            nextBroadcastPollMs = newInterval;
-            
-            if (TRACK_LOG) {
-                if (newInterval > ALL_FLIGHTS_POLL_MS) {
-                     console.log(`[broadcast] 😴 No clients. Next ACARS poll in ${Math.round(timeUntilSoonest/1000)}s. Sleeping for ${Math.round(newInterval/1000)}s.`);
-                }
-            }
-          }
-        }
-      }
-      // --- END NEW DYNAMIC POLLING LOGIC ---
-      
       // Schedule the next poll using the dynamic interval
       setTimeout(runBroadcastPoller, nextBroadcastPollMs);
 
-      // Reset to default poll time *if* we were on a 429 backoff
-      if (nextBroadcastPollMs === 60000) {
+      // Reset to default poll time for the *next* cycle (after the backoff)
+      if (nextBroadcastPollMs !== ALL_FLIGHTS_POLL_MS) {
           console.log(`[broadcast] Resuming default poll interval of ${ALL_FLIGHTS_POLL_MS}ms after this backoff cycle.`);
           nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS;
       }
@@ -1828,7 +1754,7 @@ app.post('/track/:id/stop', (req, res) => {
 app.post('/track/:id/delay', (req, res) => {
 // ... (this function is unchanged, but logs to history) ...
   const t = trackers.get(req.params.id);
-  if (!t) return res.status(44).json(err(404, 'tracker not found'));
+  if (!t) return res.status(404).json(err(404, 'tracker not found'));
 
   // Delay the next poll by 5 minutes from now
   const delayMs = 5 * 60 * 1000;
