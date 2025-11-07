@@ -502,6 +502,7 @@ async function getFlightsForSession(sessionId) {
 }
 
 
+// ⬇️ REPLACED FUNCTION
 function simplifyFlight(f) {
   const aircraftId = f?.aircraftId || null;
   const liveryId = f?.liveryId || null;
@@ -539,7 +540,8 @@ function simplifyFlight(f) {
       alt_ft: typeof f?.altitude === 'number' ? f.altitude : null,
       gs_kt: typeof f?.speed === 'number' ? f.speed : null,
       vs_fpm: typeof f?.verticalSpeed === 'number' ? f.verticalSpeed : null,
-      track_deg: typeof f?.track === 'number' ? f.track : null,
+      // ⬇️ REMOVED
+      // track_deg: typeof f?.track === 'number' ? f.track : null, 
       heading_deg: typeof f?.heading === 'number' ? f.heading : null,
       lastReport: f?.lastReport || null,
       lastReportMs: f?.lastReport ? Date.parse(f.lastReport) || null : null,
