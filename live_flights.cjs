@@ -17,14 +17,33 @@ const { Server } = require('socket.io');
 const app = express();
 // ⬇️ 2. CREATE HTTP SERVER & ATTACH SOCKET.IO
 const httpServer = createServer(app);
+const whitelist = [
+    'https://indgo-va.netlify.app', // Your production site
+    'http://localhost:8888'         // Your local development machine
+];
+
+const corsOptions = {
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        
+        if (whitelist.indexOf(origin) !== -1) {
+            callback(null, true); // Origin is in the whitelist, allow it
+        } else {
+            callback(new Error('Not allowed by CORS')); // Origin is not allowed
+        }
+    },
+    optionsSuccessStatus: 200
+};
+
+// 1. Apply CORS to Socket.IO
 const io = new Server(httpServer, {
-  cors: {
-    origin: "*", // Adjust for production
-    methods: ["GET", "POST"]
-  }
+  cors: corsOptions
 });
 
-app.use(cors());
+// 2. Apply CORS to Express (for API requests like /if-sessions)
+app.use(cors(corsOptions));
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
