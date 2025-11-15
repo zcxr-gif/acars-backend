@@ -18,7 +18,7 @@ const app = express();
 // ⬇️ 2. CREATE HTTP SERVER & ATTACH SOCKET.IO
 const httpServer = createServer(app);
 const whitelist = [
-    'https://indgo-va.netlify.app', // Your production site
+    'https://inflight.info',        // Your production site
     'http://localhost:8888'         // Your local development machine
 ];
 
