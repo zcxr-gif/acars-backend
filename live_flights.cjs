@@ -60,10 +60,7 @@ const VA_BACKEND_URL = (process.env.VA_BACKEND_URL || 'http://localhost:5000').t
 const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 1000), 10); // 5 minutes
 const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
 
-// ⬇️ NEW: Poll interval for broadcasting ALL flights to the front-end
-// WARNING: 500ms is EXTREMELY fast and may get you rate-limited or blocked by the IF API.
-// A safer value is 3000-5000ms (3-5 seconds).
-const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '3000', 10);
+const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '1500', 10);
 
 /* =========================
  * NEW: In-Memory API Cache
