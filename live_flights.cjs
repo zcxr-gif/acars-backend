@@ -693,6 +693,38 @@ async function pollAndBroadcastFlights() {
     try {
       // This is the main API call we need to protect
       const rawFlights = await getFlightsForSession(sessionId);
+
+      // ----------------------------------------------------
+      // ⬇️ BUGSQUASH: HEURISTIC BLIP GUARD (v2) ⬇️
+      // ----------------------------------------------------
+      
+      const newFlightCount = (Array.isArray(rawFlights) ? rawFlights.length : 0);
+      const cachedData = apiCache.flights.get(sessionId);
+      const cachedFlightCount = (cachedData && cachedData.count > 0) ? cachedData.count : 0;
+
+      // A "blip" is defined as EITHER:
+      // 1. Receiving 0 flights when we previously had flights.
+      // 2. Receiving a new count that is less than 50% of our cached count
+      //    (e.g., dropping from 500 to 249 or less), which is highly
+      //    indicative of a temporary API data glitch.
+
+      const isCompleteBlip = (newFlightCount === 0 && cachedFlightCount > 0);
+      const isPartialBlip = (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50));
+
+      if (isCompleteBlip || isPartialBlip) {
+        console.warn(`[broadcast] ⚠️  BLIP GUARD (v2): Received ${newFlightCount} flights for ${serverName}, but cache had ${cachedFlightCount}. This is a >50% drop. Skipping broadcast.`);
+        continue; // Move to the next server, keeping the old (good) cache.
+      }
+      
+      // If we are here, it's a valid update:
+      // - The API returned a good count.
+      // - The API returned 0, and our cache was already 0 (server is empty).
+      // - The API returned a new count that was a "normal" drop (e.g., 500 -> 480).
+
+      // ----------------------------------------------------
+      // ⬆️ BUGSQUASH: HEURISTIC BLIP GUARD (v2) ⬆️
+      // ----------------------------------------------------
+
       const simplifiedFlights = rawFlights.map(simplifyFlight);
       
       const payload = {
@@ -715,13 +747,17 @@ async function pollAndBroadcastFlights() {
 
     } catch (e) {
       console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
-      // Clear cache for this server so API doesn't use stale data
-      apiCache.flights.delete(sessionId);
-
+      
+      // ⬇️ MODIFIED CATCH: Only delete cache/back off on 429
       if (e?.message?.includes('429')) {
           console.error(`[broadcast] 🛑 Flights API Rate Limit (429) detected. Backing off for 60 seconds.`);
           nextBroadcastPollMs = 60000; // 60s backoff
+          // Clear cache on rate limit
+          apiCache.flights.delete(sessionId); 
       }
+      // For any other error (e.g., 500, 503, timeout), we'll
+      // just log it and *keep the old cache* data. This also
+      // helps prevent "disappearing icons" on a server-side API error.
     }
   }
 }
