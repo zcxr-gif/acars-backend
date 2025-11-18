@@ -759,8 +759,10 @@ async function pollAndBroadcastFlights() {
   }
 }
 
-// Start the new broadcaster loop with dynamic backoff
 (function runBroadcastPoller() {
+  // 1. Record the start time *before* the poll
+  const pollStartTime = Date.now();
+
   pollAndBroadcastFlights()
     .catch(e => {
         console.error('[broadcast] Unhandled poll error', e?.message);
@@ -770,14 +772,37 @@ async function pollAndBroadcastFlights() {
          }
     })
     .finally(() => {
-      // Schedule the next poll using the dynamic interval
-      setTimeout(runBroadcastPoller, nextBroadcastPollMs);
+      let timeToWait;
 
-      // Reset to default poll time for the *next* cycle (after the backoff)
+      // 2. Check if a backoff (e.g., 60000ms) was triggered by the poll function
       if (nextBroadcastPollMs !== ALL_FLIGHTS_POLL_MS) {
-          console.log(`[broadcast] Resuming default poll interval of ${ALL_FLIGHTS_POLL_MS}ms after this backoff cycle.`);
-          nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS;
+        // A backoff was triggered. We must honor it.
+        timeToWait = nextBroadcastPollMs;
+        console.log(`[broadcast] Backoff triggered. Waiting ${timeToWait}ms.`);
+        
+        // Reset the variable for the *next* cycle (after this one)
+        nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS;
+      } else {
+        // 3. NO backoff. Calculate the steady tick.
+        const pollEndTime = Date.now();
+        const executionTime = pollEndTime - pollStartTime;
+        
+        // This is our new "smart" wait time
+        timeToWait = ALL_FLIGHTS_POLL_MS - executionTime;
+        
+        if (timeToWait <= 0) {
+          // This means the poll took *longer* than our interval.
+          // This is okay! It just means we run the next poll immediately
+          // to try and "catch up" to the steady tick.
+          console.warn(`[broadcast] ⚠️  Poll took ${executionTime}ms, longer than interval of ${ALL_FLIGHTS_POLL_MS}ms. Running next poll almost immediately.`);
+          
+          // We set a tiny 10ms buffer to prevent a 100% CPU "spin-lock"
+          timeToWait = 10;
+        }
       }
+      
+      // 4. Schedule the next poll using our calculated wait time
+      setTimeout(runBroadcastPoller, timeToWait);
     });
 })();
 
