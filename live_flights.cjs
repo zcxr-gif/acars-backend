@@ -691,6 +691,30 @@ async function pollAndBroadcastFlights() {
       // This is the main API call we need to protect
       const rawFlights = await getFlightsForSession(sessionId);
 
+// ⬇️ ADD THIS DEBUGGING CODE ⬇️
+// ----------------------------------------------------
+// --- 1. Set the callsign of the plane you want to track ---
+const DEBUG_CALLSIGN = "Z-CXR";
+// ----------------------------------------------------
+
+if (serverName === "Expert Server" && Array.isArray(rawFlights)) {
+  const targetFlight = rawFlights.find(f => f.callsign === DEBUG_CALLSIGN);
+
+  if (targetFlight) {
+    // We will log the raw data for this specific flight
+    console.log(
+      `[RAW_DEBUG] ${targetFlight.callsign} | ` +
+      `Report: ${targetFlight.lastReport} | ` +
+      `Lat: ${targetFlight.latitude.toFixed(4)} | ` +
+      `Lon: ${targetFlight.longitude.toFixed(4)} | ` +
+      `Hdg: ${targetFlight.heading.toFixed(2)}`
+    );
+  }
+}
+// ⬆️ END OF DEBUGGING CODE ⬆️
+
+// This is the existing "Blip Guard" (around line 626
+
       // ----------------------------------------------------
       // ⬇️ BUGSQUASH: HEURISTIC BLIP GUARD (v2) ⬇️
       // ----------------------------------------------------
