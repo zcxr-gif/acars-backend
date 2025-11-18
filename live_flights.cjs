@@ -19,7 +19,7 @@ const app = express();
 const httpServer = createServer(app);
 const whitelist = [
     'https://inflight.info',        // Your production site
-    'https://deploy-preview-1--indgo-va.netlify.app'         // Your local development machine
+    'https://deploy-preview-2--indgo-va.netlify.app'         // Your local development machine
 ];
 
 const corsOptions = {
