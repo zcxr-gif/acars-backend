@@ -60,7 +60,7 @@ const VA_BACKEND_URL = (process.env.VA_BACKEND_URL || 'http://localhost:5000').t
 const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 1000), 10); // 5 minutes
 const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
 
-const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '5000', 10);
+const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '2000', 10);
 
 /* =========================
  * NEW: In-Memory API Cache
