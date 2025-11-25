@@ -88,7 +88,6 @@ const SESSIONS_CACHE_TTL_MS = 60 * 1000;
 /* =========================
  * Axios client
  * ========================= */
-// ... (this section is unchanged) ...
 const ifClient = axios.create({
   baseURL: IF_API_BASE_URL,
   timeout: 15000,
@@ -110,47 +109,63 @@ const globalMetadata = {
   liveries: []
 };
 
-// Load aircraft names on startup
-(async function loadAircraftNames() {
+/**
+ * Unified Metadata Loader
+ * Fetches Aircraft first, then iterates through them to fetch all liveries.
+ */
+async function initSystemMetadata() {
+  console.log('🔄 [init] Starting metadata load...');
+
+  if (!IF_API_KEY) {
+    console.warn('⚠️  [init] Skipping metadata load: API key is missing.');
+    return;
+  }
+
+  // 1. Load Aircraft
   try {
-    if (!IF_API_KEY) {
-      console.warn('⚠️  Skipping aircraft name load: API key is missing.');
-      return;
-    }
+    console.log('🔄 [init] Fetching aircraft list...');
     const aircraftList = await getAircraftList();
     
-    // Save to global storage for API
     globalMetadata.aircraft = aircraftList;
+    
+    // Update Map
+    aircraftNameMap.clear();
+    for (const a of aircraftList) {
+      aircraftNameMap.set(a.id, a.name);
+    }
+    console.log(`✅ [init] Loaded ${aircraftList.length} aircraft models.`);
 
+    // 2. Load Liveries (Iterate per aircraft)
+    console.log(`🔄 [init] Fetching liveries for ${aircraftList.length} aircraft (this may take a moment)...`);
+    
+    const allLiveries = [];
+    
+    // We execute sequentially to be kind to the API rate limits
     for (const aircraft of aircraftList) {
-      aircraftNameMap.set(aircraft.id, aircraft.name);
+        try {
+            const liveries = await getLiveriesForAircraft(aircraft.id);
+            allLiveries.push(...liveries);
+        } catch (err) {
+            console.warn(`⚠️  [init] Failed to load liveries for ${aircraft.name}: ${err.message}`);
+        }
     }
-    console.log(`✅ Loaded ${aircraftNameMap.size} aircraft names.`);
+
+    globalMetadata.liveries = allLiveries;
+
+    // Update Map
+    liveryNameMap.clear();
+    for (const l of allLiveries) {
+      liveryNameMap.set(l.id, l.name);
+    }
+    console.log(`✅ [init] Loaded ${allLiveries.length} total liveries.`);
+
   } catch (e) {
-    console.error('❌ Could not load aircraft names.', e.message);
+    console.error('❌ [init] Critical metadata load failure:', e.message);
   }
-})();
+}
 
-// Load livery names on startup
-(async function loadLiveryNames() {
-  try {
-    if (!IF_API_KEY) {
-      console.warn('⚠️  Skipping livery name load: API key is missing.');
-      return;
-    }
-    const liveryList = await getLiveryList();
-
-    // Save to global storage for API
-    globalMetadata.liveries = liveryList;
-
-    for (const livery of liveryList) {
-      liveryNameMap.set(livery.id, livery.name);
-    }
-    console.log(`✅ Loaded ${liveryNameMap.size} livery names.`);
-  } catch (e) {
-    console.error('❌ Could not load livery names.', e.message);
-  }
-})();
+// Start the unified loader
+initSystemMetadata();
 
 /* =========================
  * NEW: VA Roster Loader
@@ -234,7 +249,6 @@ function err(status, message, extra = {}) {
  * IF API Wrappers
  * ========================= */
 async function getAircraftList() {
-// ... (this function is unchanged) ...
   const { data } = await ifClient.get('/aircraft');
   const items = unwrap(data);
   return items.map((a) => ({
@@ -243,14 +257,43 @@ async function getAircraftList() {
   })).filter(a => a.id && a.name);
 }
 
-async function getLiveryList() {
-  const { data } = await ifClient.get('/aircraft/liveries');
-  const items = unwrap(data);
-  return items.map((l) => ({
-    id: l?.id || null,
-    name: l?.liveryName || '',
-    aircraftId: l?.aircraftId || null, // Added to link livery to aircraft
-  })).filter(l => l.id && l.name);
+// NOTE: getLiveryList() has been removed in favor of getLiveriesForAircraft() below.
+
+async function getLiveriesForAircraft(aircraftId) {
+  if (!aircraftId) throw new Error('Missing aircraftId');
+  
+  const url = `/aircraft/${encodeURIComponent(aircraftId)}/liveries`;
+  
+  try {
+    const { data } = await ifClient.get(url);
+    const items = unwrap(data);
+    
+    return items.map((l) => ({
+      id: l?.id || null,
+      name: l?.liveryName || '',
+      aircraftId: l?.aircraftID || null, // API returns 'aircraftID'
+      aircraftName: l?.aircraftName || ''
+    })).filter(l => l.id && l.name);
+
+  } catch (e) {
+    // Standard retry logic for 401/403 errors
+    const status = e?.response?.status;
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const items = unwrap(retry);
+      return items.map((l) => ({
+        id: l?.id || null,
+        name: l?.liveryName || '',
+        aircraftId: l?.aircraftID || null,
+        aircraftName: l?.aircraftName || ''
+      })).filter(l => l.id && l.name);
+    }
+    // If 404, it might mean the aircraft ID is invalid or has no liveries exposed
+    if (status === 404) {
+      return [];
+    }
+    throw e;
+  }
 }
 
 /**
@@ -280,7 +323,6 @@ async function getSessions() {
 }
 
 function pickSessionIdByName(sessions, desiredName = 'Expert Server') {
-// ... (this function is unchanged) ...
   if (!Array.isArray(sessions) || sessions.length === 0) return null;
   const want = String(desiredName || '').trim().toLowerCase();
   const exact = sessions.find(s => (s.name || '').toLowerCase() === want);
@@ -302,7 +344,6 @@ function pickSessionIdByName(sessions, desiredName = 'Expert Server') {
 }
 
 async function getFlightsForSession(sessionId) {
-// ... (this function is unchanged) ...
   if (!sessionId) throw new Error('Missing sessionId');
   try {
     const { data } = await ifClient.get(`/sessions/${encodeURIComponent(sessionId)}/flights`);
@@ -388,7 +429,6 @@ function simplifyFlight(f) {
   };
 }
 
-// ... (All other IF API Wrappers like getFlightPlan, getFlightRoute, getActiveATC, getNotams, getUserStats, getUserGrade are unchanged) ...
 async function getFlightPlan(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/flightplan`;
@@ -569,7 +609,6 @@ async function getNotams(sessionId) {
 }
 
 async function getUserStats(params) {
-// ... (this function is unchanged) ...
   const url = '/users';
   if (!params || (!params.userIds && !params.discourseNames && !params.userHashes)) {
     throw new Error('At least one search parameter (userIds, discourseNames, userHashes) is required.');
@@ -603,7 +642,6 @@ async function getUserStats(params) {
 }
 
 async function getUserGrade(userId) {
-// ... (this function is unchanged) ...
   if (!userId) throw new Error('Missing userId');
   const url = `/users/${encodeURIComponent(userId)}`;
   try {
@@ -636,11 +674,9 @@ async function getUserGrade(userId) {
   }
 }
 
-
 /* =========================
  * Socket.IO Connection Handling (NEW)
  * ========================= */
-// ... (this section is unchanged) ...
 io.on('connection', (socket) => {
   console.log(`[socket] ✅ User connected: ${socket.id}`);
 
@@ -838,7 +874,6 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/if-key-debug', (req, res) => {
-// ... (this function is unchanged) ...
   const masked = IF_API_KEY ? `${IF_API_KEY.slice(0, 4)}...${IF_API_KEY.slice(-4)}` : '(missing)';
   res.json({
     ok: true,
@@ -867,7 +902,6 @@ app.get('/if-sessions', async (req, res) => {
 });
 
 app.get('/if-sessions-test', async (req, res) => {
-// ... (this function is unchanged, but benefits from getSessions() caching) ...
   try {
     if (!IF_API_KEY) return res.status(500).json(err(500, 'INFINITE_FLIGHT_API_KEY is not set'));
     const targetServer = (req.query.server || 'Expert Server').toString();
@@ -937,7 +971,6 @@ app.get('/flights/:sessionId', async (req, res) => {
 });
 
 app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
-// ... (this function is unchanged) ...
   const { sessionId, flightId } = req.params;
   try {
     const rawPlan = await getFlightPlan(sessionId, flightId);
@@ -958,7 +991,6 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
 });
 
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
-// ... (this function is unchanged) ...
   const { sessionId, flightId } = req.params;
   try {
     const rawRoute = await getFlightRoute(sessionId, flightId);
@@ -979,7 +1011,6 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
 });
 
 app.get('/atc/:sessionId', async (req, res) => {
-// ... (this function is unchanged) ...
   const { sessionId } = req.params;
   try {
     const atcFacilities = await getActiveATC(sessionId);
@@ -997,7 +1028,6 @@ app.get('/atc/:sessionId', async (req, res) => {
 });
 
 app.get('/notams/:sessionId', async (req, res) => {
-// ... (this function is unchanged) ...
   const { sessionId } = req.params;
   try {
     const notams = await getNotams(sessionId);
@@ -1015,7 +1045,6 @@ app.get('/notams/:sessionId', async (req, res) => {
 });
 
 app.post('/users', async (req, res) => {
-// ... (this function is unchanged) ...
   const { userIds, discourseNames, userHashes } = req.body;
 
   // Validate that at least one valid array is present in the request body
@@ -1043,7 +1072,6 @@ app.post('/users', async (req, res) => {
 });
 
 app.get('/users/:userId/grade', async (req, res) => {
-// ... (this function is unchanged) ...
   const { userId } = req.params;
   try {
     const gradeInfo = await getUserGrade(userId);
