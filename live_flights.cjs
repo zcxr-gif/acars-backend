@@ -18,8 +18,9 @@ const app = express();
 // ⬇️ 2. CREATE HTTP SERVER & ATTACH SOCKET.IO
 const httpServer = createServer(app);
 const whitelist = [
-    'https://inflight.info',        // Your production site
-    'https://deploy-preview-2--indgo-va.netlify.app'         // Your local development machine
+    'https://inflight.info',        
+    'https://deploy-preview-2--indgo-va.netlify.app',
+    'https://site--indgo-backend--6dmjph8ltlhv.code.run/index.html'
 ];
 
 const corsOptions = {
@@ -100,9 +101,14 @@ const ifClient = axios.create({
 /* =========================
  * Data Loaders (Aircraft & Liveries)
  * ========================= */
-// Note: Airport loader has been removed as it's no longer needed.
 const aircraftNameMap = new Map(); // Map to store aircraft names (ID -> Name)
 const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
+
+// NEW: Global storage to serve via API
+const globalMetadata = {
+  aircraft: [],
+  liveries: []
+};
 
 // Load aircraft names on startup
 (async function loadAircraftNames() {
@@ -112,12 +118,16 @@ const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
       return;
     }
     const aircraftList = await getAircraftList();
+    
+    // Save to global storage for API
+    globalMetadata.aircraft = aircraftList;
+
     for (const aircraft of aircraftList) {
       aircraftNameMap.set(aircraft.id, aircraft.name);
     }
     console.log(`✅ Loaded ${aircraftNameMap.size} aircraft names.`);
   } catch (e) {
-    console.error('❌ Could not load aircraft names. Names will be unavailable.', e.message);
+    console.error('❌ Could not load aircraft names.', e.message);
   }
 })();
 
@@ -129,12 +139,16 @@ const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
       return;
     }
     const liveryList = await getLiveryList();
+
+    // Save to global storage for API
+    globalMetadata.liveries = liveryList;
+
     for (const livery of liveryList) {
       liveryNameMap.set(livery.id, livery.name);
     }
     console.log(`✅ Loaded ${liveryNameMap.size} livery names.`);
   } catch (e) {
-    console.error('❌ Could not load livery names. Names will be unavailable.', e.message);
+    console.error('❌ Could not load livery names.', e.message);
   }
 })();
 
@@ -230,12 +244,12 @@ async function getAircraftList() {
 }
 
 async function getLiveryList() {
-// ... (this function is unchanged) ...
   const { data } = await ifClient.get('/aircraft/liveries');
   const items = unwrap(data);
   return items.map((l) => ({
     id: l?.id || null,
     name: l?.liveryName || '',
+    aircraftId: l?.aircraftId || null, // Added to link livery to aircraft
   })).filter(l => l.id && l.name);
 }
 
@@ -810,8 +824,16 @@ async function pollAndBroadcastFlights() {
 /* =========================
  * API Endpoints
  * ========================= */
+
+app.get('/api/metadata', (req, res) => {
+  res.json({
+    ok: true,
+    aircraft: globalMetadata.aircraft,
+    liveries: globalMetadata.liveries
+  });
+});
+
 app.get('/health', (req, res) => {
-// ... (this function is unchanged) ...
   res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
 });
 
