@@ -20,7 +20,7 @@ const httpServer = createServer(app);
 const whitelist = [
     'https://inflight.info',        
     'https://deploy-preview-2--indgo-va.netlify.app',
-    'https://site--indgo-backend--6dmjph8ltlhv.code.run/index.html'
+    'https://site--indgo-backend--6dmjph8ltlhv.code.run'
 ];
 
 const corsOptions = {
