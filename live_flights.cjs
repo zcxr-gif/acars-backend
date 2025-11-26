@@ -19,7 +19,7 @@ const app = express();
 const httpServer = createServer(app);
 const whitelist = [
     'https://inflight.info',        
-    'https://deploy-preview-2--indgo-va.netlify.app',
+    'https://deploy-preview-3--indgo-va.netlify.app',
     'https://site--indgo-backend--6dmjph8ltlhv.code.run'
 ];
 
