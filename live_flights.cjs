@@ -110,24 +110,38 @@ const globalMetadata = {
   liveries: []
 };
 
-// Load aircraft names on startup
-(async function loadAircraftNames() {
+// Load aircraft AND liveries on startup so simplifyFlight has data to use
+(async function loadMetadata() {
   try {
     if (!IF_API_KEY) {
-      console.warn('⚠️  Skipping aircraft name load: API key is missing.');
+      console.warn('⚠️  Skipping metadata load: API key is missing.');
       return;
     }
-    const aircraftList = await getAircraftList();
-    
-    // Save to global storage for API
-    globalMetadata.aircraft = aircraftList;
 
+    console.log('⏳ Loading aircraft and liveries...');
+
+    // 1. Load Aircraft
+    const aircraftList = await getAircraftList();
+    globalMetadata.aircraft = aircraftList;
+    
     for (const aircraft of aircraftList) {
       aircraftNameMap.set(aircraft.id, aircraft.name);
     }
-    console.log(`✅ Loaded ${aircraftNameMap.size} aircraft names.`);
+    console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types.`);
+
+    // 2. Load Liveries (Populate the map for simplifyFlight)
+    // This uses the NEW bulk function, keeping the other one separate.
+    const liveryList = await getAllLiveries();
+    globalMetadata.liveries = liveryList;
+
+    for (const livery of liveryList) {
+      // Map ID -> Livery Name (e.g., "Generic", "British Airways", etc.)
+      liveryNameMap.set(livery.id, livery.name);
+    }
+    console.log(`✅ Loaded ${liveryNameMap.size} liveries.`);
+
   } catch (e) {
-    console.error('❌ Could not load aircraft names.', e.message);
+    console.error('❌ Could not load metadata (aircraft/liveries).', e.message);
   }
 })();
 
@@ -263,6 +277,39 @@ async function getLiveriesForAircraft(aircraftId) {
     // If the aircraft ID is invalid, return empty array instead of crashing
     if (status === 404) {
       return [];
+    }
+    
+    throw e;
+  }
+}
+
+async function getAllLiveries() {
+  const url = '/aircraft/liveries';
+  try {
+    const { data } = await ifClient.get(url);
+    const items = unwrap(data);
+    
+    // Map the results according to the 'LiveryData' definition you provided
+    return items.map((l) => ({
+      id: l?.id || null,
+      name: l?.liveryName || '',
+      aircraftId: l?.aircraftID || null, // Note: API doc says 'aircraftID' (capital D)
+      aircraftName: l?.aircraftName || ''
+    })).filter(l => l.id && l.name);
+
+  } catch (e) {
+    const status = e?.response?.status;
+    
+    // Standard retry logic for 401/403 (Token Expiry)
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const items = unwrap(retry);
+      return items.map((l) => ({
+        id: l?.id || null,
+        name: l?.liveryName || '',
+        aircraftId: l?.aircraftID || null,
+        aircraftName: l?.aircraftName || ''
+      })).filter(l => l.id && l.name);
     }
     
     throw e;
