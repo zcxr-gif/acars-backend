@@ -283,6 +283,56 @@ async function getLiveriesForAircraft(aircraftId) {
   }
 }
 
+async function getAirportInfo(icao) {
+  if (!icao) throw new Error('Missing airport ICAO');
+  
+  const cleanIcao = icao.toUpperCase().trim();
+  // Documentation Source 1: GET .../airport/{airportIcao}
+  const url = `/airport/${encodeURIComponent(cleanIcao)}`;
+
+  try {
+    const { data } = await ifClient.get(url);
+    
+    // Manual error check based on Documentation Source 5 (errorCode)
+    const payload = data && typeof data === 'object' ? data : {};
+    
+    // Check if errorCode is not 0 (Ok)
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+       const err = new Error(`IF API errorCode ${payload.errorCode}`);
+       err.response = { data: payload };
+       throw err;
+    }
+
+    // Return the 'result' object (AirportInfo)
+    return payload.result || null;
+
+  } catch (e) {
+    const status = e?.response?.status;
+    
+    // Standard retry logic for 401/403 (Token Expiry)
+    if (status === 401 || status === 403) {
+      // Documentation Source 1: fallback to adding apikey query parameter
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+         err.response = { data: payload };
+         throw err;
+      }
+
+      return payload.result || null;
+    }
+
+    // If API returns 404, it means the airport doesn't exist
+    if (status === 404) {
+      return null;
+    }
+    
+    throw e;
+  }
+}
+
 async function getAllLiveries() {
   const url = '/aircraft/liveries';
   try {
@@ -1144,6 +1194,38 @@ app.get('/api/aircraft/:aircraftId/liveries', async (req, res) => {
     const status = e?.response?.status || 500;
     res.status(status).json(
       err(status, 'Failed to fetch liveries for aircraft', { detail: e?.message })
+    );
+  }
+});
+
+// ⬇️ NEW ROUTE: Get Airport Information (Direct Passthrough)
+app.get('/api/airport/:icao', async (req, res) => {
+  const { icao } = req.params;
+
+  try {
+    const airportInfo = await getAirportInfo(icao);
+    
+    if (!airportInfo) {
+      // Return 404 if the airport code is invalid or not found in IF
+      return res.status(404).json(err(404, `Airport not found: ${icao}`));
+    }
+    
+    // Send the exact structure requested
+    res.json({ 
+      ok: true, 
+      icao: airportInfo.icao, // 
+      airport: airportInfo 
+    });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    
+    res.status(status).json(
+      err(status, 'Failed to fetch airport info', { 
+        detail: e?.message,
+        apiErrorCode: apiError?.errorCode // 
+      })
     );
   }
 });
