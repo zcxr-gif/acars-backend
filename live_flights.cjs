@@ -753,16 +753,33 @@ async function getUserGrade(userId) {
 /* =========================
  * Socket.IO Connection Handling (NEW)
  * ========================= */
-// ... (this section is unchanged) ...
 io.on('connection', (socket) => {
   console.log(`[socket] ✅ User connected: ${socket.id}`);
 
   // Listen for a client to request a specific server's flight data
   socket.on('join_server_room', (serverName) => {
     if (!serverName) return;
-    const roomName = String(serverName).toLowerCase();
-    socket.join(roomName);
-    console.log(`[socket] 🚪 ${socket.id} joined room: ${roomName}`);
+    
+    // Normalize the requested room name
+    const targetRoom = String(serverName).trim().toLowerCase();
+    
+    // Define the specific flight data rooms we manage to avoid leaving system rooms (like the socket.id room)
+    const validServerRooms = ['expert server', 'training server', 'casual server'];
+
+    // 1. LEAVE OLD ROOMS: Iterate through the rooms this socket is currently in
+    // socket.rooms is a Set containing the socket ID and any joined rooms
+    for (const room of socket.rooms) {
+      // If the user is in a flight server room that is NOT the one they just requested...
+      if (validServerRooms.includes(room) && room !== targetRoom) {
+        socket.leave(room);
+        console.log(`[socket] 👋 ${socket.id} left room: ${room}`);
+      }
+    }
+
+    // 2. JOIN NEW ROOM
+    // Only join if they aren't already there (Socket.IO handles deduping, but good to be clear)
+    socket.join(targetRoom);
+    console.log(`[socket] 🚪 ${socket.id} joined room: ${targetRoom}`);
   });
 
   socket.on('disconnect', () => {
