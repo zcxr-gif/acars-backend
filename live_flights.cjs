@@ -757,29 +757,52 @@ io.on('connection', (socket) => {
   console.log(`[socket] ✅ User connected: ${socket.id}`);
 
   // Listen for a client to request a specific server's flight data
-  socket.on('join_server_room', (serverName) => {
+  socket.on('join_server_room', async (serverName) => {
     if (!serverName) return;
     
     // Normalize the requested room name
     const targetRoom = String(serverName).trim().toLowerCase();
     
-    // Define the specific flight data rooms we manage to avoid leaving system rooms (like the socket.id room)
+    // Define the specific flight data rooms we manage
     const validServerRooms = ['expert server', 'training server', 'casual server'];
 
-    // 1. LEAVE OLD ROOMS: Iterate through the rooms this socket is currently in
-    // socket.rooms is a Set containing the socket ID and any joined rooms
+    // 1. LEAVE OLD ROOMS
     for (const room of socket.rooms) {
-      // If the user is in a flight server room that is NOT the one they just requested...
       if (validServerRooms.includes(room) && room !== targetRoom) {
         socket.leave(room);
-        console.log(`[socket] 👋 ${socket.id} left room: ${room}`);
+        // console.log(`[socket] 👋 ${socket.id} left room: ${room}`);
       }
     }
 
     // 2. JOIN NEW ROOM
-    // Only join if they aren't already there (Socket.IO handles deduping, but good to be clear)
     socket.join(targetRoom);
     console.log(`[socket] 🚪 ${socket.id} joined room: ${targetRoom}`);
+
+    // --- [PERFORMANCE FIX] ---
+    // Immediately send the last known data from cache to THIS specific user.
+    // This prevents the user from waiting for the next polling cycle (2-5s delay).
+    try {
+      // A. Get current sessions (Uses existing cache logic in getSessions)
+      const sessions = await getSessions();
+      
+      // B. Find the ID for the server they just joined
+      // Note: pickSessionIdByName handles fuzzy matching (e.g. "expert server" vs "Expert Server")
+      const sessionId = pickSessionIdByName(sessions, serverName);
+
+      if (sessionId) {
+        // C. Check if we have flight data cached for this session
+        const cachedData = apiCache.flights.get(sessionId);
+        
+        if (cachedData) {
+          // D. Send immediately!
+          socket.emit('all_flights_update', cachedData);
+          console.log(`[socket] 🚀 Fast-forwarded cached data to ${socket.id} for ${serverName}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[socket] Failed to send immediate cache for ${serverName}:`, err.message);
+    }
+    // --- [END FIX] ---
   });
 
   socket.on('disconnect', () => {
