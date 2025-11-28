@@ -332,6 +332,57 @@ async function getAirportInfo(icao) {
   }
 }
 
+async function getAirportStatus(sessionId, icao) {
+  if (!sessionId || !icao) throw new Error('Missing sessionId or airport ICAO');
+  
+  const cleanIcao = icao.toUpperCase().trim();
+  // Documentation Source 1: GET .../sessions/{sessionId}/airport/{airportIcao}/status
+  const url = `/sessions/${encodeURIComponent(sessionId)}/airport/${encodeURIComponent(cleanIcao)}/status`;
+
+  try {
+    const { data } = await ifClient.get(url);
+    
+    // Manual error check based on Documentation Source 5 (errorCode)
+    const payload = data && typeof data === 'object' ? data : {};
+    
+    // Check if errorCode is not 0 (Ok) 
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+       // errorCode 5 is ServerNotFound, 6 is FlightNotFound, etc. 
+       const err = new Error(`IF API errorCode ${payload.errorCode}`);
+       err.response = { data: payload };
+       throw err;
+    }
+
+    // Return the 'result' object (AirportStatus) which contains inboundFlights, atcFacilities, etc. [cite: 6, 7, 8]
+    return payload.result || null;
+
+  } catch (e) {
+    const status = e?.response?.status;
+    
+    // Standard retry logic for 401/403 (Token Expiry) [cite: 2]
+    if (status === 401 || status === 403) {
+      // Documentation Source 2: fallback to adding apikey query parameter
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+         err.response = { data: payload };
+         throw err;
+      }
+
+      return payload.result || null;
+    }
+
+    // If API returns 404, it might mean the session or airport is invalid in this context
+    if (status === 404) {
+      return null;
+    }
+    
+    throw e;
+  }
+}
+
 async function getAllLiveries() {
   const url = '/aircraft/liveries';
   try {
@@ -1335,6 +1386,44 @@ app.get('/api/airport/:icao', async (req, res) => {
   }
 });
 
+// ⬇️ NEW ROUTE: Get Live Airport Status (Inbound/Outbound/ATC)
+app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
+  const { sessionId, icao } = req.params;
+
+  try {
+    const airportStatus = await getAirportStatus(sessionId, icao);
+    
+    if (!airportStatus) {
+      return res.status(404).json(err(404, `Airport status not found for ${icao} on session ${sessionId}`));
+    }
+    
+    // Return the structure defined in the documentation [cite: 3, 4]
+    res.json({ 
+      ok: true, 
+      sessionId,
+      icao: airportStatus.airportIcao,
+      status: {
+        airportName: airportStatus.airportName,
+        inboundFlightsCount: airportStatus.inboundFlightsCount, // [cite: 6]
+        inboundFlights: airportStatus.inboundFlights,           // [cite: 6]
+        outboundFlightsCount: airportStatus.outboundFlightsCount, // [cite: 7]
+        outboundFlights: airportStatus.outboundFlights,         // [cite: 7]
+        atcFacilities: airportStatus.atcFacilities              // [cite: 8, 9, 10]
+      }
+    });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    
+    res.status(status).json(
+      err(status, 'Failed to fetch live airport status', { 
+        detail: e?.message,
+        apiErrorCode: apiError?.errorCode // 
+      })
+    );
+  }
+});
 
 /* =========================
  * Startup
