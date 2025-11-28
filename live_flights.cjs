@@ -1,5 +1,3 @@
-
-
 /* =========================
  * Imports & setup
  * ========================= */
@@ -62,6 +60,7 @@ const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 10
 const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
 
 const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '2000', 10);
+const SECONDARY_POLL_MS = 20000; // Poll ATC/NOTAMs every 20 seconds
 
 /* =========================
  * NEW: In-Memory API Cache
@@ -78,6 +77,8 @@ const VA_STAFF_ROLES = [
 const apiCache = {
   sessions: [],
   flights: new Map(), // sessionId -> { server, sessionId, count, flights, timestamp }
+  // ⬇️ NEW: Secondary cache for ATC/NOTAMs
+  secondary: new Map(), // sessionId -> { atc: [], notams: [], timestamp: ... }
   lastSessionsUpdate: 0,
   // ⬇️ NEW: Add a cache for the VA pilot roster
   vaRosterCache: new Map(), // Stores { lowercase_username -> { role: '...' } }
@@ -88,7 +89,6 @@ const SESSIONS_CACHE_TTL_MS = 60 * 1000;
 /* =========================
  * Axios client
  * ========================= */
-// ... (this section is unchanged) ...
 const ifClient = axios.create({
   baseURL: IF_API_BASE_URL,
   timeout: 15000,
@@ -229,7 +229,6 @@ function err(status, message, extra = {}) {
  * IF API Wrappers
  * ========================= */
 async function getAircraftList() {
-// ... (this function is unchanged) ...
   const { data } = await ifClient.get('/aircraft');
   const items = unwrap(data);
   return items.map((a) => ({
@@ -393,7 +392,6 @@ async function getSessions() {
 }
 
 function pickSessionIdByName(sessions, desiredName = 'Expert Server') {
-// ... (this function is unchanged) ...
   if (!Array.isArray(sessions) || sessions.length === 0) return null;
   const want = String(desiredName || '').trim().toLowerCase();
   const exact = sessions.find(s => (s.name || '').toLowerCase() === want);
@@ -415,7 +413,6 @@ function pickSessionIdByName(sessions, desiredName = 'Expert Server') {
 }
 
 async function getFlightsForSession(sessionId) {
-// ... (this function is unchanged) ...
   if (!sessionId) throw new Error('Missing sessionId');
   try {
     const { data } = await ifClient.get(`/sessions/${encodeURIComponent(sessionId)}/flights`);
@@ -501,7 +498,6 @@ function simplifyFlight(f) {
   };
 }
 
-// ... (All other IF API Wrappers like getFlightPlan, getFlightRoute, getActiveATC, getNotams, getUserStats, getUserGrade are unchanged) ...
 async function getFlightPlan(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/flightplan`;
@@ -682,7 +678,6 @@ async function getNotams(sessionId) {
 }
 
 async function getUserStats(params) {
-// ... (this function is unchanged) ...
   const url = '/users';
   if (!params || (!params.userIds && !params.discourseNames && !params.userHashes)) {
     throw new Error('At least one search parameter (userIds, discourseNames, userHashes) is required.');
@@ -716,7 +711,6 @@ async function getUserStats(params) {
 }
 
 async function getUserGrade(userId) {
-// ... (this function is unchanged) ...
   if (!userId) throw new Error('Missing userId');
   const url = `/users/${encodeURIComponent(userId)}`;
   try {
@@ -751,7 +745,7 @@ async function getUserGrade(userId) {
 
 
 /* =========================
- * Socket.IO Connection Handling (NEW)
+ * Socket.IO Connection Handling (FIXED)
  * ========================= */
 io.on('connection', (socket) => {
   console.log(`[socket] ✅ User connected: ${socket.id}`);
@@ -790,13 +784,18 @@ io.on('connection', (socket) => {
       const sessionId = pickSessionIdByName(sessions, serverName);
 
       if (sessionId) {
-        // C. Check if we have flight data cached for this session
-        const cachedData = apiCache.flights.get(sessionId);
-        
-        if (cachedData) {
-          // D. Send immediately!
-          socket.emit('all_flights_update', cachedData);
-          console.log(`[socket] 🚀 Fast-forwarded cached data to ${socket.id} for ${serverName}`);
+        // C. Send cached FLIGHTS
+        const cachedFlights = apiCache.flights.get(sessionId);
+        if (cachedFlights) {
+          socket.emit('all_flights_update', cachedFlights);
+          console.log(`[socket] 🚀 Fast-forwarded FLIGHTS to ${socket.id} for ${serverName}`);
+        }
+
+        // D. Send cached ATC/NOTAMS (Secondary) - NEW FIX
+        const cachedSecondary = apiCache.secondary.get(sessionId);
+        if (cachedSecondary) {
+          socket.emit('secondary_data_update', cachedSecondary);
+          console.log(`[socket] 🚀 Fast-forwarded ATC/NOTAMS to ${socket.id} for ${serverName}`);
         }
       }
     } catch (err) {
@@ -973,6 +972,62 @@ async function pollAndBroadcastFlights() {
     });
 })();
 
+/* =========================
+ * Secondary Data Poller (ATC & NOTAMs) - NEW
+ * ========================= */
+async function pollAndBroadcastSecondary() {
+  let sessions = [];
+  try {
+    sessions = await getSessions();
+  } catch (e) {
+    return;
+  }
+
+  const serverNames = ["Expert Server", "Training Server", "Casual Server"];
+
+  for (const serverName of serverNames) {
+    const sessionId = pickSessionIdByName(sessions, serverName);
+    if (!sessionId) continue;
+
+    try {
+      // Fetch both ATC and NOTAMs in parallel
+      const [atc, notams] = await Promise.all([
+        getActiveATC(sessionId).catch(() => []),
+        getNotams(sessionId).catch(() => [])
+      ]);
+
+      const payload = {
+        server: serverName,
+        sessionId: sessionId,
+        atc: atc,
+        notams: notams,
+        timestamp: new Date().toISOString()
+      };
+
+      // 1. Update Cache
+      apiCache.secondary.set(sessionId, payload);
+
+      // 2. Broadcast to room (Optional: usually client only needs this on join or slow poll, 
+      // but broadcasting ensures live updates if a controller opens/closes)
+      const roomName = serverName.toLowerCase();
+      // Only emit if there are people in the room to save bandwidth
+      const room = io.sockets.adapter.rooms.get(roomName);
+      if (room && room.size > 0) {
+          io.to(roomName).emit('secondary_data_update', payload);
+      }
+
+    } catch (e) {
+      console.warn(`[secondary] Failed to update ATC/NOTAMs for ${serverName}`, e.message);
+    }
+  }
+}
+
+(function runSecondaryPoller() {
+  pollAndBroadcastSecondary()
+    .catch(e => console.error('[secondary] Poller error', e))
+    .finally(() => setTimeout(runSecondaryPoller, SECONDARY_POLL_MS));
+})();
+
 
 /* =========================
  * API Endpoints
@@ -991,7 +1046,6 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/if-key-debug', (req, res) => {
-// ... (this function is unchanged) ...
   const masked = IF_API_KEY ? `${IF_API_KEY.slice(0, 4)}...${IF_API_KEY.slice(-4)}` : '(missing)';
   res.json({
     ok: true,
@@ -1020,7 +1074,6 @@ app.get('/if-sessions', async (req, res) => {
 });
 
 app.get('/if-sessions-test', async (req, res) => {
-// ... (this function is unchanged, but benefits from getSessions() caching) ...
   try {
     if (!IF_API_KEY) return res.status(500).json(err(500, 'INFINITE_FLIGHT_API_KEY is not set'));
     const targetServer = (req.query.server || 'Expert Server').toString();
@@ -1090,7 +1143,6 @@ app.get('/flights/:sessionId', async (req, res) => {
 });
 
 app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
-// ... (this function is unchanged) ...
   const { sessionId, flightId } = req.params;
   try {
     const rawPlan = await getFlightPlan(sessionId, flightId);
@@ -1111,7 +1163,6 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
 });
 
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
-// ... (this function is unchanged) ...
   const { sessionId, flightId } = req.params;
   try {
     const rawRoute = await getFlightRoute(sessionId, flightId);
@@ -1131,9 +1182,17 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
   }
 });
 
+// ⬇️ REPLACED: ATC Endpoint now uses secondary cache
 app.get('/atc/:sessionId', async (req, res) => {
-// ... (this function is unchanged) ...
   const { sessionId } = req.params;
+  
+  // 1. Try Cache First
+  const cached = apiCache.secondary.get(sessionId);
+  if (cached) {
+      return res.json({ ok: true, count: cached.atc.length, atc: cached.atc, fromCache: true });
+  }
+
+  // 2. Fallback to Live Fetch
   try {
     const atcFacilities = await getActiveATC(sessionId);
     res.json({ ok: true, count: atcFacilities.length, atc: atcFacilities });
@@ -1149,9 +1208,17 @@ app.get('/atc/:sessionId', async (req, res) => {
   }
 });
 
+// ⬇️ REPLACED: NOTAMs Endpoint now uses secondary cache
 app.get('/notams/:sessionId', async (req, res) => {
-// ... (this function is unchanged) ...
   const { sessionId } = req.params;
+
+  // 1. Try Cache First
+  const cached = apiCache.secondary.get(sessionId);
+  if (cached) {
+      return res.json({ ok: true, count: cached.notams.length, notams: cached.notams, fromCache: true });
+  }
+
+  // 2. Fallback to Live Fetch
   try {
     const notams = await getNotams(sessionId);
     res.json({ ok: true, count: notams.length, notams: notams });
@@ -1168,7 +1235,6 @@ app.get('/notams/:sessionId', async (req, res) => {
 });
 
 app.post('/users', async (req, res) => {
-// ... (this function is unchanged) ...
   const { userIds, discourseNames, userHashes } = req.body;
 
   // Validate that at least one valid array is present in the request body
@@ -1196,7 +1262,6 @@ app.post('/users', async (req, res) => {
 });
 
 app.get('/users/:userId/grade', async (req, res) => {
-// ... (this function is unchanged) ...
   const { userId } = req.params;
   try {
     const gradeInfo = await getUserGrade(userId);
@@ -1270,7 +1335,6 @@ app.get('/api/airport/:icao', async (req, res) => {
   }
 });
 
-// All /track/... endpoints have been removed.
 
 /* =========================
  * Startup
@@ -1281,6 +1345,7 @@ httpServer.listen(PORT, () => {
   console.log(`✅ Live Flight Broadcaster (Sockets) ready: http://localhost:${PORT}`);
   console.log('🌐 Base URL:', IF_API_BASE_URL);
   console.log(`📡 Broadcasting all flights every ${ALL_FLIGHTS_POLL_MS}ms`);
+  console.log(`📡 Broadcasting ATC/NOTAMs every ${SECONDARY_POLL_MS}ms`);
   if (!IF_API_KEY) {
     console.warn('⚠️  IF API key is missing. Set INFINITE_FLIGHT_API_KEY in your .env file.');
   }
