@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Incident Response - Antony Hercules</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Open+Sans:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            background-color: #f3f4f6;
+            height: 100vh;
+            overflow: hidden; 
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Slide Aspect Ratio 16:9 */
+        .slide-container {
+            width: 100%;
+            max-width: 1024px;
+            aspect-ratio: 16/9;
+            background-color: white;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            position: relative;
+            overflow: hidden;
+            border-radius: 8px;
+            
+            /* Logic for switching slides */
+            display: none !important; 
+            margin: auto;
+            flex-direction: column;
+        }
+
+        .slide-container.active {
+            display: flex !important;
+        }
+
+        /* Speaker Note Box */
+        .speaker-note {
+            background-color: #eff6ff; 
+            border-top: 1px solid #bfdbfe;
+            padding: 12px 24px;
+            margin-top: auto; 
+            font-size: 0.9rem;
+            color: #1e40af;
+        }
+        .speaker-note strong {
+            color: #1e3a8a;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        /* Typography */
+        h1 { font-size: 2.5rem; font-weight: 700; color: #111827; line-height: 1.2; }
+        h2 { font-size: 2rem; color: #1f2937; margin-bottom: 1.5rem; font-weight: 500; border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5rem; }
+        h3 { font-size: 1.25rem; font-weight: 600; color: #2563eb; margin-bottom: 0.5rem; }
+        p, li { font-family: 'Open Sans', sans-serif; color: #374151; font-size: 1.05rem; line-height: 1.6; }
+        
+        .citation-text { font-size: 0.8rem; color: #6b7280; font-style: italic; }
+
+        /* Card Styling */
+        .info-card {
+            background-color: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 1.5rem;
+            height: 100%;
+        }
+
+        /* Utility for analogies */
+        .analogy-box {
+            background-color: #fffbeb;
+            border-left: 4px solid #f59e0b;
+            padding: 1rem;
+            margin-top: 1rem;
+            font-size: 0.95rem;
+            color: #92400e;
+        }
+        
+        /* Links in references */
+        a.ref-link {
+            color: #2563eb;
+            text-decoration: none;
+            font-weight: 400;
+            font-size: 0.75rem; /* Smaller font for long URLs */
+            word-break: break-all; /* Ensure long URLs wrap */
+            display: block;
+            margin-top: 0.25rem;
+        }
+        a.ref-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Minimal Header -->
+    <header class="bg-white border-b border-gray-200 flex items-center justify-between p-4 shrink-0 z-10">
+        <div>
+            <div class="text-lg text-gray-800 font-bold">Incident Response Project</div>
+            <div class="text-sm text-gray-500">Antony Hercules - CPS 100</div>
+        </div>
+        <button onclick="downloadPDF()" id="pdf-btn" class="bg-blue-600 text-white px-5 py-2 rounded hover:bg-blue-700 text-sm font-medium shadow-sm transition flex items-center">
+            <i class="fas fa-file-pdf mr-2"></i> <span>Download PDF</span>
+        </button>
+    </header>
+
+    <!-- Main Content Area (Centered, No Sidebar) -->
+    <main class="flex-1 bg-gray-100 flex items-center justify-center p-8 overflow-hidden relative">
+        
+        <!-- Slide 1: Title -->
+        <div class="slide-container active p-16 justify-center" id="slide-0">
+            <div class="border-l-8 border-blue-600 pl-10">
+                <h1 class="text-6xl mb-6 text-gray-900 tracking-tight font-bold">Incident Response &<br>Digital Forensics</h1>
+                <p class="text-2xl text-gray-600 font-light mb-12">How we detect, contain, and survive cyber attacks.</p>
+                <div class="mt-8 text-gray-700">
+                    <div class="text-xl font-bold">Antony Hercules</div>
+                    <div class="text-lg">Class: CPS 100</div>
+                    <div class="text-sm text-gray-500 uppercase tracking-widest font-bold mt-4">
+                        Final Presentation • Fall 2024
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 2: Objectives -->
+        <div class="slide-container p-12" id="slide-1">
+            <h2>Presentation Goals</h2>
+            <div class="grid grid-cols-2 gap-12 h-full items-center">
+                <div class="space-y-6">
+                    <div class="info-card border-l-4 border-l-blue-500 bg-white shadow-sm">
+                        <h3 class="text-gray-800"><i class="fas fa-list-ol mr-2 text-blue-500"></i>The Lifecycle</h3>
+                        <p>We will walk through the "Life of an Incident"—from the first alert to the final report.</p>
+                    </div>
+                    <div class="info-card border-l-4 border-l-green-500 bg-white shadow-sm">
+                        <h3 class="text-gray-800"><i class="fas fa-search mr-2 text-green-500"></i>Forensic Skills</h3>
+                        <p>Acquiring technical skills for evidence collection (Imaging, Hashing) and Chain of Custody.</p>
+                    </div>
+                    <div class="info-card border-l-4 border-l-purple-500 bg-white shadow-sm">
+                        <h3 class="text-gray-800"><i class="fas fa-users-cog mr-2 text-purple-500"></i>Coordination</h3>
+                        <p>Understanding how to develop plans (Playbooks) and coordinate teams during a crisis.</p>
+                    </div>
+                </div>
+                <div class="flex items-center justify-center bg-gray-50 rounded-lg h-full border border-gray-200">
+                    <div class="text-center p-8">
+                        <i class="fas fa-user-shield text-6xl text-gray-300 mb-4"></i>
+                        <p class="text-gray-400 font-bold mt-4">Goal: Minimize Damage</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 3: What is an Incident -->
+        <div class="slide-container p-12" id="slide-2">
+            <h2>Defining an "Incident"</h2>
+            <div class="flex flex-col h-full justify-center space-y-6">
+                <div class="bg-red-50 border border-red-200 p-6 rounded-lg text-center shadow-sm">
+                    <p class="text-xl text-red-800 font-medium">An <strong>Incident</strong> is a violation of security policies that threatens data confidentiality, integrity, or availability.</p>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-8 mt-4">
+                    <div class="bg-white p-6 border rounded shadow-sm">
+                        <strong class="text-gray-500 uppercase text-xs block mb-2">Not an Incident (Event)</strong>
+                        <h3 class="text-gray-800 text-lg">Server Failure (Old Hardware)</h3>
+                        <p class="text-sm mt-2 text-gray-600">A hard drive dying is an operational issue. It's annoying, but it's not an attack. We fix it and move on.</p>
+                    </div>
+                    <div class="bg-white p-6 border-l-4 border-red-500 rounded shadow-sm">
+                        <strong class="text-red-500 uppercase text-xs block mb-2">Security Incident</strong>
+                        <h3 class="text-gray-800 text-lg">Server Failure (DDoS Attack)</h3>
+                        <p class="text-sm mt-2 text-gray-600">A hacker overwhelming the server to take it offline is a crime. This requires a forensic investigation.</p>
+                    </div>
+                </div>
+                
+                <div class="analogy-box">
+                    <strong><i class="fas fa-lightbulb mr-2"></i>Analogy: The Fire Dept</strong>
+                    <br>IT Support are the carpenters fixing a broken door. Incident Responders are the Firefighters rushing in when the building is burning.
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 4: Frameworks -->
+        <div class="slide-container p-12" id="slide-3">
+            <h2>Why Use a Framework?</h2>
+            <p class="mb-4">In a crisis, panic is the enemy. We follow strict government (NIST) or industry (SANS) checklists so we don't forget steps.</p>
+            
+            <div class="grid grid-cols-2 gap-8 h-full pb-8">
+                <!-- NIST Column -->
+                <div class="info-card bg-blue-50 border-blue-200 shadow-sm">
+                    <div class="flex items-center mb-6 border-b border-blue-200 pb-2">
+                        <span class="bg-blue-600 text-white font-bold px-3 py-1 rounded text-sm mr-2">NIST</span>
+                        <span class="text-sm text-gray-500 font-medium">SP 800-61 (The Government Standard)</span>
+                    </div>
+                    <ol class="list-decimal list-inside space-y-4 font-medium text-gray-700">
+                        <li class="p-3 bg-white rounded border border-blue-100 shadow-sm">Preparation <span class="text-xs text-gray-400 block pl-6 font-normal">Getting ready before it happens.</span></li>
+                        <li class="p-3 bg-white rounded border border-blue-100 shadow-sm">Detection & Analysis <span class="text-xs text-gray-400 block pl-6 font-normal">Figuring out what is happening.</span></li>
+                        <li class="p-3 bg-white rounded border border-blue-100 shadow-sm">Containment, Eradication, & Recovery <span class="text-xs text-gray-400 block pl-6 font-normal">Stopping it and fixing it.</span></li>
+                        <li class="p-3 bg-white rounded border border-blue-100 shadow-sm">Post-Incident Activity <span class="text-xs text-gray-400 block pl-6 font-normal">Learning from mistakes.</span></li>
+                    </ol>
+                </div>
+
+                <!-- SANS Column -->
+                <div class="info-card bg-green-50 border-green-200 shadow-sm flex flex-col justify-center">
+                    <h3 class="text-green-800 mb-2">The Golden Rule</h3>
+                    <p class="text-sm text-gray-700 mb-4">NIST groups the middle steps, but in practice, we must separate them:</p>
+                    <div class="bg-white p-4 rounded border border-green-100 shadow-sm text-center">
+                        <div class="text-lg font-bold text-gray-800">Containment <i class="fas fa-arrow-right text-green-500 mx-2"></i> Eradication <i class="fas fa-arrow-right text-green-500 mx-2"></i> Recovery</div>
+                        <p class="text-xs text-gray-500 mt-2">You cannot recover (restart) until you eradicate (clean). If you restart a dirty system, you get reinfected immediately.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 5: Preparation & Team -->
+        <div class="slide-container p-12" id="slide-4">
+            <h2>Phase 1: Preparation (The Team)</h2>
+            <div class="flex gap-8 h-full pt-4">
+                <div class="w-1/2">
+                    <h3 class="text-gray-800 border-b-2 border-gray-100 pb-2 mb-6">CSIRT Roles</h3>
+                    <ul class="space-y-6">
+                        <li class="flex items-start">
+                            <div class="bg-blue-100 p-3 rounded-full mr-4"><i class="fas fa-user-tie text-blue-600"></i></div>
+                            <div>
+                                <strong class="text-lg text-gray-800">Incident Commander</strong>
+                                <p class="text-sm text-gray-600 mt-1">The "Quarterback." They don't touch keyboards; they manage the team, legal issues, and the executives.</p>
+                            </div>
+                        </li>
+                        <li class="flex items-start">
+                            <div class="bg-green-100 p-3 rounded-full mr-4"><i class="fas fa-laptop-code text-green-600"></i></div>
+                            <div>
+                                <strong class="text-lg text-gray-800">Technical Leads</strong>
+                                <p class="text-sm text-gray-600 mt-1">The experts investigating logs, reverse-engineering malware, and blocking IP addresses.</p>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+                <div class="w-1/2 bg-gray-50 p-6 rounded-xl border border-gray-200 shadow-inner">
+                    <h3 class="text-gray-800 border-b pb-2 mb-4">The "Jump Bag"</h3>
+                    <p class="text-sm mb-6 text-gray-600">We need clean tools for when our network is compromised:</p>
+                    <div class="grid grid-cols-1 gap-4">
+                        <div class="bg-white p-4 rounded-lg shadow-sm flex items-center border">
+                            <i class="fas fa-map mr-4 text-gray-400 text-xl"></i>
+                            <span class="font-medium text-gray-700">Physical Network Maps</span>
+                        </div>
+                        <div class="bg-white p-4 rounded-lg shadow-sm flex items-center border">
+                            <i class="fas fa-laptop-medical mr-4 text-gray-400 text-xl"></i>
+                            <span class="font-medium text-gray-700">Clean Laptops (Never connected)</span>
+                        </div>
+                        <div class="bg-white p-4 rounded-lg shadow-sm flex items-center border">
+                            <i class="fas fa-wifi mr-4 text-gray-400 text-xl"></i>
+                            <span class="font-medium text-gray-700">Backup WiFi / 5G Hotspots</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 6: Planning Skills (NEW) -->
+        <div class="slide-container p-12" id="slide-5">
+            <h2>Developing Plans: "The Playbook"</h2>
+            <p class="mb-6 text-gray-600">We don't improvise during a fire. We follow a plan. In IR, these plans are called <strong>Playbooks</strong>.</p>
+            
+            <div class="grid grid-cols-2 gap-8 items-center h-full pb-8">
+                <div class="space-y-4">
+                    <div class="bg-white border-l-4 border-blue-500 p-4 shadow-sm">
+                        <strong class="text-blue-700 block">General IR Plan</strong>
+                        <p class="text-sm text-gray-600">The high-level policy. (Who is in charge? When do we call the police?)</p>
+                    </div>
+                    <div class="bg-white border-l-4 border-red-500 p-4 shadow-sm">
+                        <strong class="text-red-700 block">Specific Playbooks</strong>
+                        <p class="text-sm text-gray-600">Step-by-step guides for specific attacks.</p>
+                        <ul class="list-disc list-inside text-xs mt-2 text-gray-500">
+                            <li>Ransomware Playbook</li>
+                            <li>Phishing Playbook</li>
+                            <li>DDoS Playbook</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="analogy-box">
+                    <strong><i class="fas fa-plane mr-2"></i>Analogy: The Pilot's Checklist</strong>
+                    <br>When an engine fails, a pilot doesn't guess what to do. They pull out the "Engine Failure Checklist" and follow it line by line. <br><br>Playbooks are our checklists.
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 7: Coordination (NEW) -->
+        <div class="slide-container p-12" id="slide-6">
+            <h2>Coordination: The Chain of Command</h2>
+            <p class="mb-6 text-gray-600">Effective coordination means everyone knows who to talk to. We keep the "noise" away from the fixers.</p>
+            
+            <div class="flex flex-col items-center justify-center space-y-4">
+                <!-- Top Level -->
+                <div class="bg-gray-800 text-white p-4 rounded-lg w-64 text-center shadow-lg">
+                    <div class="font-bold">Executive Management</div>
+                    <div class="text-xs text-gray-400">CEO, Legal, PR (Public Comms)</div>
+                </div>
+                <i class="fas fa-arrow-up text-gray-400"></i>
+                <!-- Commander -->
+                <div class="bg-blue-600 text-white p-4 rounded-lg w-64 text-center shadow-lg border-2 border-blue-800">
+                    <div class="font-bold">Incident Commander</div>
+                    <div class="text-xs text-blue-200">The Bridge (Filters Info)</div>
+                </div>
+                <i class="fas fa-arrow-up text-gray-400"></i>
+                <!-- Tech Level -->
+                <div class="flex space-x-4">
+                    <div class="bg-white border border-gray-300 p-4 rounded-lg w-48 text-center shadow-sm">
+                        <div class="font-bold text-gray-700">Lead Analyst</div>
+                        <div class="text-xs text-gray-500">Manages Forensics</div>
+                    </div>
+                    <div class="bg-white border border-gray-300 p-4 rounded-lg w-48 text-center shadow-sm">
+                        <div class="font-bold text-gray-700">Network Lead</div>
+                        <div class="text-xs text-gray-500">Manages Firewall/Containment</div>
+                    </div>
+                </div>
+            </div>
+            <div class="speaker-note">
+                <strong>Speaker Note</strong>
+                The Technical team NEVER talks to the CEO directly during a crisis. It causes panic. They talk to the Commander, who translates "geek speak" into business language.
+            </div>
+        </div>
+
+        <!-- Slide 8: Detection -->
+        <div class="slide-container p-12" id="slide-7">
+            <h2>Phase 2: Detection (Finding the Needle)</h2>
+            <p class="mb-8 text-xl text-gray-600">We collect billions of logs. How do we find the one line that says "we are hacked"?</p>
+            
+            <div class="flex items-center justify-center space-x-6 mb-12">
+                <div class="bg-gray-100 p-6 rounded-lg text-center w-48 border border-gray-300">
+                    <div class="text-3xl font-bold text-gray-500 mb-1">Logs</div>
+                    <div class="text-xs uppercase font-bold text-gray-400">Raw Data</div>
+                </div>
+                <i class="fas fa-filter text-2xl text-gray-300"></i>
+                <div class="bg-blue-50 p-6 rounded-lg text-center w-48 border border-blue-200">
+                    <div class="text-3xl font-bold text-blue-600 mb-1">Alerts</div>
+                    <div class="text-xs uppercase font-bold text-blue-400">SIEM Warnings</div>
+                </div>
+                <i class="fas fa-search text-2xl text-gray-300"></i>
+                <div class="bg-blue-600 text-white p-6 rounded-lg text-center w-48 shadow-xl transform scale-110">
+                    <div class="text-3xl font-bold mb-1">Incident</div>
+                    <div class="text-xs uppercase font-bold text-blue-200">Confirmed Breach</div>
+                </div>
+            </div>
+
+            <div class="analogy-box">
+                <strong><i class="fas fa-lightbulb mr-2"></i>Analogy: The Security Guard</strong>
+                <br>A <strong>Log</strong> is a recording of everyone who walked through the door. An <strong>Alert</strong> is the camera buzzing because someone walked in at 3 AM. An <strong>Incident</strong> is finding out that person stole the TV.
+            </div>
+        </div>
+
+        <!-- Slide 9: Analysis -->
+        <div class="slide-container p-12" id="slide-8">
+            <h2>Phase 2b: Analysis & Triage</h2>
+            <p class="mb-6 text-gray-600">Not every alert is real. We must "Triage" to separate real threats from noise.</p>
+            
+            <div class="grid grid-cols-2 gap-8 h-full pb-8">
+                <div class="bg-green-50 border border-green-200 p-6 rounded-lg shadow-sm">
+                    <h3 class="text-green-800 mb-2"><i class="fas fa-check mr-2"></i>False Positive</h3>
+                    <p class="text-sm font-bold text-gray-700 mb-2">Looks bad, but is harmless.</p>
+                    <p class="text-sm text-gray-600 italic">"Alert: High outbound traffic from Finance Server."</p>
+                    <div class="mt-4 p-3 bg-white rounded border border-green-100 text-sm">
+                        <strong>Reality:</strong> Bob in accounting is uploading a large backup to the cloud.
+                        <br><span class="text-green-600 font-bold">Action: Close Ticket.</span>
+                    </div>
+                </div>
+                
+                <div class="bg-red-50 border border-red-200 p-6 rounded-lg shadow-sm">
+                    <h3 class="text-red-800 mb-2"><i class="fas fa-exclamation-triangle mr-2"></i>True Positive</h3>
+                    <p class="text-sm font-bold text-gray-700 mb-2">Actual malicious activity.</p>
+                    <p class="text-sm text-gray-600 italic">"Alert: PowerShell script executed by 'Admin' at 3 AM."</p>
+                    <div class="mt-4 p-3 bg-white rounded border border-red-100 text-sm">
+                        <strong>Reality:</strong> The Admin is on vacation. This is a hacker using stolen credentials.
+                        <br><span class="text-red-600 font-bold">Action: DECLARE INCIDENT.</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 10: The Chart -->
+        <div class="slide-container p-12" id="slide-9">
+            <h2>The Threat Landscape (2024)</h2>
+            <div class="flex gap-12 h-full items-center">
+                <div class="w-2/3 h-80">
+                    <canvas id="threatChart"></canvas>
+                    <p class="text-center text-xs text-gray-400 mt-6">Source: IBM Cost of a Data Breach Report 2024 & Verizon DBIR</p>
+                </div>
+                <div class="w-1/3 flex flex-col justify-center space-y-8">
+                    <div class="bg-red-50 p-6 border-l-4 border-red-500 shadow-md rounded-r-lg">
+                        <div class="text-4xl font-bold text-red-700 mb-1">204 Days</div>
+                        <div class="text-xs font-bold text-gray-500 uppercase tracking-wider">Mean Time To Identify</div>
+                        <p class="text-sm mt-3 text-gray-700">This is <strong>Dwell Time</strong>. Hackers live in your house (network) for 6 months before you notice them.</p>
+                    </div>
+                    <div class="bg-blue-50 p-6 border-l-4 border-blue-500 shadow-md rounded-r-lg">
+                        <div class="text-4xl font-bold text-blue-700 mb-1">73 Days</div>
+                        <div class="text-xs font-bold text-gray-500 uppercase tracking-wider">Mean Time To Contain</div>
+                        <p class="text-sm mt-3 text-gray-700">Once found, it takes another 2 months to fully kick them out.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="speaker-note">
+                <strong>Speaker Note</strong>
+                The goal of Incident Response is to shrink that "204 days" number down to hours or minutes. The longer they stay, the more data they steal.
+            </div>
+        </div>
+
+        <!-- Slide 11: Containment -->
+        <div class="slide-container p-12" id="slide-10">
+            <h2>Phase 3: Containment (Stop the Bleeding)</h2>
+            <div class="grid grid-cols-2 gap-8 h-full pb-8">
+                <div class="info-card bg-yellow-50 border-yellow-200">
+                    <h3 class="text-yellow-800 mb-6 border-b border-yellow-200 pb-2">Strategy: Isolation</h3>
+                    <ul class="space-y-4">
+                        <li class="flex items-center bg-white p-4 rounded-lg shadow-sm border border-yellow-100">
+                            <i class="fas fa-network-wired text-yellow-600 mr-4 text-xl"></i>
+                            <div>
+                                <span class="font-bold text-gray-800 block">VLAN Quarantine</span>
+                                <span class="text-sm text-gray-600">We move the infected computer to a digital "jail" network. It can't talk to other computers, but we can still study it remotely.</span>
+                            </div>
+                        </li>
+                    </ul>
+                    <div class="mt-4 p-4 bg-white border border-red-200 rounded text-sm text-red-700">
+                        <strong><i class="fas fa-times-circle mr-1"></i> DO NOT POWER OFF!</strong>
+                        <br>Turning off the computer destroys evidence in the RAM (Memory). Just unplug the internet cable.
+                    </div>
+                </div>
+                <div class="info-card bg-blue-50 border-blue-200">
+                    <h3 class="text-blue-800 mb-6 border-b border-blue-200 pb-2">Strategy: Segmentation</h3>
+                    <p class="text-sm text-gray-700 mb-4">If the attackers are moving through the network, we cut the bridges.</p>
+                    <ul class="space-y-4">
+                        <li class="flex items-center bg-white p-4 rounded-lg shadow-sm border border-blue-100">
+                            <i class="fas fa-shield-virus text-blue-600 mr-4 text-xl"></i>
+                            <div>
+                                <span class="font-bold text-gray-800 block">Lateral Movement Defense</span>
+                                <span class="text-sm text-gray-600">Block connections between departments. (e.g., HR computers shouldn't be talking to Engineering servers).</span>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 12: Cleanup -->
+        <div class="slide-container p-12" id="slide-11">
+            <h2>Phase 4 & 5: The Cleanup</h2>
+            <div class="grid grid-cols-2 gap-12 mt-8 items-start">
+                <div class="text-center p-6 bg-red-50 rounded-xl border border-red-100 h-full">
+                    <div class="inline-block p-5 rounded-full bg-white shadow-sm text-red-600 mb-6">
+                        <i class="fas fa-trash-alt text-5xl"></i>
+                    </div>
+                    <h3 class="text-red-800 text-2xl mb-4">Eradication</h3>
+                    <p class="text-gray-700 mb-4">You cannot just "delete" the virus file. Hackers hide "backdoors" to get back in later.</p>
+                    <div class="mt-4 p-3 bg-white rounded border border-red-100 inline-block text-sm font-medium text-red-700">
+                        The Only Safe Way:<br><strong>Wipe the drive & Re-install Windows</strong>
+                    </div>
+                </div>
+                <div class="text-center p-6 bg-green-50 rounded-xl border border-green-100 h-full">
+                    <div class="inline-block p-5 rounded-full bg-white shadow-sm text-green-600 mb-6">
+                        <i class="fas fa-recycle text-5xl"></i>
+                    </div>
+                    <h3 class="text-green-800 text-2xl mb-4">Recovery</h3>
+                    <p class="text-gray-700 mb-4">We restore data from backups. But we must be careful—what if the backup is also infected?</p>
+                    <div class="mt-4 p-3 bg-white rounded border border-green-100 inline-block text-sm font-medium text-green-700">
+                        The Strategy:<br><strong>Restore from a date BEFORE the attack.</strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 13: Forensics 1 -->
+        <div class="slide-container p-12" id="slide-12">
+            <h2>Digital Forensics: Volatility</h2>
+            <div class="flex gap-10 h-full items-center">
+                <div class="w-1/2">
+                    <p class="text-gray-600 mb-6">Digital evidence is fragile. Some of it disappears the moment you pull the plug. We follow the <strong>Order of Volatility</strong>.</p>
+                    <ol class="space-y-4 text-sm font-medium">
+                        <li class="bg-red-100 p-4 rounded text-red-900 border-l-4 border-red-500 shadow-sm flex justify-between items-center">
+                            <span><strong class="block text-lg">1. CPU & Cache</strong>(Gone in nanoseconds)</span>
+                        </li>
+                        <li class="bg-orange-100 p-4 rounded text-orange-900 border-l-4 border-orange-500 shadow-sm flex justify-between items-center">
+                            <span><strong class="block text-lg">2. RAM (Memory)</strong>(Gone when power is cut)</span>
+                        </li>
+                        <li class="bg-blue-100 p-4 rounded text-blue-900 border-l-4 border-blue-500 shadow-sm flex justify-between items-center">
+                            <span><strong class="block text-lg">3. Hard Drive / HDD</strong>(Persistent - Safe to unplug)</span>
+                        </li>
+                    </ol>
+                </div>
+                <div class="w-1/2 bg-yellow-50 p-6 rounded-xl border border-yellow-200">
+                    <div class="text-center mb-4">
+                        <i class="fas fa-ice-cream text-6xl text-yellow-500"></i>
+                    </div>
+                    <h3 class="text-yellow-800 text-center mb-4">Analogy: The Melting Ice Cream</h3>
+                    <p class="text-sm text-gray-700 text-center leading-relaxed">
+                        RAM is like ice cream. If the power goes out (freezer stops), it melts immediately and the evidence is gone forever. The Hard Drive is like a frozen steak—it will stay frozen for a long time.
+                        <br><br><strong>Always collect the ice cream (RAM) first!</strong>
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 14: Forensics 2 (Updated for Skills) -->
+        <div class="slide-container p-12" id="slide-13">
+            <h2>Digital Forensics: Chain of Custody</h2>
+            <p class="mb-6 text-gray-600">If we want to prosecute the hacker, the evidence must stand up in court. We need proof we didn't tamper with it.</p>
+            
+            <div class="grid grid-cols-2 gap-8">
+                <div class="bg-white border rounded-lg p-6 shadow-sm">
+                    <h3 class="text-indigo-600 mb-3 font-bold">1. The Write Blocker</h3>
+                    <p class="text-sm text-gray-600 mb-4">A physical device we plug the hard drive into. It ensures we only READ data, never WRITE to it.</p>
+                    <div class="p-3 bg-indigo-50 border border-indigo-100 rounded text-xs text-indigo-800 font-bold">
+                        Skill: Bit-by-Bit Imaging
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">We never work on the original drive. We create a perfect "Bit-Stream" clone and work on the copy.</p>
+                </div>
+                <div class="bg-white border rounded-lg p-6 shadow-sm">
+                    <h3 class="text-indigo-600 mb-3 font-bold">2. Hashing (Digital Fingerprint)</h3>
+                    <p class="text-sm text-gray-600 mb-4">We run a math formula (MD5 or SHA256) on the hard drive contents. It gives us a unique string of characters.</p>
+                    <div class="bg-gray-100 p-3 rounded font-mono text-xs text-gray-700 break-all border">
+                        Hash Before: 5e884898da28047151d0e56f8dc62927<br>
+                        Hash After: &nbsp;5e884898da28047151d0e56f8dc62927
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">If even <strong>one single bit</strong> changes, the hash changes completely. This proves the evidence is authentic.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 15: Scenario Part 1 -->
+        <div class="slide-container p-12" id="slide-14">
+            <h2>Scenario: Ransomware Attack</h2>
+            <div class="flex gap-8 h-full pb-8">
+                <div class="w-1/2 bg-red-50 border-l-4 border-red-500 p-8 rounded-r-lg">
+                    <h3 class="text-red-800 mb-4 text-xl">The Situation</h3>
+                    <p class="mb-6 text-gray-800"><strong>Tuesday, 2:00 PM:</strong> An HR employee calls the Help Desk. Their screen is locked with a giant red skull. A message demands $50,000 in Bitcoin to unlock their files.</p>
+                    
+                    <div class="mt-8 bg-white p-6 rounded-lg shadow-sm border border-red-100">
+                        <strong class="block mb-4 text-gray-800 border-b pb-2">POP QUIZ: What is your first move?</strong>
+                        <ul class="space-y-3 text-sm">
+                            <li class="p-3 border rounded text-gray-400">A) Pull the power plug immediately.</li>
+                            <li class="p-3 border border-green-500 bg-green-50 text-green-800 font-bold rounded shadow-sm">B) Unplug the Network Cable (Ethernet/WiFi).</li>
+                            <li class="p-3 border rounded text-gray-400">C) Pay the ransom.</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="w-1/2 flex flex-col justify-center p-6 bg-gray-50 rounded-lg border">
+                     <div class="text-center mb-6">
+                        <i class="fas fa-biohazard text-6xl text-red-400"></i>
+                     </div>
+                     <p class="text-gray-600 text-center italic">"Your files are encrypted. Payment is required."</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 16: Scenario Part 2 -->
+        <div class="slide-container p-12" id="slide-15">
+            <h2>Scenario: Why B is Correct</h2>
+            <div class="flex flex-col h-full space-y-6 justify-center">
+                <div class="flex items-start bg-green-50 p-6 rounded-lg border border-green-200 shadow-sm">
+                    <div class="bg-green-100 p-3 rounded-full mr-6 text-green-600"><i class="fas fa-network-wired text-2xl"></i></div>
+                    <div>
+                        <h3 class="text-green-900 font-bold text-lg">Reason 1: Stop Lateral Movement</h3>
+                        <p class="text-gray-700 mt-1">Ransomware is designed to "worm" its way to other computers. If you unplug the network cable, the virus is trapped on that one machine. You save the rest of the company.</p>
+                    </div>
+                </div>
+
+                <div class="flex items-start bg-red-50 p-6 rounded-lg border border-red-200 shadow-sm opacity-75">
+                    <div class="bg-red-100 p-3 rounded-full mr-6 text-red-600"><i class="fas fa-memory text-2xl"></i></div>
+                    <div>
+                        <h3 class="text-red-900 font-bold text-lg">Why A (Power Off) is Wrong</h3>
+                        <p class="text-gray-700 mt-1">Sometimes, the encryption key (the password to unlock your files) is temporarily stored in the RAM. If you pull the plug, the RAM is wiped, and the key is gone forever. You might have just destroyed the only way to get your files back for free.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 17: Post Incident -->
+        <div class="slide-container p-12" id="slide-16">
+            <h2>Phase 6: Post-Incident Activity</h2>
+            <p class="mb-8 text-xl text-gray-600">The battle is over. Now we must learn from it so it doesn't happen again.</p>
+            
+            <div class="grid grid-cols-2 gap-8 h-full pb-8">
+                <div class="bg-white border rounded-lg p-6 shadow-sm">
+                    <h3 class="text-blue-600 font-bold mb-4">The "Hot Wash" Meeting</h3>
+                    <p class="text-sm text-gray-600 mb-4">A meeting held immediately after the incident while memories are fresh.</p>
+                    <ul class="list-disc list-inside text-sm text-gray-700 space-y-2">
+                        <li>What exactly happened?</li>
+                        <li>What did we do right?</li>
+                        <li>What did we do wrong?</li>
+                        <li>How can we detect this faster next time?</li>
+                    </ul>
+                </div>
+                <div class="bg-gray-50 border rounded-lg p-6 shadow-sm flex flex-col justify-center text-center">
+                    <i class="fas fa-clipboard-check text-5xl text-gray-400 mb-4"></i>
+                    <h3 class="text-gray-800 font-bold">The Final Report</h3>
+                    <p class="text-sm text-gray-600 mt-2">A formal document given to management. It justifies the budget for new security tools.</p>
+                    <p class="text-xs text-gray-500 italic mt-4">"Never let a good crisis go to waste."</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 18: References 1 (Data & Standards) -->
+        <div class="slide-container p-12" id="slide-17">
+            <h2>References: Empirical Data & Standards</h2>
+            <div class="space-y-4 mt-8">
+                <div class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition">
+                    <h3 class="text-md font-bold text-gray-800">Verizon 2024 Data Breach Investigations Report (DBIR)</h3>
+                    <p class="citation-text mt-1">Primary statistical baseline for attack vectors and industry trends.</p>
+                    <a href="https://www.verizon.com/business/resources/reports/dbir/" target="_blank" class="ref-link">https://www.verizon.com/business/resources/reports/dbir/</a>
+                </div>
+                <div class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition">
+                    <h3 class="text-md font-bold text-gray-800">Mandiant M-Trends 2024</h3>
+                    <p class="citation-text mt-1">The definitive source for "Dwell Time" statistics and global detection metrics.</p>
+                    <a href="https://www.mandiant.com/resources/reports/m-trends" target="_blank" class="ref-link">https://www.mandiant.com/resources/reports/m-trends</a>
+                </div>
+                <div class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition">
+                    <h3 class="text-md font-bold text-gray-800">NIST Special Publication 800-61 Rev. 2</h3>
+                    <p class="citation-text mt-1">Computer Security Incident Handling Guide. The US Government Standard.</p>
+                    <a href="https://csrc.nist.gov/pubs/sp/800/61/r2/final" target="_blank" class="ref-link">https://csrc.nist.gov/pubs/sp/800/61/r2/final</a>
+                </div>
+                <div class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition">
+                    <h3 class="text-md font-bold text-gray-800">ISO/IEC 27035: Information Security Incident Management</h3>
+                    <p class="citation-text mt-1">The International Standard for the management lifecycle of incidents.</p>
+                    <a href="https://www.iso.org/standard/60803.html" target="_blank" class="ref-link">https://www.iso.org/standard/60803.html</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 19: References 2 (Operational & Legal) -->
+        <div class="slide-container p-12" id="slide-18">
+            <h2>References: Operational Playbooks & Legal</h2>
+            <div class="space-y-4 mt-8">
+                <div class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition">
+                    <h3 class="text-md font-bold text-gray-800">CISA Incident & Vulnerability Response Playbooks</h3>
+                    <p class="citation-text mt-1">Standard Operating Procedures (SOPs) for federal agencies, including the #StopRansomware guide.</p>
+                    <a href="https://www.cisa.gov/resources-tools/resources/federal-government-cybersecurity-incident-and-vulnerability-response-playbooks" target="_blank" class="ref-link">https://www.cisa.gov/resources-tools/resources/federal-government-cybersecurity-incident-and-vulnerability-response-playbooks</a>
+                </div>
+                <div class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition">
+                    <h3 class="text-md font-bold text-gray-800">MITRE ATT&CK Framework</h3>
+                    <p class="citation-text mt-1">The global knowledge base of adversarial tactics, techniques, and procedures (TTPs).</p>
+                    <a href="https://attack.mitre.org/" target="_blank" class="ref-link">https://attack.mitre.org/</a>
+                </div>
+                <div class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition">
+                    <h3 class="text-md font-bold text-gray-800">DOJ: Searching and Seizing Computers Manual</h3>
+                    <p class="citation-text mt-1">The US Department of Justice guide on electronic evidence, Fourth Amendment rights, and chain of custody.</p>
+                    <a href="https://www.justice.gov/criminal-ccips/searching-and-seizing-computers-and-obtaining-electronic-evidence-criminal" target="_blank" class="ref-link">https://www.justice.gov/criminal-ccips/searching-and-seizing-computers-and-obtaining-electronic-evidence-criminal</a>
+                </div>
+                <div class="p-4 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition">
+                    <h3 class="text-md font-bold text-gray-800">RFC 3227</h3>
+                    <p class="citation-text mt-1">Guidelines for Evidence Collection and Archiving (Order of Volatility).</p>
+                    <a href="https://datatracker.ietf.org/doc/html/rfc3227" target="_blank" class="ref-link">https://datatracker.ietf.org/doc/html/rfc3227</a>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        // State
+        let currentSlide = 0;
+        const totalSlides = 19; // Updated Count (0 to 18)
+
+        // Navigation Function
+        function goToSlide(index) {
+            if (index < 0) index = 0;
+            if (index >= totalSlides) index = totalSlides - 1;
+            
+            currentSlide = index;
+
+            // Remove active classes
+            document.querySelectorAll('.slide-container').forEach(el => el.classList.remove('active'));
+
+            // Add active class
+            const targetSlide = document.getElementById(`slide-${index}`);
+            if(targetSlide) targetSlide.classList.add('active');
+        }
+
+        // PDF Download Function
+        async function downloadPDF() {
+            const btn = document.getElementById('pdf-btn');
+            const originalContent = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> <span>Generating...</span>';
+            btn.disabled = true;
+
+            const pdfWidth = 1024;
+            const pdfHeight = 576; // 16:9
+
+            const printOverlay = document.createElement('div');
+            printOverlay.id = 'print-overlay';
+            printOverlay.style.cssText = `
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: ${pdfWidth}px;
+                z-index: 99999;
+                background-color: white;
+                margin: 0;
+                padding: 0;
+            `;
+            document.body.appendChild(printOverlay);
+
+            for (let i = 0; i < totalSlides; i++) {
+                const source = document.getElementById(`slide-${i}`);
+                if (source) {
+                    const clone = source.cloneNode(true);
+                    clone.removeAttribute('id');
+                    clone.classList.remove('slide-container', 'active', 'hidden', 'shadow-sm');
+                    clone.classList.remove('p-16', 'p-12', 'p-10', 'p-8');
+                    clone.classList.add('p-8'); 
+
+                    clone.style.cssText = `
+                        position: relative !important;
+                        width: 100% !important;
+                        height: ${pdfHeight}px !important;
+                        background-color: white !important;
+                        margin: 0 !important;
+                        display: flex !important;
+                        flex-direction: column !important;
+                        page-break-after: always !important;
+                        border: none !important;
+                        box-shadow: none !important;
+                        box-sizing: border-box !important;
+                        left: 0 !important;
+                    `;
+
+                    // Fix Chart Canvas
+                    const srcCanvas = source.querySelector('canvas');
+                    const destCanvas = clone.querySelector('canvas');
+                    if (srcCanvas && destCanvas) {
+                        const img = document.createElement('img');
+                        img.src = srcCanvas.toDataURL('image/png', 1.0);
+                        img.style.width = '100%';
+                        img.style.height = 'auto';
+                        img.style.maxHeight = '250px';
+                        img.style.objectFit = 'contain';
+                        destCanvas.parentNode.replaceChild(img, destCanvas);
+                    }
+
+                    // Wrap content
+                    const contentWrapper = document.createElement('div');
+                    contentWrapper.style.cssText = "width: 100%; height: 100%; display: flex; flex-direction: column;";
+                    while (clone.firstChild) {
+                        contentWrapper.appendChild(clone.firstChild);
+                    }
+                    clone.appendChild(contentWrapper);
+                    printOverlay.appendChild(clone);
+
+                    // Scale logic
+                    const availableHeight = pdfHeight - 40; 
+                    const actualContentHeight = contentWrapper.scrollHeight;
+                    if (actualContentHeight > availableHeight) {
+                        const scaleFactor = availableHeight / actualContentHeight;
+                        contentWrapper.style.transform = `scale(${scaleFactor})`;
+                        contentWrapper.style.transformOrigin = 'top left';
+                        contentWrapper.style.width = `${100 / scaleFactor}%`;
+                    }
+                }
+            }
+
+            if (printOverlay.lastElementChild) {
+                printOverlay.lastElementChild.style.pageBreakAfter = 'avoid';
+            }
+
+            window.scrollTo(0, 0);
+
+            const opt = {
+                margin: 0,
+                filename: 'Antony_Hercules_IR_Presentation.pdf',
+                image: { type: 'jpeg', quality: 0.98 },
+                html2canvas: { 
+                    scale: 2, 
+                    useCORS: true, 
+                    scrollY: 0,
+                    x: 0,
+                    y: 0,
+                    width: pdfWidth, 
+                    windowWidth: pdfWidth 
+                },
+                jsPDF: { unit: 'px', format: [pdfWidth, pdfHeight], orientation: 'landscape' }
+            };
+
+            await new Promise(r => setTimeout(r, 500));
+
+            try {
+                await html2pdf().set(opt).from(printOverlay).save();
+            } catch (e) {
+                console.error("PDF Error:", e);
+                alert("Error generating PDF.");
+            } finally {
+                document.body.removeChild(printOverlay);
+                btn.innerHTML = originalContent;
+                btn.disabled = false;
+            }
+        }
+
+        // Init
+        document.addEventListener("DOMContentLoaded", function() {
+            goToSlide(0); 
+
+            // Initialize Chart with CLEAR Labels
+            const ctx = document.getElementById('threatChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['Software Exploits', 'Stolen Credentials', 'Phishing', 'Other'],
+                    datasets: [{
+                        label: 'Initial Attack Vector (%)',
+                        data: [35, 30, 15, 20], // Simplified 2024 Estimates
+                        backgroundColor: ['#ef4444', '#f97316', '#eab308', '#9ca3af'],
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#f1f3f4' }, title: {display: true, text: 'Percentage of Attacks'} },
+                        x: { grid: { display: false } }
+                    }
+                }
+            });
+        });
+
+        // Keyboard Nav
+        document.addEventListener('keydown', function(event) {
+            if (event.key === "ArrowRight" || event.key === "ArrowDown" || event.key === " ") {
+                goToSlide(currentSlide + 1);
+            } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+                goToSlide(currentSlide - 1);
+            }
+        });
+    </script>
+</body>
+</html>

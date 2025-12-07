@@ -332,6 +332,62 @@ async function getAirportInfo(icao) {
   }
 }
 
+async function getAirportAtis(sessionId, icao) {
+  if (!sessionId || !icao) throw new Error('Missing sessionId or airport ICAO');
+  
+  const cleanIcao = icao.toUpperCase().trim();
+  // Documentation Source 1: GET .../sessions/{sessionId}/airport/{airportIcao}/atis
+  const url = `/sessions/${encodeURIComponent(sessionId)}/airport/${encodeURIComponent(cleanIcao)}/atis`;
+
+  try {
+    const { data } = await ifClient.get(url);
+    
+    // Manual error check based on Documentation Source 5 (errorCode)
+    const payload = data && typeof data === 'object' ? data : {};
+    
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+       // Documentation Source 4: errorCode 7 means "NoAtisAvailable"
+       // We return null strictly for this case, so it's not treated as a crash.
+       if (payload.errorCode === 7) {
+         return null; 
+       }
+
+       const err = new Error(`IF API errorCode ${payload.errorCode}`);
+       err.response = { data: payload };
+       throw err;
+    }
+
+    // Return the 'result' string (The ATIS message) [cite: 3]
+    return payload.result || null;
+
+  } catch (e) {
+    const status = e?.response?.status;
+    
+    // Standard retry logic for 401/403 (Token Expiry) [cite: 2]
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+         if (payload.errorCode === 7) return null; // Handle "No ATIS" on retry as well
+
+         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+         err.response = { data: payload };
+         throw err;
+      }
+
+      return payload.result || null;
+    }
+
+    // If API returns 404, the session or endpoint might be invalid
+    if (status === 404) {
+      return null;
+    }
+    
+    throw e;
+  }
+}
+
 async function getAirportStatus(sessionId, icao) {
   if (!sessionId || !icao) throw new Error('Missing sessionId or airport ICAO');
   
@@ -1420,6 +1476,34 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
       err(status, 'Failed to fetch live airport status', { 
         detail: e?.message,
         apiErrorCode: apiError?.errorCode // 
+      })
+    );
+  }
+});
+
+// ⬇️ NEW ROUTE: Get Airport ATIS
+app.get('/api/live/airport/:sessionId/:icao/atis', async (req, res) => {
+  const { sessionId, icao } = req.params;
+
+  try {
+    const atisString = await getAirportAtis(sessionId, icao);
+    
+    // We return ok: true even if atis is null (which means no active ATIS at this airport)
+    res.json({ 
+      ok: true, 
+      sessionId,
+      icao: icao.toUpperCase(),
+      atis: atisString // This will be the text string or null 
+    });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    
+    res.status(status).json(
+      err(status, 'Failed to fetch airport ATIS', { 
+        detail: e?.message,
+        apiErrorCode: apiError?.errorCode 
       })
     );
   }
