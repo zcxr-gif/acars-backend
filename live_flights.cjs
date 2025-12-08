@@ -213,6 +213,39 @@ async function fetchVaRoster() {
  * Helpers
  * ========================= */
 
+/**
+ * ⬇️ NEW: Batch Fetcher for Routes
+ * Fetches routes for multiple flight IDs in parallel.
+ * Returns a map: { [flightId]: routeData[] }
+ * If a specific flight fails (e.g. 404), it returns null for that ID instead of crashing.
+ */
+async function getBatchFlightRoutes(sessionId, flightIds) {
+  if (!sessionId) throw new Error('Missing sessionId');
+  if (!Array.isArray(flightIds) || flightIds.length === 0) return {};
+
+  const results = {};
+  
+  // Create an array of promises
+  const promises = flightIds.map(async (flightId) => {
+    try {
+      // Reuse existing single-route fetcher
+      const rawRoute = await getFlightRoute(sessionId, flightId);
+      // Simplify immediately to save bandwidth
+      results[flightId] = simplifyFlightRoute(rawRoute);
+    } catch (e) {
+      // If one flight fails (e.g. pilot disconnected), we just return null for that ID
+      // This prevents the whole batch from breaking.
+      // console.warn(`[batch-route] Could not fetch route for ${flightId}: ${e.message}`);
+      results[flightId] = null;
+    }
+  });
+
+  // Wait for all requests to finish (whether success or fail)
+  await Promise.allSettled(promises);
+  
+  return results;
+}
+
 function unwrap(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data;
@@ -235,6 +268,54 @@ async function getAircraftList() {
     id: a?.id || null,
     name: a?.name || '',
   })).filter(a => a.id && a.name);
+}
+
+async function getUserLogbook(userId, page = 1) {
+  if (!userId) throw new Error('Missing userId');
+  
+  // Documentation Source: 1, 17
+  // GET /users/{userId}/flights
+  const url = `/users/${encodeURIComponent(userId)}/flights`;
+  const params = { page, apikey: IF_API_KEY }; // Source 18: Adding apikey param
+
+  try {
+    const { data } = await ifClient.get(url, { params });
+    
+    // Manual error check based on Documentation Source 24 (errorCode)
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+       const err = new Error(`IF API errorCode ${payload.errorCode}`);
+       err.response = { data: payload };
+       throw err;
+    }
+
+    [cite_start]// Return the 'result' object (PaginatedList) [cite: 11, 25]
+    return payload.result || null;
+
+  } catch (e) {
+    const status = e?.response?.status;
+    
+    // Standard retry logic for 401/403
+    if (status === 401 || status === 403) {
+      // Retry with explicit query param if header failed
+      const { data: retry } = await ifClient.get(url, { params });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+         const err = new Error(`IF API errorCode ${payload.errorCode} (retry)`);
+         err.response = { data: payload };
+         throw err;
+      }
+      return payload.result || null;
+    }
+    
+    // UserNotFound (errorCode 1) might return 404 or 400 depending on API version
+    if (status === 404) {
+      return null;
+    }
+    
+    throw e;
+  }
 }
 
 // ⬇️ REPLACEMENT FUNCTION
@@ -1139,6 +1220,76 @@ async function pollAndBroadcastSecondary() {
 /* =========================
  * API Endpoints
  * ========================= */
+
+// ⬇️ NEW ROUTE: Get User Logbook (History)
+app.get('/api/users/:userId/logbook', async (req, res) => {
+  const { userId } = req.params;
+  const page = parseInt(req.query.page || '1', 10);
+
+  try {
+    const logbook = await getUserLogbook(userId, page);
+    
+    if (!logbook) {
+      return res.status(404).json(err(404, 'User logbook not found or user does not exist.'));
+    }
+
+    res.json({ 
+      ok: true, 
+      userId, 
+      page: logbook.pageIndex,
+      totalPages: logbook.totalPages,
+      totalCount: logbook.totalCount,
+      [cite_start]flights: logbook.data // [cite: 11]
+    });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    
+    res.status(status).json(
+      err(status, 'Failed to fetch user logbook', { 
+        detail: e?.message,
+        apiErrorCode: apiError?.errorCode 
+      })
+    );
+  }
+});
+
+// ⬇️ NEW ROUTE: Batch Route Fetcher (The Fix)
+// Usage: POST /api/flights/routes/batch
+// Body: { "sessionId": "...", "flightIds": ["id1", "id2", "id3"] }
+app.post('/api/flights/routes/batch', async (req, res) => {
+  const { sessionId, flightIds } = req.body;
+
+  if (!sessionId) {
+    return res.status(400).json(err(400, 'Missing sessionId'));
+  }
+  if (!Array.isArray(flightIds) || flightIds.length === 0) {
+    return res.status(400).json(err(400, 'Missing flightIds array'));
+  }
+
+  // Limit batch size to prevent massive server load
+  if (flightIds.length > 20) {
+     return res.status(400).json(err(400, 'Too many IDs. Max 20 per batch.'));
+  }
+
+  try {
+    // 1. Fetch routes in parallel
+    const routeMap = await getBatchFlightRoutes(sessionId, flightIds);
+
+    // 2. Return the map
+    res.json({
+      ok: true,
+      sessionId,
+      count: Object.keys(routeMap).length,
+      routes: routeMap
+    });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    res.status(status).json(err(status, 'Failed to process batch routes', { detail: e?.message }));
+  }
+});
 
 app.get('/api/metadata', (req, res) => {
   res.json({
