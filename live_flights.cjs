@@ -289,7 +289,7 @@ async function getUserLogbook(userId, page = 1) {
        throw err;
     }
 
-    [cite_start]// Return the 'result' object (PaginatedList) [cite: 11, 25]
+    // Return the 'result' object (PaginatedList)
     return payload.result || null;
 
   } catch (e) {
@@ -1239,7 +1239,7 @@ app.get('/api/users/:userId/logbook', async (req, res) => {
       page: logbook.pageIndex,
       totalPages: logbook.totalPages,
       totalCount: logbook.totalCount,
-      [cite_start]flights: logbook.data // [cite: 11]
+      flights: logbook.data
     });
 
   } catch (e) {
