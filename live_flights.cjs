@@ -63,6 +63,26 @@ const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '2000', 
 const SECONDARY_POLL_MS = 20000; // Poll ATC/NOTAMs every 20 seconds
 
 /* =========================
+ * FLIGHT RECORDER CONFIG (Disk-Based)
+ * ========================= */
+const TRAIL_DIR = path.join(__dirname, 'temp_trails');
+const COMPRESSION = { minDist: 0.5, minHeading: 2.0 }; // Save point if moved 0.5nm OR turned 2 deg
+
+// Ensure temp directory exists
+if (!fs.existsSync(TRAIL_DIR)) {
+    try {
+        fs.mkdirSync(TRAIL_DIR);
+    } catch (e) {
+        console.error("❌ Could not create temp_trails directory:", e);
+    }
+}
+
+// "Last Position" Cache (RAM) - Tiny memory footprint (~1MB for 3k users)
+// Used ONLY to check if the plane moved enough to warrant a disk write
+global.lastPosCache = new Map();
+
+
+/* =========================
  * NEW: In-Memory API Cache
  * ========================= */
 
@@ -1078,6 +1098,11 @@ async function pollAndBroadcastFlights() {
 
       const simplifiedFlights = rawFlights.map(simplifyFlight);
       
+      // --- NEW: TRAIL RECORDER (DISK-BASED) ---
+      // We pass each flight to the recorder. It decides if it needs to save a point.
+      simplifiedFlights.forEach(f => appendToTrailDisk(f));
+      // -----------------------------------------
+
       const payload = {
         server: serverName,
         sessionId: sessionId,
@@ -1215,6 +1240,159 @@ async function pollAndBroadcastSecondary() {
     .catch(e => console.error('[secondary] Poller error', e))
     .finally(() => setTimeout(runSecondaryPoller, SECONDARY_POLL_MS));
 })();
+
+
+/* =========================
+ * FLIGHT RECORDER LOGIC (Disk-Based)
+ * ========================= */
+
+// Helper: Calculate Distance in Nautical Miles
+function getDistNm(lat1, lon1, lat2, lon2) {
+    if ((lat1 === lat2) && (lon1 === lon2)) return 0;
+    const radlat1 = Math.PI * lat1/180;
+    const radlat2 = Math.PI * lat2/180;
+    const theta = lon1-lon2;
+    const radtheta = Math.PI * theta/180;
+    let dist = Math.sin(radlat1) * Math.sin(radlat2) + Math.cos(radlat1) * Math.cos(radlat2) * Math.cos(radtheta);
+    if (dist > 1) dist = 1;
+    dist = Math.acos(dist);
+    dist = dist * 180/Math.PI;
+    return dist * 60 * 1.1515 * 0.8684;
+}
+
+// 1. APPEND TO DISK (Called every poll cycle)
+function appendToTrailDisk(f) {
+    if (!f.flightId || !f.userId || !f.position) return;
+    
+    // We only record if we have valid numbers
+    if (typeof f.position.lat !== 'number' || typeof f.position.lon !== 'number') return;
+
+    // COMPRESSION: Check if we should save this point
+    const last = global.lastPosCache.get(f.flightId);
+    let shouldWrite = false;
+
+    // Current point candidates
+    const lat = parseFloat(f.position.lat.toFixed(4));
+    const lon = parseFloat(f.position.lon.toFixed(4));
+    const hdg = Math.round(f.position.heading_deg || 0);
+
+    if (!last) {
+        shouldWrite = true; // Always save first point
+    } else {
+        const dist = getDistNm(last.lat, last.lon, lat, lon);
+        const hdgDiff = Math.abs(last.hdg - hdg);
+        
+        // Save if moved > 0.5nm OR turned > 2 degrees
+        if (dist > COMPRESSION.minDist || hdgDiff > COMPRESSION.minHeading) {
+            shouldWrite = true;
+        }
+    }
+
+    if (shouldWrite) {
+        // Update fast RAM cache
+        global.lastPosCache.set(f.flightId, { lat, lon, hdg });
+
+        const filePath = path.join(TRAIL_DIR, `${f.flightId}.jsonl`);
+        
+        // Create data line: JSON + Newline
+        const point = {
+            u: f.userId, // UserID stored to help identify owner later
+            t: Math.floor(Date.now() / 1000),
+            lat, lon,
+            alt: Math.round(f.position.alt_ft || 0), // ALTITUDE SAVED HERE
+            gs: Math.round(f.position.gs_kt || 0),
+            hdg
+        };
+
+        const line = JSON.stringify(point) + '\n';
+
+        // Fire-and-forget append (Non-blocking)
+        fs.appendFile(filePath, line, (err) => {
+            if (err) console.error(`[recorder] Write error ${f.flightId}:`, err.message);
+        });
+    }
+}
+
+// 2. THE REAPER (Runs every 60s)
+// Detects finished flights (files not touched in 5 mins) and uploads them
+setInterval(() => {
+    fs.readdir(TRAIL_DIR, (err, files) => {
+        if (err) return;
+        const now = Date.now();
+        const TIMEOUT_MS = 5 * 60 * 1000; // 5 Minutes Silence = Flight Over
+
+        files.forEach(file => {
+            if (!file.endsWith('.jsonl')) return;
+            const filePath = path.join(TRAIL_DIR, file);
+
+            fs.stat(filePath, (err, stats) => {
+                if (err) return;
+                
+                // If file hasn't been written to in 5 mins...
+                if (now - stats.mtimeMs > TIMEOUT_MS) {
+                    uploadAndCleanTrail(filePath, file);
+                }
+            });
+        });
+    });
+}, 60 * 1000);
+
+async function uploadAndCleanTrail(filePath, fileName) {
+    // FlightID is the filename (minus extension)
+    const flightId = fileName.replace('.jsonl', '');
+    
+    try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const lines = content.trim().split('\n');
+
+        // Filter short/empty flights (e.g. just spawned and left)
+        if (lines.length < 5) {
+            fs.unlinkSync(filePath);
+            global.lastPosCache.delete(flightId);
+            return;
+        }
+
+        // Reconstruct Array
+        const trail = [];
+        let userId = null;
+        
+        lines.forEach(line => {
+            try {
+                const p = JSON.parse(line);
+                if (p.u) userId = p.u; // Recover userId from data line
+                trail.push({ 
+                    lat: p.lat, 
+                    lon: p.lon, 
+                    alt: p.alt, 
+                    hdg: p.hdg, 
+                    gs: p.gs, 
+                    t: p.t 
+                });
+            } catch(e) {}
+        });
+
+        if (userId && trail.length > 0) {
+            console.log(`[recorder] 📤 Uploading trail for ${userId} (${trail.length} pts)`);
+            
+            // SEND TO SERVER.JS (The Manager)
+            await axios.post(`${VA_BACKEND_URL}/api/trails`, {
+                userId,
+                flightId,
+                trail
+            });
+            
+            console.log(`[recorder] ✅ Saved trail: ${flightId}`);
+        }
+
+        // Cleanup
+        fs.unlinkSync(filePath);
+        global.lastPosCache.delete(flightId);
+
+    } catch (e) {
+        console.error(`[recorder] ❌ Upload failed for ${flightId}:`, e.message);
+        // We leave the file to try again next minute (unless it's a permanent 4xx error, but we'll retry for now)
+    }
+}
 
 
 /* =========================
