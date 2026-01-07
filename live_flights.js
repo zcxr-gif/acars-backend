@@ -61,7 +61,7 @@ const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 10
 const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
 
 const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '2000', 10);
-const SECONDARY_POLL_MS = 20000; // Poll ATC/NOTAMs every 20 seconds
+const SECONDARY_POLL_MS = 20000; // Poll ATC/NOTAMs/World every 20 seconds
 
 /* =========================
  * NEW: In-Memory API Cache
@@ -78,8 +78,8 @@ const VA_STAFF_ROLES = [
 const apiCache = {
   sessions: [],
   flights: new Map(), // sessionId -> { server, sessionId, count, flights, timestamp }
-  // ⬇️ NEW: Secondary cache for ATC/NOTAMs
-  secondary: new Map(), // sessionId -> { atc: [], notams: [], timestamp: ... }
+  // ⬇️ UPDATED: Added world to secondary cache
+  secondary: new Map(), // sessionId -> { atc: [], notams: [], world: [], timestamp: ... }
   lastSessionsUpdate: 0,
   // ⬇️ NEW: Add a cache for the VA pilot roster
   vaRosterCache: new Map(), // Stores { lowercase_username -> { role: '...' } }
@@ -439,13 +439,13 @@ async function getAirportAtis(sessionId, icao) {
        throw err;
     }
 
-    // Return the 'result' string (The ATIS message) [cite: 3]
+    // Return the 'result' string (The ATIS message)
     return payload.result || null;
 
   } catch (e) {
     const status = e?.response?.status;
     
-    // Standard retry logic for 401/403 (Token Expiry) [cite: 2]
+    // Standard retry logic for 401/403 (Token Expiry)
     if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
       const payload = retry && typeof retry === 'object' ? retry : {};
@@ -491,13 +491,13 @@ async function getAirportStatus(sessionId, icao) {
        throw err;
     }
 
-    // Return the 'result' object (AirportStatus) which contains inboundFlights, atcFacilities, etc. [cite: 6, 7, 8]
+    // Return the 'result' object (AirportStatus) which contains inboundFlights, atcFacilities, etc.
     return payload.result || null;
 
   } catch (e) {
     const status = e?.response?.status;
     
-    // Standard retry logic for 401/403 (Token Expiry) [cite: 2]
+    // Standard retry logic for 401/403 (Token Expiry)
     if (status === 401 || status === 403) {
       // Documentation Source 2: fallback to adding apikey query parameter
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
@@ -866,6 +866,47 @@ async function getNotams(sessionId) {
   }
 }
 
+/**
+ * ⬇️ NEW: IF API Wrapper for World Status
+ * GET /sessions/{sessionId}/world
+ */
+async function getWorldStatus(sessionId) {
+  if (!sessionId) throw new Error('Missing sessionId');
+  const url = `/sessions/${encodeURIComponent(sessionId)}/world`;
+  
+  try {
+    const { data } = await ifClient.get(url);
+    const payload = data && typeof data === 'object' ? data : {};
+    
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+      err.response = { data: payload };
+      throw err;
+    }
+    
+    // Returns an array of AirportStatus objects
+    return Array.isArray(payload.result) ? payload.result : [];
+
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+        err.response = { data: payload };
+        throw err;
+      }
+      return Array.isArray(payload.result) ? payload.result : [];
+    }
+    if (status === 404) {
+      return [];
+    }
+    throw e;
+  }
+}
+
 async function getUserStats(params) {
   const url = '/users';
   if (!params || (!params.userIds && !params.discourseNames && !params.userHashes)) {
@@ -998,6 +1039,124 @@ io.on('connection', (socket) => {
   });
 });
 
+/* =========================
+ * Group Detection Helpers
+ * ========================= */
+
+/**
+ * Calculates distance between two points in Nautical Miles
+ */
+function calculateDistanceNM(lat1, lon1, lat2, lon2) {
+  const R = 3440.065; // Radius of Earth in Nautical Miles
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Calculates the shortest difference between two headings
+ */
+function getHeadingDiff(h1, h2) {
+  const diff = Math.abs(h1 - h2) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
+/**
+ * Compares entire callsigns for similarities.
+ * Looks for shared prefixes, shared suffixes, or shared VA tags anywhere in the string.
+ */
+function isSimilarCallsign(c1, c2) {
+  if (!c1 || !c2) return false;
+  const s1 = c1.toUpperCase().trim();
+  const s2 = c2.toUpperCase().trim();
+
+  // 1. Direct match (unlikely but possible)
+  if (s1 === s2) return true;
+
+  // 2. Shared VA Tags in brackets (e.g., [DLVA])
+  const tagRegex = /\[(.*?)\]/g;
+  const tags1 = s1.match(tagRegex);
+  const tags2 = s2.match(tagRegex);
+  if (tags1 && tags2 && tags1[0] === tags2[0]) return true;
+
+  // 3. Substring similarity: Check if one contains a significant portion of the other
+  // or if they share the same alphanumeric prefix (e.g., AAL123 and AAL456)
+  const prefix1 = s1.replace(/[0-9]/g, '');
+  const prefix2 = s2.replace(/[0-9]/g, '');
+  if (prefix1.length > 1 && prefix1 === prefix2) return true;
+
+  // 4. Sequential/Similar Numbering: Check if they share the same last 2 digits
+  // often used in group flights (e.g., N124BD and N524BD)
+  if (s1.length > 3 && s2.length > 3 && s1.slice(-2) === s2.slice(-2)) return true;
+
+  return false;
+}
+
+/**
+ * The Core Group Logic Engine
+ */
+function evaluateGroupConnection(f1, f2, worldData = []) {
+  // --- 1. REQUIRED PHYSICAL CHECKS  ---
+  const dist = calculateDistanceNM(f1.position.lat, f1.position.lon, f2.position.lat, f2.position.lon);
+  if (dist > 10) return null; // Must be within 5-10nm 
+
+  const hDiff = getHeadingDiff(f1.position.heading_deg, f2.position.heading_deg);
+  if (hDiff > 25) return null; // Must be flying in similar direction 
+
+  // --- 2. POSITIVE SCORING  ---
+  let score = 0;
+  const matches = [];
+
+  // VA Match (+30 pts) 
+  const sameVO = (f1.virtualOrganization && f1.virtualOrganization === f2.virtualOrganization);
+  if (sameVO || (f1.isVAMember && f2.isVAMember)) {
+    score += 30;
+    matches.push('VA_MATCH');
+  }
+
+  // Callsign Similarity (+25 pts) [cite: 3, 8, 9]
+  if (isSimilarCallsign(f1.callsign, f2.callsign)) {
+    score += 25;
+    matches.push('CALLSIGN_MATCH');
+  }
+
+  // Aircraft Model Match (+15 pts) [cite: 3, 9]
+  if (f1.aircraft.aircraftId === f2.aircraft.aircraftId) {
+    score += 15;
+    matches.push('AIRCRAFT_MATCH');
+  }
+
+  // Livery Match (+10 pts) [cite: 3, 9]
+  if (f1.aircraft.liveryId === f2.aircraft.liveryId) {
+    score += 10;
+    matches.push('LIVERY_MATCH');
+  }
+
+  // --- 3. WORLD STATUS MATCH (Source 5) ---
+  // Cross-reference departure/arrival ICAOs 
+  if (Array.isArray(worldData)) {
+    for (const airport of worldData) {
+      const f1In = airport.inboundFlights?.includes(f1.flightId);
+      const f2In = airport.inboundFlights?.includes(f2.flightId);
+      const f1Out = airport.outboundFlights?.includes(f1.flightId);
+      const f2Out = airport.outboundFlights?.includes(f2.flightId);
+
+      if ((f1In && f2In) || (f1Out && f2Out)) {
+        score += 20; 
+        matches.push('AIRPORT_STATUS_MATCH');
+        break; 
+      }
+    }
+  }
+
+  // Minimum threshold to be considered a group flight [cite: 1, 4]
+  return score >= 15 ? { score, reasons: matches, distance: dist } : null;
+}
+
 
 /* =========================
  * All-Flights Broadcaster (MODIFIED)
@@ -1010,110 +1169,114 @@ let nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS; // Dynamic poll interval
 async function pollAndBroadcastFlights() {
   let sessions = [];
   try {
-    // This will use the new cache-aware getSessions() function
     sessions = await getSessions();
   } catch (e) {
     console.warn('[broadcast] Sessions fetch failed', e?.message);
-    if (e?.message?.includes('429')) {
-      console.error(`[broadcast] 🛑 Sessions API Rate Limit (429) detected. Backing off for 60 seconds.`);
-      nextBroadcastPollMs = 60000; // 60s backoff
-    }
-    return; // Try again on next poll
+    if (e?.message?.includes('429')) nextBroadcastPollMs = 60000;
+    return;
   }
 
-  // We fetch data for the main servers to populate the cache for all services
   const serverNames = ["Expert Server", "Training Server", "Casual Server"];
   
   for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
-
-    if (!sessionId) {
-      console.warn(`[broadcast] No sessionId for server "${serverName}"`);
-      continue; // Skip this server
-    }
+    if (!sessionId) continue;
 
     const roomName = serverName.toLowerCase();
-    // Check if anyone is listening
     const room = io.sockets.adapter.rooms.get(roomName);
 
     if (!room || room.size === 0) {
-      // 😴 Skipping ${serverName}, no clients.
-      apiCache.flights.delete(sessionId); // Clear stale data
+      apiCache.flights.delete(sessionId);
       continue;
     }
 
     try {
-      // This is the main API call we need to protect
       const rawFlights = await getFlightsForSession(sessionId);
-
-      // ----------------------------------------------------
-      // ⬇️ BUGSQUASH: HEURISTIC BLIP GUARD (v2) ⬇️
-      // ----------------------------------------------------
       
       const newFlightCount = (Array.isArray(rawFlights) ? rawFlights.length : 0);
       const cachedData = apiCache.flights.get(sessionId);
       const cachedFlightCount = (cachedData && cachedData.count > 0) ? cachedData.count : 0;
 
-      // A "blip" is defined as EITHER:
-      // 1. Receiving 0 flights when we previously had flights.
-      // 2. Receiving a new count that is less than 50% of our cached count
-      //    (e.g., dropping from 500 to 249 or less), which is highly
-      //    indicative of a temporary API data glitch.
-
-      const isCompleteBlip = (newFlightCount === 0 && cachedFlightCount > 0);
-      const isPartialBlip = (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50));
-
-      if (isCompleteBlip || isPartialBlip) {
-        console.warn(`[broadcast] ⚠️  BLIP GUARD (v2): Received ${newFlightCount} flights for ${serverName}, but cache had ${cachedFlightCount}. This is a >50% drop. Skipping broadcast.`);
-        continue; // Move to the next server, keeping the old (good) cache.
+      if ((newFlightCount === 0 && cachedFlightCount > 0) || (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50))) {
+        console.warn(`[broadcast] ⚠️ BLIP GUARD: Skipping ${serverName}`);
+        continue;
       }
-      
-      // If we are here, it's a valid update:
-      // - The API returned a good count.
-      // - The API returned 0, and our cache was already 0 (server is empty).
-      // - The API returned a new count that was a "normal" drop (e.g., 500 -> 480).
-
-      // ----------------------------------------------------
-      // ⬆️ BUGSQUASH: HEURISTIC BLIP GUARD (v2) ⬆️
-      // ----------------------------------------------------
 
       const simplifiedFlights = rawFlights.map(simplifyFlight);
       
+      const secondaryCache = apiCache.secondary.get(sessionId);
+      const worldData = secondaryCache?.world || [];
+      const groups = [];
+      const flightToGroupMap = new Map();
+
+      for (let i = 0; i < simplifiedFlights.length; i++) {
+        for (let j = i + 1; j < simplifiedFlights.length; j++) {
+          const f1 = simplifiedFlights[i];
+          const f2 = simplifiedFlights[j];
+
+          const connection = evaluateGroupConnection(f1, f2, worldData);
+
+          if (connection) {
+            let gIdx1 = flightToGroupMap.get(f1.flightId);
+            let gIdx2 = flightToGroupMap.get(f2.flightId);
+
+            if (gIdx1 !== undefined) {
+              groups[gIdx1].members.push(f2.flightId);
+              groups[gIdx1].confidenceScore += connection.score;
+              flightToGroupMap.set(f2.flightId, gIdx1);
+            } else if (gIdx2 !== undefined) {
+              groups[gIdx2].members.push(f1.flightId);
+              groups[gIdx2].confidenceScore += connection.score;
+              flightToGroupMap.set(f1.flightId, gIdx2);
+            } else {
+              const newIdx = groups.length;
+              const gId = `group_${f1.flightId.slice(0,5)}`;
+              groups.push({
+                groupId: gId,
+                members: [f1.flightId, f2.flightId],
+                confidenceScore: connection.score,
+                criteriaMet: connection.reasons
+              });
+              flightToGroupMap.set(f1.flightId, newIdx);
+              flightToGroupMap.set(f2.flightId, newIdx);
+            }
+          }
+        }
+      }
+
+      // ⬇️ ADDED LOGIC: Map Group IDs back to the flight objects for the frontend
+      const finalFlights = simplifiedFlights.map(f => {
+        const groupIndex = flightToGroupMap.get(f.flightId);
+        return {
+          ...f,
+          groupId: groupIndex !== undefined ? groups[groupIndex].groupId : null
+        };
+      });
+
       const payload = {
         server: serverName,
         sessionId: sessionId,
-        count: simplifiedFlights.length,
-        flights: simplifiedFlights,
+        count: finalFlights.length,
+        flights: finalFlights,
+        groups: groups.map(g => ({ ...g, members: [...new Set(g.members)] })),
         timestamp: new Date().toISOString()
       };
       
-      // 1. 🚀 UPDATE THE CACHE for other services (API)
       apiCache.flights.set(sessionId, payload);
 
-      // 2. 📡 EMIT TO THE ROOM (if clients are present)
       if (room && room.size > 0) {
         io.to(roomName).emit('all_flights_update', payload);
-        
-        // console.log(`[broadcast] 📡 Sent ${simplifiedFlights.length} flights to ${room.size} client(s) for ${serverName}`);
       }
 
     } catch (e) {
       console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
-      
-      // ⬇️ MODIFIED CATCH: Only delete cache/back off on 429
       if (e?.message?.includes('429')) {
-          console.error(`[broadcast] 🛑 Flights API Rate Limit (429) detected. Backing off for 60 seconds.`);
-          nextBroadcastPollMs = 60000; // 60s backoff
-          // Clear cache on rate limit
+          nextBroadcastPollMs = 60000;
           apiCache.flights.delete(sessionId); 
       }
-      // For any other error (e.g., 500, 503, timeout), we'll
-      // just log it and *keep the old cache* data. This also
-      // helps prevent "disappearing icons" on a server-side API error.
     }
   }
 }
-
 (function runBroadcastPoller() {
   // 1. Record the start time *before* the poll
   const pollStartTime = Date.now();
@@ -1162,7 +1325,7 @@ async function pollAndBroadcastFlights() {
 })();
 
 /* =========================
- * Secondary Data Poller (ATC & NOTAMs) - NEW
+ * Secondary Data Poller (ATC, NOTAMs & World) - UPDATED
  * ========================= */
 async function pollAndBroadcastSecondary() {
   let sessions = [];
@@ -1179,10 +1342,11 @@ async function pollAndBroadcastSecondary() {
     if (!sessionId) continue;
 
     try {
-      // Fetch both ATC and NOTAMs in parallel
-      const [atc, notams] = await Promise.all([
+      // Fetch ATC, NOTAMs, and World Status in parallel
+      const [atc, notams, world] = await Promise.all([
         getActiveATC(sessionId).catch(() => []),
-        getNotams(sessionId).catch(() => [])
+        getNotams(sessionId).catch(() => []),
+        getWorldStatus(sessionId).catch(() => []) // NEW
       ]);
 
       const payload = {
@@ -1190,23 +1354,22 @@ async function pollAndBroadcastSecondary() {
         sessionId: sessionId,
         atc: atc,
         notams: notams,
+        world: world, // NEW
         timestamp: new Date().toISOString()
       };
 
       // 1. Update Cache
       apiCache.secondary.set(sessionId, payload);
 
-      // 2. Broadcast to room (Optional: usually client only needs this on join or slow poll, 
-      // but broadcasting ensures live updates if a controller opens/closes)
+      // 2. Broadcast to room
       const roomName = serverName.toLowerCase();
-      // Only emit if there are people in the room to save bandwidth
       const room = io.sockets.adapter.rooms.get(roomName);
       if (room && room.size > 0) {
           io.to(roomName).emit('secondary_data_update', payload);
       }
 
     } catch (e) {
-      console.warn(`[secondary] Failed to update ATC/NOTAMs for ${serverName}`, e.message);
+      console.warn(`[secondary] Failed to update secondary data for ${serverName}`, e.message);
     }
   }
 }
@@ -1493,6 +1656,35 @@ app.get('/notams/:sessionId', async (req, res) => {
   }
 });
 
+/**
+ * ⬇️ NEW ROUTE: Get World Status (Airport statuses for a whole session)
+ * This uses the /world endpoint and reads from the secondary cache.
+ */
+app.get('/api/live/world/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+
+  // 1. Try Cache First
+  const cached = apiCache.secondary.get(sessionId);
+  if (cached && cached.world) {
+      return res.json({ ok: true, count: cached.world.length, world: cached.world, fromCache: true });
+  }
+
+  // 2. Fallback to Live Fetch
+  try {
+    const worldStatus = await getWorldStatus(sessionId);
+    res.json({ ok: true, count: worldStatus.length, world: worldStatus, fromCache: false });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch world status', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
 app.post('/users', async (req, res) => {
   const { userIds, discourseNames, userHashes } = req.body;
 
@@ -1605,18 +1797,18 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
       return res.status(404).json(err(404, `Airport status not found for ${icao} on session ${sessionId}`));
     }
     
-    // Return the structure defined in the documentation [cite: 3, 4]
+    // Return the structure defined in the documentation
     res.json({ 
       ok: true, 
       sessionId,
       icao: airportStatus.airportIcao,
       status: {
         airportName: airportStatus.airportName,
-        inboundFlightsCount: airportStatus.inboundFlightsCount, // [cite: 6]
-        inboundFlights: airportStatus.inboundFlights,           // [cite: 6]
-        outboundFlightsCount: airportStatus.outboundFlightsCount, // [cite: 7]
-        outboundFlights: airportStatus.outboundFlights,         // [cite: 7]
-        atcFacilities: airportStatus.atcFacilities              // [cite: 8, 9, 10]
+        inboundFlightsCount: airportStatus.inboundFlightsCount, //
+        inboundFlights: airportStatus.inboundFlights,           //
+        outboundFlightsCount: airportStatus.outboundFlightsCount, //
+        outboundFlights: airportStatus.outboundFlights,         //
+        atcFacilities: airportStatus.atcFacilities              //
       }
     });
 
@@ -1670,7 +1862,7 @@ httpServer.listen(PORT, () => {
   console.log(`✅ Live Flight Broadcaster (Sockets) ready: http://localhost:${PORT}`);
   console.log('🌐 Base URL:', IF_API_BASE_URL);
   console.log(`📡 Broadcasting all flights every ${ALL_FLIGHTS_POLL_MS}ms`);
-  console.log(`📡 Broadcasting ATC/NOTAMs every ${SECONDARY_POLL_MS}ms`);
+  console.log(`📡 Broadcasting ATC/NOTAMs/World every ${SECONDARY_POLL_MS}ms`);
   if (!IF_API_KEY) {
     console.warn('⚠️  IF API key is missing. Set INFINITE_FLIGHT_API_KEY in your .env file.');
   }
