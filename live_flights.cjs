@@ -659,7 +659,8 @@ function simplifyFlight(f) {
     callsign: f?.callsign || '',
     username: username,
     virtualOrganization: f?.virtualOrganization || null,
-    // ⬇️ NEW: Add the VA status fields
+    arrivalIcao: f?.arrivalIcao || null,  
+    departureIcao: f?.departureIcao || null, 
     isVAMember,
     isStaff,
     vaRole,
