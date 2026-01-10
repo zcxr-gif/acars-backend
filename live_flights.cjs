@@ -1313,7 +1313,7 @@ async function pollAndBroadcastFlights() {
   }
 }
 
-function runBroadcastPoller() {
+(function runBroadcastPoller() {
   // 1. Record the start time *before* the poll
   const pollStartTime = Date.now();
 
