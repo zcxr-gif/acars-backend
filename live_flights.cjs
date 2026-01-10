@@ -1169,6 +1169,7 @@ let nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS; // Dynamic poll interval
 async function pollAndBroadcastFlights() {
   let sessions = [];
   try {
+    // Uses the existing cache logic to avoid API spam
     sessions = await getSessions();
   } catch (e) {
     console.warn('[broadcast] Sessions fetch failed', e?.message);
@@ -1185,6 +1186,7 @@ async function pollAndBroadcastFlights() {
     const roomName = serverName.toLowerCase();
     const room = io.sockets.adapter.rooms.get(roomName);
 
+    // If no one is in the room, skip the processing to save resources
     if (!room || room.size === 0) {
       apiCache.flights.delete(sessionId);
       continue;
@@ -1197,6 +1199,7 @@ async function pollAndBroadcastFlights() {
       const cachedData = apiCache.flights.get(sessionId);
       const cachedFlightCount = (cachedData && cachedData.count > 0) ? cachedData.count : 0;
 
+      // Blip guard: Prevents broadcasting empty lists if the API momentarily fails
       if ((newFlightCount === 0 && cachedFlightCount > 0) || (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50))) {
         console.warn(`[broadcast] ⚠️ BLIP GUARD: Skipping ${serverName}`);
         continue;
@@ -1204,11 +1207,37 @@ async function pollAndBroadcastFlights() {
 
       const simplifiedFlights = rawFlights.map(simplifyFlight);
       
+      // --- ⬇️ START: ICAO REVERSE LOOKUP LOGIC ⬇️ ---
       const secondaryCache = apiCache.secondary.get(sessionId);
       const worldData = secondaryCache?.world || [];
+      const flightAirportsMap = new Map(); // Stores { [flightId]: { dep: 'ICAO', arr: 'ICAO' } }
+
+      // Map ICAOs by checking which flights are inbound or outbound at every airport
+      for (const airport of worldData) {
+        const icao = airport.airportIcao;
+        
+        // Check departures
+        if (Array.isArray(airport.outboundFlights)) {
+          airport.outboundFlights.forEach(fId => {
+            const entry = flightAirportsMap.get(fId) || {};
+            flightAirportsMap.set(fId, { ...entry, dep: icao });
+          });
+        }
+        
+        // Check arrivals
+        if (Array.isArray(airport.inboundFlights)) {
+          airport.inboundFlights.forEach(fId => {
+            const entry = flightAirportsMap.get(fId) || {};
+            flightAirportsMap.set(fId, { ...entry, arr: icao });
+          });
+        }
+      }
+      // --- ⬆️ END: ICAO REVERSE LOOKUP LOGIC ⬆️ ---
+
       const groups = [];
       const flightToGroupMap = new Map();
 
+      // Group detection logic
       for (let i = 0; i < simplifiedFlights.length; i++) {
         for (let j = i + 1; j < simplifiedFlights.length; j++) {
           const f1 = simplifiedFlights[i];
@@ -1244,12 +1273,17 @@ async function pollAndBroadcastFlights() {
         }
       }
 
-      // ⬇️ ADDED LOGIC: Map Group IDs back to the flight objects for the frontend
+      // Map everything back to the final flight objects for the frontend
       const finalFlights = simplifiedFlights.map(f => {
         const groupIndex = flightToGroupMap.get(f.flightId);
+        const airports = flightAirportsMap.get(f.flightId) || {};
+
         return {
           ...f,
-          groupId: groupIndex !== undefined ? groups[groupIndex].groupId : null
+          groupId: groupIndex !== undefined ? groups[groupIndex].groupId : null,
+          // Inject the ICAOs found from the World Status reverse lookup
+          departureIcao: airports.dep || null,
+          arrivalIcao: airports.arr || null
         };
       });
 
@@ -1277,7 +1311,8 @@ async function pollAndBroadcastFlights() {
     }
   }
 }
-(function runBroadcastPoller() {
+
+function runBroadcastPoller() {
   // 1. Record the start time *before* the poll
   const pollStartTime = Date.now();
 
