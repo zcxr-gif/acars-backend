@@ -104,6 +104,7 @@ const ifClient = axios.create({
  * ========================= */
 const aircraftNameMap = new Map(); // Map to store aircraft names (ID -> Name)
 const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
+const registrationLookup = new Map(); // Key: "Model|Livery" -> Value: registration string
 
 // NEW: Global storage to serve via API
 const globalMetadata = {
@@ -111,7 +112,7 @@ const globalMetadata = {
   liveries: []
 };
 
-// Load aircraft AND liveries on startup so simplifyFlight has data to use
+// Replace the existing loadMetadata IIFE (starting around line 82) with this:
 (async function loadMetadata() {
   try {
     if (!IF_API_KEY) {
@@ -121,32 +122,40 @@ const globalMetadata = {
 
     console.log('⏳ Loading aircraft and liveries...');
 
-    // 1. Load Aircraft
+    // 1. Load Aircraft from API
     const aircraftList = await getAircraftList();
     globalMetadata.aircraft = aircraftList;
-    
     for (const aircraft of aircraftList) {
       aircraftNameMap.set(aircraft.id, aircraft.name);
     }
     console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types.`);
 
-    // 2. Load Liveries (Populate the map for simplifyFlight)
-    // This uses the NEW bulk function, keeping the other one separate.
+    // 2. Load Liveries from API
     const liveryList = await getAllLiveries();
     globalMetadata.liveries = liveryList;
-
     for (const livery of liveryList) {
-      // Map ID -> Livery Name (e.g., "Generic", "British Airways", etc.)
       liveryNameMap.set(livery.id, livery.name);
     }
     console.log(`✅ Loaded ${liveryNameMap.size} liveries.`);
 
+    // 3. SMART MATCHING: Load local aircraft.json for registration matching
+    const aircraftDataPath = path.join(__dirname, 'aircraft.json');
+    if (fs.existsSync(aircraftDataPath)) {
+      const rawData = fs.readFileSync(aircraftDataPath, 'utf8');
+      const aircraftArray = JSON.parse(rawData);
+      
+      for (const entry of aircraftArray) {
+        // Create a unique key using Model and Livery names from aircraft.json
+        const key = `${entry.model}|${entry.livery}`.toLowerCase();
+        registrationLookup.set(key, entry.registration);
+      }
+      console.log(`✅ Loaded ${registrationLookup.size} smart-matching registrations.`);
+    }
+
   } catch (e) {
-    console.error('❌ Could not load metadata (aircraft/liveries).', e.message);
+    console.error('❌ Could not load metadata (aircraft/liveries/registrations).', e.message);
   }
 })();
-
-
 
 /* =========================
  * NEW: VA Roster Loader
@@ -632,13 +641,23 @@ async function getFlightsForSession(sessionId) {
 }
 
 
-// ⬇️ REPLACED FUNCTION
 function simplifyFlight(f) {
   const aircraftId = f?.aircraftId || null;
   const liveryId = f?.liveryId || null;
   const username = f?.username || null;
   
-  // ⬇️ NEW: VA Roster Check
+  // Resolve readable names from maps
+  const aircraftName = aircraftNameMap.get(aircraftId) || null;
+  const liveryName = liveryNameMap.get(liveryId) || null;
+
+  // SMART MATCHING: Find registration from aircraft.json data
+  let matchedReg = null;
+  if (aircraftName && liveryName) {
+    const lookupKey = `${aircraftName}|${liveryName}`.toLowerCase();
+    matchedReg = registrationLookup.get(lookupKey) || null;
+  }
+  
+  // VA Roster Check (existing logic)
   let isVAMember = false;
   let isStaff = false;
   let vaRole = null;
@@ -648,7 +667,6 @@ function simplifyFlight(f) {
     if (profile) {
       isVAMember = true;
       vaRole = profile.role;
-      // Check if the role is one of the staff roles
       isStaff = VA_STAFF_ROLES.includes(vaRole.toLowerCase());
     }
   }
@@ -664,15 +682,12 @@ function simplifyFlight(f) {
     isVAMember,
     isStaff,
     vaRole,
-    // ⬆️ End of new fields
     position: {
       lat: typeof f?.latitude === 'number' ? f.latitude : null,
       lon: typeof f?.longitude === 'number' ? f.longitude : null,
       alt_ft: typeof f?.altitude === 'number' ? f.altitude : null,
       gs_kt: typeof f?.speed === 'number' ? f.speed : null,
       vs_fpm: typeof f?.verticalSpeed === 'number' ? f.verticalSpeed : null,
-      // ⬇️ REMOVED
-      // track_deg: typeof f?.track === 'number' ? f.track : null, 
       heading_deg: typeof f?.heading === 'number' ? f.heading : null,
       lastReport: f?.lastReport || null,
       lastReportMs: f?.lastReport ? Date.parse(f.lastReport) || null : null,
@@ -680,14 +695,14 @@ function simplifyFlight(f) {
     aircraft: {
       aircraftId: aircraftId,
       liveryId: liveryId,
-      aircraftName: aircraftNameMap.get(aircraftId) || null,
-      liveryName: liveryNameMap.get(liveryId) || null,
+      aircraftName: aircraftName,
+      liveryName: liveryName,
+      registration: matchedReg // Injected registration (No Image URL)
     },
     pilotState: typeof f?.pilotState === 'number' ? f.pilotState : null,
     isConnected: typeof f?.isConnected === 'boolean' ? f.isConnected : null,
   };
 }
-
 async function getFlightPlan(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/flightplan`;
