@@ -63,8 +63,6 @@ const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
 const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '2000', 10);
 const SECONDARY_POLL_MS = 20000; // Poll ATC/NOTAMs/World every 20 seconds
 
-let globalAircraftRegistry = []; 
-
 /* =========================
  * NEW: In-Memory API Cache
  * ========================= */
@@ -106,30 +104,7 @@ const ifClient = axios.create({
  * ========================= */
 const aircraftNameMap = new Map(); // Map to store aircraft names (ID -> Name)
 const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
-const levenshteinDistance = (s, t) => {
-    if (s === t) return 0;
-    if (s.length === 0) return t.length;
-    if (t.length === 0) return s.length;
-    if (s.length > t.length) [s, t] = [t, s];
-    const v0 = new Uint16Array(t.length + 1);
-    const v1 = new Uint16Array(t.length + 1);
-    for (let i = 0; i < v0.length; i++) v0[i] = i;
-    for (let i = 0; i < s.length; i++) {
-        v1[0] = i + 1;
-        for (let j = 0; j < t.length; j++) {
-            const cost = s[i] === t[j] ? 0 : 1;
-            v1[j + 1] = Math.min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost);
-        }
-        for (let j = 0; j < v0.length; j++) v0[j] = v1[j];
-    }
-    return v1[t.length];
-};
-
-const getSimilarity = (s1, s2) => {
-    const longer = s1.length > s2.length ? s1 : s2;
-    if (longer.length === 0) return 1.0;
-    return (longer.length - levenshteinDistance(s1, s2)) / longer.length;
-};
+const registrationLookup = new Map(); // Key: "Model|Livery" -> Value: registration string
 
 // NEW: Global storage to serve via API
 const globalMetadata = {
@@ -164,14 +139,18 @@ const globalMetadata = {
     console.log(`✅ Loaded ${liveryNameMap.size} liveries.`);
 
     // 3. SMART MATCHING: Load local aircraft.json for registration matching
-    // Inside loadMetadata() around line 125
-const aircraftDataPath = path.join(__dirname, 'aircraft.json');
-if (fs.existsSync(aircraftDataPath)) {
-    const rawData = fs.readFileSync(aircraftDataPath, 'utf8');
-    // Store the raw JSON array globally for searching
-    globalAircraftRegistry = JSON.parse(rawData);
-    console.log(`✅ Loaded ${globalAircraftRegistry.length} aircraft for fuzzy registration matching.`);
-}
+    const aircraftDataPath = path.join(__dirname, 'aircraft.json');
+    if (fs.existsSync(aircraftDataPath)) {
+      const rawData = fs.readFileSync(aircraftDataPath, 'utf8');
+      const aircraftArray = JSON.parse(rawData);
+      
+      for (const entry of aircraftArray) {
+        // Create a unique key using Model and Livery names from aircraft.json
+        const key = `${entry.model}|${entry.livery}`.toLowerCase();
+        registrationLookup.set(key, entry.registration);
+      }
+      console.log(`✅ Loaded ${registrationLookup.size} smart-matching registrations.`);
+    }
 
   } catch (e) {
     console.error('❌ Could not load metadata (aircraft/liveries/registrations).', e.message);
@@ -671,11 +650,12 @@ function simplifyFlight(f) {
   const aircraftName = aircraftNameMap.get(aircraftId) || null;
   const liveryName = liveryNameMap.get(liveryId) || null;
 
-let matchedReg = null;
-if (aircraftName && liveryName) {
-  // Use the new fuzzy lookup engine instead of .get()
-  matchedReg = lookupRegistration(aircraftName, liveryName);
-}
+  // SMART MATCHING: Find registration from aircraft.json data
+  let matchedReg = null;
+  if (aircraftName && liveryName) {
+    const lookupKey = `${aircraftName}|${liveryName}`.toLowerCase();
+    matchedReg = registrationLookup.get(lookupKey) || null;
+  }
   
   // VA Roster Check (existing logic)
   let isVAMember = false;
@@ -754,51 +734,6 @@ async function getFlightPlan(sessionId, flightId) {
     }
     throw e;
   }
-}
-
-// Create this helper function
-function lookupRegistration(aircraftType, liveryName) {
-    if (!globalAircraftRegistry || globalAircraftRegistry.length === 0) return null;
-
-    const clean = (str) => (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const targetType = clean(aircraftType);
-    const targetLivery = clean(liveryName);
-    
-    let bestMatch = null;
-    let highestScore = 0;
-
-    for (const entry of globalAircraftRegistry) {
-        let score = 0;
-        const jsonMan = clean(entry.manufacturer);
-        const jsonMod = clean(entry.model);
-        const jsonLivery = clean(entry.livery);
-        const jsonFullPlane = jsonMan + jsonMod; 
-
-        // 1. Livery Scoring
-        let liveryScore = 0;
-        if (targetLivery === jsonLivery) liveryScore = 20;
-        else if (targetLivery.includes(jsonLivery) || jsonLivery.includes(targetLivery)) liveryScore = 15;
-        else if (getSimilarity(targetLivery, jsonLivery) > 0.8) liveryScore = 10;
-
-        if (liveryScore < 5) continue; 
-        score += liveryScore;
-
-        // 2. Aircraft Type Scoring
-        let aircraftScore = 0;
-        if (targetType === jsonMod) aircraftScore = 50;
-        else if (targetType === jsonFullPlane) aircraftScore = 60;
-        else if (targetType.includes(jsonMod)) aircraftScore = 40;
-        else if (getSimilarity(targetType, jsonMod) > 0.8) aircraftScore = 30;
-
-        if (aircraftScore === 0) continue;
-        score += aircraftScore;
-
-        if (score > highestScore) {
-            highestScore = score;
-            bestMatch = entry;
-        }
-    }
-    return (bestMatch && highestScore > 15) ? bestMatch.registration : null;
 }
 
 
