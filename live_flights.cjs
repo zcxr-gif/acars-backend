@@ -144,11 +144,14 @@ const globalMetadata = {
       const rawData = fs.readFileSync(aircraftDataPath, 'utf8');
       const aircraftArray = JSON.parse(rawData);
       
-      for (const entry of aircraftArray) {
-        // Create a unique key using Model and Livery names from aircraft.json
-        const key = `${entry.model}|${entry.livery}`.toLowerCase();
-        registrationLookup.set(key, entry.registration);
-      }
+      // Inside loadMetadata (around line 125)
+      // Inside loadMetadata (around line 125)
+for (const entry of aircraftArray) {
+  // Use the model directly if it matches the API's AircraftName (e.g. "Boeing 737-800")
+  const key = `${entry.model}|${entry.livery}`.toLowerCase();
+  
+  registrationLookup.set(key, entry.registration);
+}
       console.log(`✅ Loaded ${registrationLookup.size} smart-matching registrations.`);
     }
 
@@ -651,11 +654,14 @@ function simplifyFlight(f) {
   const liveryName = liveryNameMap.get(liveryId) || null;
 
   // SMART MATCHING: Find registration from aircraft.json data
-  let matchedReg = null;
-  if (aircraftName && liveryName) {
-    const lookupKey = `${aircraftName}|${liveryName}`.toLowerCase();
-    matchedReg = registrationLookup.get(lookupKey) || null;
-  }
+  // Inside simplifyFlight (around line 500)
+let matchedReg = null;
+if (aircraftName && liveryName) {
+  // This matches the format "aircraftname|liveryname"
+  const lookupKey = `${aircraftName}|${liveryName}`.toLowerCase();
+  
+  matchedReg = registrationLookup.get(lookupKey) || null;
+}
   
   // VA Roster Check (existing logic)
   let isVAMember = false;
