@@ -78,7 +78,7 @@ const VA_STAFF_ROLES = [
 const apiCache = {
   sessions: [],
   flights: new Map(), // sessionId -> { server, sessionId, count, flights, timestamp }
-  // ⬇️ UPDATED: Added world to secondary cache
+  tracks: [],
   secondary: new Map(), // sessionId -> { atc: [], notams: [], world: [], timestamp: ... }
   lastSessionsUpdate: 0,
   // ⬇️ NEW: Add a cache for the VA pilot roster
@@ -271,6 +271,63 @@ function err(status, message, extra = {}) {
 /* =========================
  * IF API Wrappers
  * ========================= */
+
+/* =========================
+ * NAT Tracks Logic
+ * ========================= */
+
+/**
+ * Fetches the current Oceanic Tracks from the Infinite Flight API [cite: 1]
+ */
+async function getOceanicTracks() {
+  const url = '/tracks';
+  try {
+    const { data } = await ifClient.get(url);
+    
+    // Validate response and check for errorCode 0 (Ok) [cite: 3, 4]
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+       throw new Error(`IF API errorCode ${payload.errorCode}`);
+    }
+
+    const items = unwrap(data);
+    
+    // Map the response to the OceanicTrack schema [cite: 5, 6, 7]
+    return items.map(track => ({
+      name: track.name,           // Usually letters like 'A', 'B' [cite: 5]
+      path: track.path,           // Array of waypoints/coordinates 
+      eastLevels: track.eastLevels, // Altitudes for eastbound flight 
+      westLevels: track.westLevels, // Altitudes for westbound flight [cite: 7]
+      type: track.type,           // Usually "North Atlantic Tracks" [cite: 7]
+      lastSeen: track.lastSeen     // Last update timestamp [cite: 9]
+    }));
+  } catch (e) {
+    // Retry with query param if Authorization header fails [cite: 1, 2]
+    if (e?.response?.status === 401 || e?.response?.status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      return unwrap(retry);
+    }
+    throw e;
+  }
+}
+
+/**
+ * Refresh NAT tracks once every 24 hours
+ */
+(function runTracksPoller() {
+  getOceanicTracks()
+    .then(tracks => {
+      apiCache.tracks = tracks;
+      console.log(`✅ [tracks] Synchronized ${tracks.length} Oceanic Tracks.`);
+    })
+    .catch(e => console.error('[tracks] Sync failed:', e.message))
+    .finally(() => {
+      // 24 Hour Refresh (24h * 60m * 60s * 1000ms)
+      const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+      setTimeout(runTracksPoller, TWENTY_FOUR_HOURS);
+    });
+})();
+
 async function getAircraftList() {
   const { data } = await ifClient.get('/aircraft');
   const items = unwrap(data);
@@ -1544,6 +1601,15 @@ app.get('/if-sessions', async (req, res) => {
     const status = e?.response?.status || 500;
     res.status(status).json(err(status, 'Failed to fetch sessions', { detail: e?.message }));
   }
+});
+
+// GET /api/live/tracks
+app.get('/api/live/tracks', (req, res) => {
+  res.json({
+    ok: true,
+    count: apiCache.tracks.length,
+    tracks: apiCache.tracks
+  });
 });
 
 app.get('/if-sessions-test', async (req, res) => {
