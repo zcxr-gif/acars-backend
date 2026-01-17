@@ -1,4 +1,4 @@
-import Redis from 'ioredis';
+const Redis = require('ioredis');
 
 // Connect to Redis using the Environment Variable
 const redis = new Redis(process.env.REDIS_URI);
@@ -6,7 +6,7 @@ const redis = new Redis(process.env.REDIS_URI);
 /**
  * Saves a single point for a flight and manages the 3-flight limit.
  */
-export async function updateFlightPath(flight) {
+async function updateFlightPath(flight) {
   if (!flight.flightId || !flight.position.lat) return;
 
   const key = `path:${flight.flightId}`;
@@ -44,7 +44,7 @@ export async function updateFlightPath(flight) {
 /**
  * Retrieves the full path for a specific flight
  */
-export async function getFlightPath(flightId) {
+async function getFlightPath(flightId) {
   const rawPoints = await redis.lrange(`path:${flightId}`, 0, -1);
   return rawPoints.map(p => {
     const [lat, lon, alt, gs, hdg, time] = p.split(',');
@@ -60,8 +60,11 @@ export async function getFlightPath(flightId) {
 }
 
 /**
- * Optional: Helper to get the IDs of the 3 most recent flights
+ * Helper to get the IDs of the 3 most recent flights
  */
-export async function getRecentFlightIds() {
+async function getRecentFlightIds() {
   return await redis.lrange(`recent_flights_list`, 0, -1);
 }
+
+// Export using CommonJS
+module.exports = { updateFlightPath, getFlightPath, getRecentFlightIds };

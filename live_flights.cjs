@@ -1,7 +1,7 @@
 /* =========================
  * Imports & setup
  * ========================= */
-import { updateFlightPath, getFlightPath } from './history.js';
+import { updateFlightPath, getFlightPath } from './history.cjs';
 
 import { fileURLToPath } from 'url';
 const fs = require('fs');
