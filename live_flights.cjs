@@ -3,7 +3,7 @@
  * ========================= */
 const { updateFlightPath, getFlightPath } = require('./history.cjs');
 
-import { fileURLToPath } from 'url';
+const { fileURLToPath } = require('url');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
