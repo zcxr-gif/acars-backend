@@ -1,13 +1,18 @@
 /* =========================
  * Imports & setup
  * ========================= */
-const { updateFlightPath, getFlightPath } = require('./history');
+import { updateFlightPath, getFlightPath } from './history.js';
+
+import { fileURLToPath } from 'url';
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 require('dotenv').config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ⬇️ 1. IMPORT HTTP and SOCKET.IO
 const { createServer } = require('http');

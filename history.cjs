@@ -1,4 +1,4 @@
-const Redis = require('ioredis');
+import Redis from 'ioredis';
 
 // Connect to Redis using the Environment Variable
 const redis = new Redis(process.env.REDIS_URI);
@@ -6,7 +6,7 @@ const redis = new Redis(process.env.REDIS_URI);
 /**
  * Saves a single point for a flight and manages the 3-flight limit.
  */
-async function updateFlightPath(flight) {
+export async function updateFlightPath(flight) {
   if (!flight.flightId || !flight.position.lat) return;
 
   const key = `path:${flight.flightId}`;
@@ -28,16 +28,14 @@ async function updateFlightPath(flight) {
   pipeline.rpush(key, point);
   pipeline.ltrim(key, -500, -1);
   
-  // 2. Set expiry to 86400 seconds (24 hours) as requested
+  // 2. Set expiry to 86400 seconds (24 hours)
   pipeline.expire(key, 86400); 
 
   // 3. Update the registry of the 3 most recent flights
-  // We remove the flightId if it exists and Lpush it to the front to make it the "newest"
   pipeline.lrem(registryKey, 0, flight.flightId);
   pipeline.lpush(registryKey, flight.flightId);
   
-  // 4. Cap the registry at 3 items. 
-  // Any flight ID pushed out of this list will eventually expire from Redis naturally.
+  // 4. Cap the registry at 3 items.
   pipeline.ltrim(registryKey, 0, 2);
   
   await pipeline.exec().catch(err => console.error(`[redis] Update failed for ${flight.flightId}:`, err.message));
@@ -46,7 +44,7 @@ async function updateFlightPath(flight) {
 /**
  * Retrieves the full path for a specific flight
  */
-async function getFlightPath(flightId) {
+export async function getFlightPath(flightId) {
   const rawPoints = await redis.lrange(`path:${flightId}`, 0, -1);
   return rawPoints.map(p => {
     const [lat, lon, alt, gs, hdg, time] = p.split(',');
@@ -64,8 +62,6 @@ async function getFlightPath(flightId) {
 /**
  * Optional: Helper to get the IDs of the 3 most recent flights
  */
-async function getRecentFlightIds() {
+export async function getRecentFlightIds() {
   return await redis.lrange(`recent_flights_list`, 0, -1);
 }
-
-module.exports = { updateFlightPath, getFlightPath, getRecentFlightIds };
