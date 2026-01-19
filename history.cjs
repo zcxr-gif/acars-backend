@@ -38,7 +38,9 @@ async function updateFlightPath(flight) {
   // 4. Cap the registry at 3 items.
   pipeline.ltrim(registryKey, 0, 2);
   
-  await pipeline.exec().catch(err => console.error(`[redis] Update failed for ${flight.flightId}:`, err.message));
+  await pipeline.exec()
+    .then(() => console.log(`[redis] 📥 Data forwarded for ${flight.flightId}`)) 
+    .catch(err => console.error(`[redis] ❌ Update failed for ${flight.flightId}:`, err.message));
 }
 
 /**
