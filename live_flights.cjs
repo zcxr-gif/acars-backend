@@ -836,36 +836,30 @@ function simplifyFlightPlan(plan) {
   };
 }
 
+/**
+ * REPLACED: Now retrieves the path from Redis using ONLY Flight ID.
+ * This replaces the previous version that called the IF API /route endpoint.
+ */
 async function getFlightRoute(sessionId, flightId) {
-  if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
-  const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/route`;
+  // We explicitly ignore sessionId now as per your requirement
+  if (!flightId) throw new Error('Missing flightId');
+  
   try {
-    const { data } = await ifClient.get(url);
-    const payload = data && typeof data === 'object' ? data : {};
-    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
-      if (payload.errorCode === 6) return [];
-      const err = new Error(`IF API errorCode ${payload.errorCode}`);
-      err.response = { data: payload };
-      throw err;
-    }
-    return Array.isArray(payload.result) ? payload.result : [];
+    // Retrieve the path from Redis history 
+    const path = await getFlightPath(flightId);
+    
+    // Map Redis schema back to the route format expected by the frontend [cite: 11, 221]
+    return path.map(p => ({
+      latitude: p.lat,
+      longitude: p.lon,
+      altitude: p.alt,
+      groundSpeed: p.gs,
+      track: p.hdg,
+      date: p.timestamp
+    }));
   } catch (e) {
-    const status = e?.response?.status;
-    if (status === 401 || status === 403) {
-      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
-        if (payload.errorCode === 6) return [];
-        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-        err.response = { data: payload };
-        throw err;
-      }
-      return Array.isArray(payload.result) ? payload.result : [];
-    }
-    if (status === 404) {
-      return [];
-    }
-    throw e;
+    console.error(`[redis-fetch] Failed to retrieve history for ${flightId}:`, e.message);
+    return [];
   }
 }
 
@@ -1723,23 +1717,31 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
   }
 });
 
+/**
+ * REPLACED ROUTE: Serves past flown route from Redis
+ * Endpoint: GET /flights/:sessionId/:flightId/route
+ */
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
-  const { sessionId, flightId } = req.params;
+  const { flightId } = req.params; // sessionId is ignored 
+
   try {
-    const rawRoute = await getFlightRoute(sessionId, flightId);
-    if (!rawRoute || rawRoute.length === 0) {
-      return res.status(404).json(err(404, 'Flight route not found. The flight may not exist or has no position reports available.'));
+    // Directly pull from the Redis helper 
+    const redisPath = await getFlightPath(flightId);
+    
+    if (!redisPath || redisPath.length === 0) {
+      return res.status(404).json(err(404, 'No local flight history found for this ID.'));
     }
-    res.json({ ok: true, flightId, route: rawRoute });
+
+    // Return the Redis data as the authoritative route [cite: 375, 395]
+    res.json({ 
+      ok: true, 
+      flightId, 
+      route: redisPath,
+      source: 'local-redis-history' 
+    });
+
   } catch (e) {
-    const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
-    res.status(status).json(
-      err(status, 'Failed to fetch flight route', {
-        apiErrorCode: apiError?.errorCode,
-        detail: e?.message
-      })
-    );
+    res.status(500).json(err(500, 'Failed to fetch flight history', { detail: e?.message }));
   }
 });
 
