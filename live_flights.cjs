@@ -1264,8 +1264,6 @@ async function pollAndBroadcastFlights() {
 
     // If no one is in the room, skip the processing to save resources [cite: 313]
     if (!room || room.size === 0) {
-      apiCache.flights.delete(sessionId);
-      continue;
     }
 
     try {
