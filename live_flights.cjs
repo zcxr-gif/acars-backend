@@ -1,7 +1,6 @@
 /* =========================
  * Imports & setup
  * ========================= */
-const { updateFlightPath, getFlightPath } = require('./history.cjs');
 
 const { fileURLToPath } = require('url');
 const fs = require('fs');
@@ -9,6 +8,7 @@ const path = require('path');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const { updateFlightPath, getFlightPath } = require('./history.cjs');
 require('dotenv').config();
 
 // ⬇️ 1. IMPORT HTTP and SOCKET.IO
@@ -836,30 +836,36 @@ function simplifyFlightPlan(plan) {
   };
 }
 
-/**
- * REPLACED: Now retrieves the path from Redis using ONLY Flight ID.
- * This replaces the previous version that called the IF API /route endpoint.
- */
 async function getFlightRoute(sessionId, flightId) {
-  // We explicitly ignore sessionId now as per your requirement
-  if (!flightId) throw new Error('Missing flightId');
-  
+  if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
+  const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/route`;
   try {
-    // Retrieve the path from Redis history 
-    const path = await getFlightPath(flightId);
-    
-    // Map Redis schema back to the route format expected by the frontend [cite: 11, 221]
-    return path.map(p => ({
-      latitude: p.lat,
-      longitude: p.lon,
-      altitude: p.alt,
-      groundSpeed: p.gs,
-      track: p.hdg,
-      date: p.timestamp
-    }));
+    const { data } = await ifClient.get(url);
+    const payload = data && typeof data === 'object' ? data : {};
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+      if (payload.errorCode === 6) return [];
+      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+      err.response = { data: payload };
+      throw err;
+    }
+    return Array.isArray(payload.result) ? payload.result : [];
   } catch (e) {
-    console.error(`[redis-fetch] Failed to retrieve history for ${flightId}:`, e.message);
-    return [];
+    const status = e?.response?.status;
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+        if (payload.errorCode === 6) return [];
+        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+        err.response = { data: payload };
+        throw err;
+      }
+      return Array.isArray(payload.result) ? payload.result : [];
+    }
+    if (status === 404) {
+      return [];
+    }
+    throw e;
   }
 }
 
@@ -1240,7 +1246,7 @@ let nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS; // Dynamic poll interval
 async function pollAndBroadcastFlights() {
   let sessions = [];
   try {
-    // Uses the existing cache logic to avoid API spam
+    // Uses the existing cache logic to avoid API spam [cite: 309]
     sessions = await getSessions();
   } catch (e) {
     console.warn('[broadcast] Sessions fetch failed', e?.message);
@@ -1249,7 +1255,6 @@ async function pollAndBroadcastFlights() {
   }
 
   const serverNames = ["Expert Server", "Training Server", "Casual Server"];
-  
   for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
     if (!sessionId) continue;
@@ -1257,7 +1262,7 @@ async function pollAndBroadcastFlights() {
     const roomName = serverName.toLowerCase();
     const room = io.sockets.adapter.rooms.get(roomName);
 
-    // If no one is in the room, skip the processing to save resources
+    // If no one is in the room, skip the processing to save resources [cite: 313]
     if (!room || room.size === 0) {
       apiCache.flights.delete(sessionId);
       continue;
@@ -1265,37 +1270,32 @@ async function pollAndBroadcastFlights() {
 
     try {
       const rawFlights = await getFlightsForSession(sessionId);
-      
       const newFlightCount = (Array.isArray(rawFlights) ? rawFlights.length : 0);
       const cachedData = apiCache.flights.get(sessionId);
       const cachedFlightCount = (cachedData && cachedData.count > 0) ? cachedData.count : 0;
 
-      // Blip guard: Prevents broadcasting empty lists if the API momentarily fails
-      if ((newFlightCount === 0 && cachedFlightCount > 0) || (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50))) {
+      // Blip guard: Prevents broadcasting empty lists if the API momentarily fails [cite: 317]
+      if ((newFlightCount === 0 && cachedFlightCount > 0) || 
+          (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50))) {
         console.warn(`[broadcast] ⚠️ BLIP GUARD: Skipping ${serverName}`);
         continue;
       }
 
       const simplifiedFlights = rawFlights.map(simplifyFlight);
       
-      // --- ⬇️ START: ICAO REVERSE LOOKUP LOGIC ⬇️ ---
+      // ICAO REVERSE LOOKUP LOGIC [cite: 319-324]
       const secondaryCache = apiCache.secondary.get(sessionId);
       const worldData = secondaryCache?.world || [];
-      const flightAirportsMap = new Map(); // Stores { [flightId]: { dep: 'ICAO', arr: 'ICAO' } }
+      const flightAirportsMap = new Map();
 
-      // Map ICAOs by checking which flights are inbound or outbound at every airport
       for (const airport of worldData) {
         const icao = airport.airportIcao;
-        
-        // Check departures
         if (Array.isArray(airport.outboundFlights)) {
           airport.outboundFlights.forEach(fId => {
             const entry = flightAirportsMap.get(fId) || {};
             flightAirportsMap.set(fId, { ...entry, dep: icao });
           });
         }
-        
-        // Check arrivals
         if (Array.isArray(airport.inboundFlights)) {
           airport.inboundFlights.forEach(fId => {
             const entry = flightAirportsMap.get(fId) || {};
@@ -1303,23 +1303,19 @@ async function pollAndBroadcastFlights() {
           });
         }
       }
-      // --- ⬆️ END: ICAO REVERSE LOOKUP LOGIC ⬆️ ---
 
+      // GROUP DETECTION LOGIC [cite: 325-332]
       const groups = [];
       const flightToGroupMap = new Map();
 
-      // Group detection logic
       for (let i = 0; i < simplifiedFlights.length; i++) {
         for (let j = i + 1; j < simplifiedFlights.length; j++) {
           const f1 = simplifiedFlights[i];
           const f2 = simplifiedFlights[j];
-
           const connection = evaluateGroupConnection(f1, f2, worldData);
-
           if (connection) {
             let gIdx1 = flightToGroupMap.get(f1.flightId);
             let gIdx2 = flightToGroupMap.get(f2.flightId);
-
             if (gIdx1 !== undefined) {
               groups[gIdx1].members.push(f2.flightId);
               groups[gIdx1].confidenceScore += connection.score;
@@ -1344,28 +1340,36 @@ async function pollAndBroadcastFlights() {
         }
       }
 
-      // Map everything back to the final flight objects for the frontend
+      // Map everything back to the final flight objects [cite: 333]
       const finalFlights = simplifiedFlights.map(f => {
         const groupIndex = flightToGroupMap.get(f.flightId);
         const airports = flightAirportsMap.get(f.flightId) || {};
-        updateFlightPath(f).catch(err => console.error('Redis Error:', err));
-        const now = Date.now();
-const lastSave = apiCache.lastRedisSave.get(f.flightId) || 0;
-
-// Only save to Redis if 30 seconds (30,000ms) have passed since the last save
-if (now - lastSave >= 30000) {
-  updateFlightPath(f).catch(err => console.error('Redis Error:', err));
-  apiCache.lastRedisSave.set(f.flightId, now);
-}
-
+        
         return {
           ...f,
           groupId: groupIndex !== undefined ? groups[groupIndex].groupId : null,
-          // Inject the ICAOs found from the World Status reverse lookup
           departureIcao: airports.dep || null,
           arrivalIcao: airports.arr || null
         };
       });
+
+      // --- ⬇️ SQLITE HISTORY LOGIC (30s THROTTLE) ⬇️ ---
+      const now = Date.now();
+      const flightsToSave = finalFlights.filter(f => {
+        const lastSave = apiCache.lastRedisSave.get(f.flightId) || 0;
+        // Only include in this SQLite batch if 30 seconds have passed [cite: 333]
+        if (now - lastSave >= 30000) {
+          apiCache.lastRedisSave.set(f.flightId, now);
+          return true;
+        }
+        return false;
+      });
+
+      if (flightsToSave.length > 0) {
+        // This function handles the "2 flights per user" and "24hr delete" rules
+        updateBatch(flightsToSave); 
+      }
+      // --- ⬆️ END SQLITE LOGIC ⬆️ ---
 
       const payload = {
         server: serverName,
@@ -1386,7 +1390,7 @@ if (now - lastSave >= 30000) {
       console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
       if (e?.message?.includes('429')) {
           nextBroadcastPollMs = 60000;
-          apiCache.flights.delete(sessionId); 
+          apiCache.flights.delete(sessionId);
       }
     }
   }
@@ -1717,31 +1721,23 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
   }
 });
 
-/**
- * REPLACED ROUTE: Serves past flown route from Redis
- * Endpoint: GET /flights/:sessionId/:flightId/route
- */
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
-  const { flightId } = req.params; // sessionId is ignored 
-
+  const { sessionId, flightId } = req.params;
   try {
-    // Directly pull from the Redis helper 
-    const redisPath = await getFlightPath(flightId);
-    
-    if (!redisPath || redisPath.length === 0) {
-      return res.status(404).json(err(404, 'No local flight history found for this ID.'));
+    const rawRoute = await getFlightRoute(sessionId, flightId);
+    if (!rawRoute || rawRoute.length === 0) {
+      return res.status(404).json(err(404, 'Flight route not found. The flight may not exist or has no position reports available.'));
     }
-
-    // Return the Redis data as the authoritative route [cite: 375, 395]
-    res.json({ 
-      ok: true, 
-      flightId, 
-      route: redisPath,
-      source: 'local-redis-history' 
-    });
-
+    res.json({ ok: true, flightId, route: rawRoute });
   } catch (e) {
-    res.status(500).json(err(500, 'Failed to fetch flight history', { detail: e?.message }));
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch flight route', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
   }
 });
 

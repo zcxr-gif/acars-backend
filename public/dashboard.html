@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backend Health & History Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-white p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <header class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-sky-400">System Monitor</h1>
+            <div id="status-badge" class="px-4 py-1 rounded-full bg-slate-700 text-sm">Checking Status...</div>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
+            <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                <h2 class="text-xl font-semibold mb-4">Backend Health</h2>
+                <div id="health-details" class="space-y-2 text-slate-300">
+                    <p>Uptime: <span id="health-time">--</span></p>
+                    <p>API Version: <span class="text-sky-400">v2 (Infinite Flight)</span></p>
+                </div>
+                <button onclick="checkHealth()" class="mt-4 bg-sky-600 hover:bg-sky-500 px-4 py-2 rounded text-sm transition">Refresh Health</button>
+            </div>
+
+            <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                <h2 class="text-xl font-semibold mb-4">Path History Check</h2>
+                <div class="flex gap-2">
+                    <input type="text" id="flight-id-input" placeholder="Paste Flight ID..." class="bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm w-full outline-none focus:border-sky-500">
+                    <button onclick="checkHistory()" class="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded text-sm transition">Verify</button>
+                </div>
+                <p class="text-xs text-slate-500 mt-2 italic">Note: Only flights active in the last 24h are stored.</p>
+            </div>
+        </div>
+
+        <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+            <div class="p-6 border-b border-slate-700 flex justify-between items-center">
+                <h2 class="text-xl font-semibold">Stored Coordinates (Breadcrumbs)</h2>
+                <span id="coord-count" class="text-sm bg-slate-700 px-3 py-1 rounded">0 Points</span>
+            </div>
+            <div class="max-h-96 overflow-y-auto">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-slate-900 sticky top-0">
+                        <tr>
+                            <th class="p-4">Timestamp</th>
+                            <th class="p-4">Lat/Lon</th>
+                            <th class="p-4">Altitude</th>
+                            <th class="p-4">Speed</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body" class="divide-y divide-slate-700">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 1. Health Check Logic
+        async function checkHealth() {
+            const badge = document.getElementById('status-badge');
+            try {
+                const res = await fetch('/health');
+                const data = await res.json();
+                if (data.ok) {
+                    badge.innerText = '● SYSTEM ONLINE';
+                    badge.className = 'px-4 py-1 rounded-full bg-emerald-900 text-emerald-300 text-sm';
+                    document.getElementById('health-time').innerText = new Date(data.timestamp).toLocaleString();
+                }
+            } catch (e) {
+                badge.innerText = '● SYSTEM OFFLINE';
+                badge.className = 'px-4 py-1 rounded-full bg-red-900 text-red-300 text-sm';
+            }
+        }
+
+        // 2. History Check Logic
+        async function checkHistory() {
+            const flightId = document.getElementById('flight-id-input').value.trim();
+            if (!flightId) return alert('Please enter a flight ID');
+
+            const tbody = document.getElementById('history-body');
+            const countLabel = document.getElementById('coord-count');
+            
+            try {
+                const res = await fetch(`/api/flights/${flightId}/history`);
+                const data = await res.json();
+
+                if (!data.ok || !data.path.length) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="p-8 text-center text-slate-500">No path data found for this ID.</td></tr>';
+                    countLabel.innerText = '0 Points';
+                    return;
+                }
+
+                countLabel.innerText = `${data.path.length} Points`;
+                tbody.innerHTML = data.path.reverse().map(pt => `
+                    <tr class="hover:bg-slate-700/50 transition">
+                        <td class="p-4 text-slate-400">${new Date(pt.time).toLocaleTimeString()}</td>
+                        <td class="p-4 font-mono text-sky-300">${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}</td>
+                        <td class="p-4">${Math.round(pt.alt)} ft</td>
+                        <td class="p-4">${Math.round(pt.gs)} kt</td>
+                    </tr>
+                `).join('');
+
+            } catch (e) {
+                alert('Error fetching history: ' + e.message);
+            }
+        }
+
+        // Run health check on load
+        checkHealth();
+        // Refresh health every 30 seconds
+        setInterval(checkHealth, 30000);
+    </script>
+</body>
+</html>
