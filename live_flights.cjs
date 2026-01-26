@@ -8,7 +8,7 @@ const path = require('path');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const { updateFlightPath, getFlightPath } = require('./history.cjs');
+const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs');
 require('dotenv').config();
 
 // ⬇️ 1. IMPORT HTTP and SOCKET.IO
