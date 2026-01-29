@@ -2018,8 +2018,11 @@ app.get('/api/live/airport/:sessionId/:icao/atis', async (req, res) => {
 httpServer.listen(PORT, () => {
   console.log(`✅ Live Flight Broadcaster (Sockets) ready: http://localhost:${PORT}`);
   console.log('🌐 Base URL:', IF_API_BASE_URL);
-  console.log(`📡 Broadcasting all flights every ${ALL_FLIGHTS_POLL_MS}ms`);
-  console.log(`📡 Broadcasting ATC/NOTAMs/World every ${SECONDARY_POLL_MS}ms`);
+  
+  // Updated logs to use the new constants
+  console.log(`📡 Flight Polling: ${ACTIVE_POLL_MS/1000}s (active) / ${IDLE_POLL_MS/1000}s (idle)`);
+  console.log(`📡 Secondary Polling: ${SECONDARY_ACTIVE_MS/1000}s (active) / ${SECONDARY_IDLE_MS/1000}s (idle)`);
+  
   if (!IF_API_KEY) {
     console.warn('⚠️  IF API key is missing. Set INFINITE_FLIGHT_API_KEY in your .env file.');
   }
