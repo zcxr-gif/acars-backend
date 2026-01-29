@@ -1513,12 +1513,6 @@ async function pollAndBroadcastSecondary() {
     });
 })();
 
-(function runSecondaryPoller() {
-  pollAndBroadcastSecondary()
-    .catch(e => console.error('[secondary] Poller error', e))
-    .finally(() => setTimeout(runSecondaryPoller, SECONDARY_POLL_MS));
-})();
-
 
 /* =========================
  * API Endpoints
