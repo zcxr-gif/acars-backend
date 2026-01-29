@@ -63,8 +63,11 @@ const VA_BACKEND_URL = (process.env.VA_BACKEND_URL || 'http://localhost:5000').t
 const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 1000), 10); // 5 minutes
 const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
 
-const ALL_FLIGHTS_POLL_MS = parseInt(process.env.ALL_FLIGHTS_POLL_MS || '2000', 10);
-const SECONDARY_POLL_MS = 20000; // Poll ATC/NOTAMs/World every 20 seconds
+const ACTIVE_POLL_MS = 10000; // 10 seconds (User connected)
+const IDLE_POLL_MS = 30000;   // 30 seconds (No users)
+
+const SECONDARY_ACTIVE_MS = 30000; // 20 seconds (User connected)
+const SECONDARY_IDLE_MS = 120000;   // 60 seconds (No users)
 
 /* =========================
  * NEW: In-Memory API Cache
@@ -1235,18 +1238,13 @@ function evaluateGroupConnection(f1, f2, worldData = []) {
 }
 
 
-/* =========================
- * All-Flights Broadcaster (MODIFIED)
- * ========================= */
-
-// This function now fetches flights, updates the central cache, and broadcasts to clients.
-// It also includes error handling to back off if rate-limited.
-let nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS; // Dynamic poll interval
+// ⬇️ UPDATED: Dynamic poll interval logic
+let nextBroadcastPollMs = 0; // Initialize to 0 so we calculate it dynamically
 
 async function pollAndBroadcastFlights() {
   let sessions = [];
   try {
-    // Uses the existing cache logic to avoid API spam [cite: 309]
+    // Uses the existing cache logic to avoid API spam
     sessions = await getSessions();
   } catch (e) {
     console.warn('[broadcast] Sessions fetch failed', e?.message);
@@ -1262,8 +1260,12 @@ async function pollAndBroadcastFlights() {
     const roomName = serverName.toLowerCase();
     const room = io.sockets.adapter.rooms.get(roomName);
 
-    // If no one is in the room, skip the processing to save resources [cite: 313]
+    // If no one is in the room, skip the PROCESSING to save resources
+    // (We still run the loop, but we skip the heavy math/fetching if not needed)
     if (!room || room.size === 0) {
+       // Optional: You can uncomment the 'continue' below if you want to strictly 
+       // stop fetching data for empty servers, but keeping the cache warm is often better.
+       // continue; 
     }
 
     try {
@@ -1271,8 +1273,8 @@ async function pollAndBroadcastFlights() {
       const newFlightCount = (Array.isArray(rawFlights) ? rawFlights.length : 0);
       const cachedData = apiCache.flights.get(sessionId);
       const cachedFlightCount = (cachedData && cachedData.count > 0) ? cachedData.count : 0;
-
-      // Blip guard: Prevents broadcasting empty lists if the API momentarily fails [cite: 317]
+      
+      // Blip guard: Prevents broadcasting empty lists if the API momentarily fails
       if ((newFlightCount === 0 && cachedFlightCount > 0) || 
           (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50))) {
         console.warn(`[broadcast] ⚠️ BLIP GUARD: Skipping ${serverName}`);
@@ -1281,11 +1283,10 @@ async function pollAndBroadcastFlights() {
 
       const simplifiedFlights = rawFlights.map(simplifyFlight);
       
-      // ICAO REVERSE LOOKUP LOGIC [cite: 319-324]
+      // ICAO REVERSE LOOKUP LOGIC
       const secondaryCache = apiCache.secondary.get(sessionId);
       const worldData = secondaryCache?.world || [];
       const flightAirportsMap = new Map();
-
       for (const airport of worldData) {
         const icao = airport.airportIcao;
         if (Array.isArray(airport.outboundFlights)) {
@@ -1302,7 +1303,7 @@ async function pollAndBroadcastFlights() {
         }
       }
 
-      // GROUP DETECTION LOGIC [cite: 325-332]
+      // GROUP DETECTION LOGIC
       const groups = [];
       const flightToGroupMap = new Map();
 
@@ -1338,7 +1339,7 @@ async function pollAndBroadcastFlights() {
         }
       }
 
-      // Map everything back to the final flight objects [cite: 333]
+      // Map everything back to the final flight objects
       const finalFlights = simplifiedFlights.map(f => {
         const groupIndex = flightToGroupMap.get(f.flightId);
         const airports = flightAirportsMap.get(f.flightId) || {};
@@ -1355,17 +1356,14 @@ async function pollAndBroadcastFlights() {
       const now = Date.now();
       const flightsToSave = finalFlights.filter(f => {
         const lastSave = apiCache.lastRedisSave.get(f.flightId) || 0;
-        // Only include in this SQLite batch if 30 seconds have passed [cite: 333]
         if (now - lastSave >= 30000) {
           apiCache.lastRedisSave.set(f.flightId, now);
           return true;
         }
         return false;
       });
-
       if (flightsToSave.length > 0) {
-        // This function handles the "2 flights per user" and "24hr delete" rules
-        updateBatch(flightsToSave); 
+        updateBatch(flightsToSave);
       }
       // --- ⬆️ END SQLITE LOGIC ⬆️ ---
 
@@ -1377,7 +1375,6 @@ async function pollAndBroadcastFlights() {
         groups: groups.map(g => ({ ...g, members: [...new Set(g.members)] })),
         timestamp: new Date().toISOString()
       };
-      
       apiCache.flights.set(sessionId, payload);
 
       if (room && room.size > 0) {
@@ -1395,7 +1392,7 @@ async function pollAndBroadcastFlights() {
 }
 
 (function runBroadcastPoller() {
-  // 1. Record the start time *before* the poll
+  // 1. Record start time
   const pollStartTime = Date.now();
 
   pollAndBroadcastFlights()
@@ -1403,40 +1400,43 @@ async function pollAndBroadcastFlights() {
         console.error('[broadcast] Unhandled poll error', e?.message);
          if (e?.message?.includes('429')) {
             console.error(`[broadcast] 🛑 Unhandled 429. Backing off for 60s.`);
-            nextBroadcastPollMs = 60000; // 60 seconds
+            nextBroadcastPollMs = 60000; 
          }
     })
     .finally(() => {
+      // 2. Determine Dynamic Interval
+      // Check how many users are connected to Socket.IO
+      const connectedUsers = io.engine.clientsCount;
+      const targetInterval = connectedUsers > 0 ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+      
       let timeToWait;
 
-      // 2. Check if a backoff (e.g., 60000ms) was triggered by the poll function
-      if (nextBroadcastPollMs !== ALL_FLIGHTS_POLL_MS) {
-        // A backoff was triggered. We must honor it.
+      // 3. Check if a major backoff (like 60s from a 429 error) was triggered
+      if (nextBroadcastPollMs > targetInterval) {
         timeToWait = nextBroadcastPollMs;
         console.log(`[broadcast] Backoff triggered. Waiting ${timeToWait}ms.`);
         
-        // Reset the variable for the *next* cycle (after this one)
-        nextBroadcastPollMs = ALL_FLIGHTS_POLL_MS;
+        // Reset for the next cycle
+        nextBroadcastPollMs = 0;
       } else {
-        // 3. NO backoff. Calculate the steady tick.
+        // 4. Calculate standard "steady tick"
         const pollEndTime = Date.now();
         const executionTime = pollEndTime - pollStartTime;
         
-        // This is our new "smart" wait time
-        timeToWait = ALL_FLIGHTS_POLL_MS - executionTime;
-        
+        timeToWait = targetInterval - executionTime;
+
+        // If execution took longer than interval, run immediately (with tiny buffer)
         if (timeToWait <= 0) {
-          // This means the poll took *longer* than our interval.
-          // This is okay! It just means we run the next poll immediately
-          // to try and "catch up" to the steady tick.
-          console.warn(`[broadcast] ⚠️  Poll took ${executionTime}ms, longer than interval of ${ALL_FLIGHTS_POLL_MS}ms. Running next poll almost immediately.`);
-          
-          // We set a tiny 10ms buffer to prevent a 100% CPU "spin-lock"
           timeToWait = 10;
         }
+        
+        // Debug log (optional - helpful to see it working)
+        // console.log(`[broadcast] Users: ${connectedUsers} | Took: ${executionTime}ms | Next in: ${timeToWait}ms`);
+        
+        nextBroadcastPollMs = 0;
       }
       
-      // 4. Schedule the next poll using our calculated wait time
+      // 5. Schedule next run
       setTimeout(runBroadcastPoller, timeToWait);
     });
 })();
@@ -1453,31 +1453,32 @@ async function pollAndBroadcastSecondary() {
   }
 
   const serverNames = ["Expert Server", "Training Server", "Casual Server"];
-
   for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
     if (!sessionId) continue;
+    
+    // Check if anyone is actually in this room before doing the heavy lifting?
+    // Optional optimization:
+    // const room = io.sockets.adapter.rooms.get(serverName.toLowerCase());
+    // if (!room || room.size === 0) continue; 
 
     try {
       // Fetch ATC, NOTAMs, and World Status in parallel
       const [atc, notams, world] = await Promise.all([
         getActiveATC(sessionId).catch(() => []),
         getNotams(sessionId).catch(() => []),
-        getWorldStatus(sessionId).catch(() => []) // NEW
+        getWorldStatus(sessionId).catch(() => [])
       ]);
-
       const payload = {
         server: serverName,
         sessionId: sessionId,
         atc: atc,
         notams: notams,
-        world: world, // NEW
+        world: world,
         timestamp: new Date().toISOString()
       };
-
       // 1. Update Cache
       apiCache.secondary.set(sessionId, payload);
-
       // 2. Broadcast to room
       const roomName = serverName.toLowerCase();
       const room = io.sockets.adapter.rooms.get(roomName);
@@ -1490,6 +1491,27 @@ async function pollAndBroadcastSecondary() {
     }
   }
 }
+
+(function runSecondaryPoller() {
+  const start = Date.now();
+  
+  pollAndBroadcastSecondary()
+    .catch(e => console.error('[secondary] Poller error', e))
+    .finally(() => {
+      // 1. Determine Dynamic Interval
+      const connectedUsers = io.engine.clientsCount;
+      const targetInterval = connectedUsers > 0 ? SECONDARY_ACTIVE_MS : SECONDARY_IDLE_MS;
+
+      // 2. Calculate execution time to keep the rhythm steady
+      const duration = Date.now() - start;
+      let timeToWait = targetInterval - duration;
+
+      // Safety buffer
+      if (timeToWait <= 0) timeToWait = 1000;
+
+      setTimeout(runSecondaryPoller, timeToWait);
+    });
+})();
 
 (function runSecondaryPoller() {
   pollAndBroadcastSecondary()
