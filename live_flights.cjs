@@ -20,7 +20,7 @@ const app = express();
 const httpServer = createServer(app);
 const whitelist = [
     'https://inflight.info',        
-    'https://deploy-preview-5--indgo-va.netlify.app',
+    'https://deploy-preview-6--indgo-va.netlify.app',
     'https://site--indgo-backend--6dmjph8ltlhv.code.run',
     "capacitor://inflight-secure"
 ];
@@ -66,8 +66,8 @@ const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
 const ACTIVE_POLL_MS = 10000; // 10 seconds (User connected)
 const IDLE_POLL_MS = 30000;   // 30 seconds (No users)
 
-const SECONDARY_ACTIVE_MS = 30000; // 20 seconds (User connected)
-const SECONDARY_IDLE_MS = 120000;   // 60 seconds (No users)
+const SECONDARY_ACTIVE_MS = 30000; // 30 seconds (User connected)
+const SECONDARY_IDLE_MS = 120000;   // 120 seconds (No users)
 
 /* =========================
  * NEW: In-Memory API Cache
