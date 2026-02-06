@@ -111,7 +111,6 @@ const ifClient = axios.create({
  * ========================= */
 const aircraftNameMap = new Map(); // Map to store aircraft names (ID -> Name)
 const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
-const registrationLookup = new Map(); // Key: "Model|Livery" -> Value: registration string
 
 // NEW: Global storage to serve via API
 const globalMetadata = {
@@ -119,11 +118,10 @@ const globalMetadata = {
   liveries: []
 };
 
-// Replace the existing loadMetadata IIFE (starting around line 82) with this:
 (async function loadMetadata() {
   try {
     if (!IF_API_KEY) {
-      console.warn('⚠️  Skipping metadata load: API key is missing.');
+      console.warn('⚠️ Skipping metadata load: API key is missing.');
       return;
     }
 
@@ -135,6 +133,7 @@ const globalMetadata = {
     for (const aircraft of aircraftList) {
       aircraftNameMap.set(aircraft.id, aircraft.name);
     }
+  
     console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types.`);
 
     // 2. Load Liveries from API
@@ -145,25 +144,11 @@ const globalMetadata = {
     }
     console.log(`✅ Loaded ${liveryNameMap.size} liveries.`);
 
-    // 3. SMART MATCHING: Load local aircraft.json for registration matching
-    const aircraftDataPath = path.join(__dirname, 'aircraft.json');
-    if (fs.existsSync(aircraftDataPath)) {
-      const rawData = fs.readFileSync(aircraftDataPath, 'utf8');
-      const aircraftArray = JSON.parse(rawData);
-      
-      for (const entry of aircraftArray) {
-        // Create a unique key using Model and Livery names from aircraft.json
-        const key = `${entry.model}|${entry.livery}`.toLowerCase();
-        registrationLookup.set(key, entry.registration);
-      }
-      console.log(`✅ Loaded ${registrationLookup.size} smart-matching registrations.`);
-    }
-
+    // Note: Registration smart-matching logic has been removed.
   } catch (e) {
-    console.error('❌ Could not load metadata (aircraft/liveries/registrations).', e.message);
+    console.error('❌ Could not load metadata.', e.message);
   }
 })();
-
 /* =========================
  * NEW: VA Roster Loader
  * ========================= */
@@ -714,26 +699,11 @@ function simplifyFlight(f) {
   const aircraftName = aircraftNameMap.get(aircraftId) || null;
   const liveryName = liveryNameMap.get(liveryId) || null;
 
-  // SMART MATCHING: Find registration from aircraft.json data
-  let matchedReg = null;
-  if (aircraftName && liveryName) {
-    const lookupKey = `${aircraftName}|${liveryName}`.toLowerCase();
-    matchedReg = registrationLookup.get(lookupKey) || null;
-  }
-  
-  // VA Roster Check (existing logic)
-  let isVAMember = false;
-  let isStaff = false;
-  let vaRole = null;
-
-  if (username) {
-    const profile = apiCache.vaRosterCache.get(username.toLowerCase());
-    if (profile) {
-      isVAMember = true;
-      vaRole = profile.role;
-      isStaff = VA_STAFF_ROLES.includes(vaRole.toLowerCase());
-    }
-  }
+  // Simple VA Roster Check (No grouping logic)
+  const profile = username ? apiCache.vaRosterCache.get(username.toLowerCase()) : null;
+  const isVAMember = !!profile;
+  const vaRole = profile?.role || null;
+  const isStaff = vaRole ? VA_STAFF_ROLES.includes(vaRole.toLowerCase()) : false;
 
   return {
     flightId: f?.flightId || null,
@@ -757,16 +727,16 @@ function simplifyFlight(f) {
       lastReportMs: f?.lastReport ? Date.parse(f.lastReport) || null : null,
     },
     aircraft: {
-      aircraftId: aircraftId,
-      liveryId: liveryId,
-      aircraftName: aircraftName,
-      liveryName: liveryName,
-      registration: matchedReg // Injected registration (No Image URL)
+      aircraftId,
+      liveryId,
+      aircraftName,
+      liveryName
     },
     pilotState: typeof f?.pilotState === 'number' ? f.pilotState : null,
     isConnected: typeof f?.isConnected === 'boolean' ? f.isConnected : null,
   };
 }
+
 async function getFlightPlan(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/flightplan`;
@@ -1119,124 +1089,6 @@ io.on('connection', (socket) => {
   });
 });
 
-/* =========================
- * Group Detection Helpers
- * ========================= */
-
-/**
- * Calculates distance between two points in Nautical Miles
- */
-function calculateDistanceNM(lat1, lon1, lat2, lon2) {
-  const R = 3440.065; // Radius of Earth in Nautical Miles
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = 
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-/**
- * Calculates the shortest difference between two headings
- */
-function getHeadingDiff(h1, h2) {
-  const diff = Math.abs(h1 - h2) % 360;
-  return diff > 180 ? 360 - diff : diff;
-}
-
-/**
- * Compares entire callsigns for similarities.
- * Looks for shared prefixes, shared suffixes, or shared VA tags anywhere in the string.
- */
-function isSimilarCallsign(c1, c2) {
-  if (!c1 || !c2) return false;
-  const s1 = c1.toUpperCase().trim();
-  const s2 = c2.toUpperCase().trim();
-
-  // 1. Direct match (unlikely but possible)
-  if (s1 === s2) return true;
-
-  // 2. Shared VA Tags in brackets (e.g., [DLVA])
-  const tagRegex = /\[(.*?)\]/g;
-  const tags1 = s1.match(tagRegex);
-  const tags2 = s2.match(tagRegex);
-  if (tags1 && tags2 && tags1[0] === tags2[0]) return true;
-
-  // 3. Substring similarity: Check if one contains a significant portion of the other
-  // or if they share the same alphanumeric prefix (e.g., AAL123 and AAL456)
-  const prefix1 = s1.replace(/[0-9]/g, '');
-  const prefix2 = s2.replace(/[0-9]/g, '');
-  if (prefix1.length > 1 && prefix1 === prefix2) return true;
-
-  // 4. Sequential/Similar Numbering: Check if they share the same last 2 digits
-  // often used in group flights (e.g., N124BD and N524BD)
-  if (s1.length > 3 && s2.length > 3 && s1.slice(-2) === s2.slice(-2)) return true;
-
-  return false;
-}
-
-/**
- * The Core Group Logic Engine
- */
-function evaluateGroupConnection(f1, f2, worldData = []) {
-  // --- 1. REQUIRED PHYSICAL CHECKS  ---
-  const dist = calculateDistanceNM(f1.position.lat, f1.position.lon, f2.position.lat, f2.position.lon);
-  if (dist > 10) return null; // Must be within 5-10nm 
-
-  const hDiff = getHeadingDiff(f1.position.heading_deg, f2.position.heading_deg);
-  if (hDiff > 25) return null; // Must be flying in similar direction 
-
-  // --- 2. POSITIVE SCORING  ---
-  let score = 0;
-  const matches = [];
-
-  // VA Match (+30 pts) 
-  const sameVO = (f1.virtualOrganization && f1.virtualOrganization === f2.virtualOrganization);
-  if (sameVO || (f1.isVAMember && f2.isVAMember)) {
-    score += 30;
-    matches.push('VA_MATCH');
-  }
-
-  // Callsign Similarity (+25 pts) [cite: 3, 8, 9]
-  if (isSimilarCallsign(f1.callsign, f2.callsign)) {
-    score += 25;
-    matches.push('CALLSIGN_MATCH');
-  }
-
-  // Aircraft Model Match (+15 pts) [cite: 3, 9]
-  if (f1.aircraft.aircraftId === f2.aircraft.aircraftId) {
-    score += 15;
-    matches.push('AIRCRAFT_MATCH');
-  }
-
-  // Livery Match (+10 pts) [cite: 3, 9]
-  if (f1.aircraft.liveryId === f2.aircraft.liveryId) {
-    score += 10;
-    matches.push('LIVERY_MATCH');
-  }
-
-  // --- 3. WORLD STATUS MATCH (Source 5) ---
-  // Cross-reference departure/arrival ICAOs 
-  if (Array.isArray(worldData)) {
-    for (const airport of worldData) {
-      const f1In = airport.inboundFlights?.includes(f1.flightId);
-      const f2In = airport.inboundFlights?.includes(f2.flightId);
-      const f1Out = airport.outboundFlights?.includes(f1.flightId);
-      const f2Out = airport.outboundFlights?.includes(f2.flightId);
-
-      if ((f1In && f2In) || (f1Out && f2Out)) {
-        score += 20; 
-        matches.push('AIRPORT_STATUS_MATCH');
-        break; 
-      }
-    }
-  }
-
-  // Minimum threshold to be considered a group flight [cite: 1, 4]
-  return score >= 15 ? { score, reasons: matches, distance: dist } : null;
-}
-
 
 // ⬇️ UPDATED: Dynamic poll interval logic
 let nextBroadcastPollMs = 0; // Initialize to 0 so we calculate it dynamically
@@ -1244,7 +1096,6 @@ let nextBroadcastPollMs = 0; // Initialize to 0 so we calculate it dynamically
 async function pollAndBroadcastFlights() {
   let sessions = [];
   try {
-    // Uses the existing cache logic to avoid API spam
     sessions = await getSessions();
   } catch (e) {
     console.warn('[broadcast] Sessions fetch failed', e?.message);
@@ -1260,100 +1111,31 @@ async function pollAndBroadcastFlights() {
     const roomName = serverName.toLowerCase();
     const room = io.sockets.adapter.rooms.get(roomName);
 
-    // If no one is in the room, skip the PROCESSING to save resources
-    // (We still run the loop, but we skip the heavy math/fetching if not needed)
+    // Optional: optimization to skip if room is empty
     if (!room || room.size === 0) {
-       // Optional: You can uncomment the 'continue' below if you want to strictly 
-       // stop fetching data for empty servers, but keeping the cache warm is often better.
        // continue; 
     }
 
     try {
       const rawFlights = await getFlightsForSession(sessionId);
+      
+      // Blip Guard Logic
       const newFlightCount = (Array.isArray(rawFlights) ? rawFlights.length : 0);
       const cachedData = apiCache.flights.get(sessionId);
       const cachedFlightCount = (cachedData && cachedData.count > 0) ? cachedData.count : 0;
-      
-      // Blip guard: Prevents broadcasting empty lists if the API momentarily fails
+
       if ((newFlightCount === 0 && cachedFlightCount > 0) || 
           (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50))) {
         console.warn(`[broadcast] ⚠️ BLIP GUARD: Skipping ${serverName}`);
         continue;
       }
 
-      const simplifiedFlights = rawFlights.map(simplifyFlight);
-      
-      // ICAO REVERSE LOOKUP LOGIC
-      const secondaryCache = apiCache.secondary.get(sessionId);
-      const worldData = secondaryCache?.world || [];
-      const flightAirportsMap = new Map();
-      for (const airport of worldData) {
-        const icao = airport.airportIcao;
-        if (Array.isArray(airport.outboundFlights)) {
-          airport.outboundFlights.forEach(fId => {
-            const entry = flightAirportsMap.get(fId) || {};
-            flightAirportsMap.set(fId, { ...entry, dep: icao });
-          });
-        }
-        if (Array.isArray(airport.inboundFlights)) {
-          airport.inboundFlights.forEach(fId => {
-            const entry = flightAirportsMap.get(fId) || {};
-            flightAirportsMap.set(fId, { ...entry, arr: icao });
-          });
-        }
-      }
+      const finalFlights = rawFlights.map(simplifyFlight);
 
-      // GROUP DETECTION LOGIC
-      const groups = [];
-      const flightToGroupMap = new Map();
-
-      for (let i = 0; i < simplifiedFlights.length; i++) {
-        for (let j = i + 1; j < simplifiedFlights.length; j++) {
-          const f1 = simplifiedFlights[i];
-          const f2 = simplifiedFlights[j];
-          const connection = evaluateGroupConnection(f1, f2, worldData);
-          if (connection) {
-            let gIdx1 = flightToGroupMap.get(f1.flightId);
-            let gIdx2 = flightToGroupMap.get(f2.flightId);
-            if (gIdx1 !== undefined) {
-              groups[gIdx1].members.push(f2.flightId);
-              groups[gIdx1].confidenceScore += connection.score;
-              flightToGroupMap.set(f2.flightId, gIdx1);
-            } else if (gIdx2 !== undefined) {
-              groups[gIdx2].members.push(f1.flightId);
-              groups[gIdx2].confidenceScore += connection.score;
-              flightToGroupMap.set(f1.flightId, gIdx2);
-            } else {
-              const newIdx = groups.length;
-              const gId = `group_${f1.flightId.slice(0,5)}`;
-              groups.push({
-                groupId: gId,
-                members: [f1.flightId, f2.flightId],
-                confidenceScore: connection.score,
-                criteriaMet: connection.reasons
-              });
-              flightToGroupMap.set(f1.flightId, newIdx);
-              flightToGroupMap.set(f2.flightId, newIdx);
-            }
-          }
-        }
-      }
-
-      // Map everything back to the final flight objects
-      const finalFlights = simplifiedFlights.map(f => {
-        const groupIndex = flightToGroupMap.get(f.flightId);
-        const airports = flightAirportsMap.get(f.flightId) || {};
-        
-        return {
-          ...f,
-          groupId: groupIndex !== undefined ? groups[groupIndex].groupId : null,
-          departureIcao: airports.dep || null,
-          arrivalIcao: airports.arr || null
-        };
-      });
-
-      // --- ⬇️ SQLITE HISTORY LOGIC (30s THROTTLE) ⬇️ ---
+      // --- ⬇️ SQLITE HISTORY SAVING (Ported from your old function) ⬇️ ---
       const now = Date.now();
+      
+      // Filter flights to only update DB once every 30 seconds per flight
       const flightsToSave = finalFlights.filter(f => {
         const lastSave = apiCache.lastRedisSave.get(f.flightId) || 0;
         if (now - lastSave >= 30000) {
@@ -1362,19 +1144,23 @@ async function pollAndBroadcastFlights() {
         }
         return false;
       });
+
+      // Execute the save
       if (flightsToSave.length > 0) {
         updateBatch(flightsToSave);
       }
       // --- ⬆️ END SQLITE LOGIC ⬆️ ---
+
 
       const payload = {
         server: serverName,
         sessionId: sessionId,
         count: finalFlights.length,
         flights: finalFlights,
-        groups: groups.map(g => ({ ...g, members: [...new Set(g.members)] })),
         timestamp: new Date().toISOString()
       };
+
+      // Update Cache and Broadcast
       apiCache.flights.set(sessionId, payload);
 
       if (room && room.size > 0) {
@@ -1384,8 +1170,7 @@ async function pollAndBroadcastFlights() {
     } catch (e) {
       console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
       if (e?.message?.includes('429')) {
-          nextBroadcastPollMs = 60000;
-          apiCache.flights.delete(sessionId);
+         nextBroadcastPollMs = 60000; 
       }
     }
   }
