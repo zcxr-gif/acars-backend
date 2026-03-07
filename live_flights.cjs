@@ -22,7 +22,8 @@ const whitelist = [
     'https://inflight.info',        
     'https://deploy-preview-6--indgo-va.netlify.app',
     'https://site--indgo-backend--6dmjph8ltlhv.code.run',
-    "capacitor://inflight-secure"
+    "capacitor://inflight-secure",
+    "http://localhost:8888"
 ];
 
 const corsOptions = {
