@@ -11,7 +11,7 @@ const cors = require('cors');
 const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs');
 require('dotenv').config();
 
-// ⬇️ 1. IMPORT HTTP and SOCKET.IO
+// ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 
