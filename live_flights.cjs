@@ -87,6 +87,7 @@ const apiCache = {
   flights: new Map(), // sessionId -> { server, sessionId, count, flights, timestamp }
   tracks: [],
   secondary: new Map(), // sessionId -> { atc: [], notams: [], world: [], timestamp: ... }
+  flightRouting: new Map(),
   lastSessionsUpdate: 0,
   // ⬇️ NEW: Add a cache for the VA pilot roster
   vaRosterCache: new Map(), // Stores { lowercase_username -> { role: '...' } }
@@ -691,10 +692,11 @@ async function getFlightsForSession(sessionId) {
 }
 
 
-function simplifyFlight(f) {
+function simplifyFlight(f, sessionId) {
   const aircraftId = f?.aircraftId || null;
   const liveryId = f?.liveryId || null;
   const username = f?.username || null;
+  const flightId = f?.flightId || null;
   
   // Resolve readable names from maps
   const aircraftName = aircraftNameMap.get(aircraftId) || null;
@@ -706,14 +708,27 @@ function simplifyFlight(f) {
   const vaRole = profile?.role || null;
   const isStaff = vaRole ? VA_STAFF_ROLES.includes(vaRole.toLowerCase()) : false;
 
+  // ⬇️ NEW: Grab routing info from our persistent cache
+  let arrivalIcao = f?.arrivalIcao || null;
+  let departureIcao = f?.departureIcao || null;
+
+  if (sessionId && flightId && apiCache.flightRouting.has(sessionId)) {
+      const sessionRouting = apiCache.flightRouting.get(sessionId);
+      const routing = sessionRouting.get(flightId);
+      if (routing) {
+          arrivalIcao = routing.arrivalIcao || arrivalIcao;
+          departureIcao = routing.departureIcao || departureIcao;
+      }
+  }
+
   return {
-    flightId: f?.flightId || null,
+    flightId: flightId,
     userId: f?.userId || null,
     callsign: f?.callsign || '',
     username: username,
     virtualOrganization: f?.virtualOrganization || null,
-    arrivalIcao: f?.arrivalIcao || null,  
-    departureIcao: f?.departureIcao || null, 
+    arrivalIcao: arrivalIcao,  
+    departureIcao: departureIcao, 
     isVAMember,
     isStaff,
     vaRole,
@@ -1114,12 +1129,12 @@ async function pollAndBroadcastFlights() {
 
     // Optional: optimization to skip if room is empty
     if (!room || room.size === 0) {
-       // continue; 
+       // continue;
     }
 
     try {
       const rawFlights = await getFlightsForSession(sessionId);
-      
+
       // Blip Guard Logic
       const newFlightCount = (Array.isArray(rawFlights) ? rawFlights.length : 0);
       const cachedData = apiCache.flights.get(sessionId);
@@ -1131,11 +1146,23 @@ async function pollAndBroadcastFlights() {
         continue;
       }
 
-      const finalFlights = rawFlights.map(simplifyFlight);
+      // ⬇️ NEW: Cleanup disconnected flights from routing cache to prevent memory leaks
+      if (Array.isArray(rawFlights) && apiCache.flightRouting.has(sessionId)) {
+          const activeFlightIds = new Set(rawFlights.map(f => f.flightId));
+          const sessionRouting = apiCache.flightRouting.get(sessionId);
+          
+          for (const cachedFlightId of sessionRouting.keys()) {
+              if (!activeFlightIds.has(cachedFlightId)) {
+                  sessionRouting.delete(cachedFlightId); // Clears data when user leaves
+              }
+          }
+      }
+
+      // Pass sessionId to simplifyFlight so it can pull from the cache
+      const finalFlights = rawFlights.map(f => simplifyFlight(f, sessionId));
 
       // --- ⬇️ SQLITE HISTORY SAVING (Ported from your old function) ⬇️ ---
       const now = Date.now();
-      
       // Filter flights to only update DB once every 30 seconds per flight
       const flightsToSave = finalFlights.filter(f => {
         const lastSave = apiCache.lastRedisSave.get(f.flightId) || 0;
@@ -1152,7 +1179,6 @@ async function pollAndBroadcastFlights() {
       }
       // --- ⬆️ END SQLITE LOGIC ⬆️ ---
 
-
       const payload = {
         server: serverName,
         sessionId: sessionId,
@@ -1163,7 +1189,6 @@ async function pollAndBroadcastFlights() {
 
       // Update Cache and Broadcast
       apiCache.flights.set(sessionId, payload);
-
       if (room && room.size > 0) {
         io.to(roomName).emit('all_flights_update', payload);
       }
@@ -1171,7 +1196,7 @@ async function pollAndBroadcastFlights() {
     } catch (e) {
       console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
       if (e?.message?.includes('429')) {
-         nextBroadcastPollMs = 60000; 
+         nextBroadcastPollMs = 60000;
       }
     }
   }
@@ -1242,11 +1267,12 @@ async function pollAndBroadcastSecondary() {
   for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
     if (!sessionId) continue;
-    
-    // Check if anyone is actually in this room before doing the heavy lifting?
-    // Optional optimization:
-    // const room = io.sockets.adapter.rooms.get(serverName.toLowerCase());
-    // if (!room || room.size === 0) continue; 
+
+    // ⬇️ NEW: Initialize session routing cache if it doesn't exist
+    if (!apiCache.flightRouting.has(sessionId)) {
+        apiCache.flightRouting.set(sessionId, new Map());
+    }
+    const sessionRouting = apiCache.flightRouting.get(sessionId);
 
     try {
       // Fetch ATC, NOTAMs, and World Status in parallel
@@ -1255,6 +1281,35 @@ async function pollAndBroadcastSecondary() {
         getNotams(sessionId).catch(() => []),
         getWorldStatus(sessionId).catch(() => [])
       ]);
+
+      // ⬇️ NEW: Process world data to map departures and arrivals into memory
+      if (Array.isArray(world)) {
+        for (const airport of world) {
+          const icao = airport.airportIcao;
+          if (!icao) continue;
+
+          // Process Departures (Outbound)
+          if (Array.isArray(airport.outboundFlights)) {
+            for (const flightId of airport.outboundFlights) {
+              if (!sessionRouting.has(flightId)) {
+                sessionRouting.set(flightId, { departureIcao: null, arrivalIcao: null });
+              }
+              sessionRouting.get(flightId).departureIcao = icao;
+            }
+          }
+
+          // Process Arrivals (Inbound)
+          if (Array.isArray(airport.inboundFlights)) {
+            for (const flightId of airport.inboundFlights) {
+              if (!sessionRouting.has(flightId)) {
+                sessionRouting.set(flightId, { departureIcao: null, arrivalIcao: null });
+              }
+              sessionRouting.get(flightId).arrivalIcao = icao;
+            }
+          }
+        }
+      }
+
       const payload = {
         server: serverName,
         sessionId: sessionId,
@@ -1263,8 +1318,10 @@ async function pollAndBroadcastSecondary() {
         world: world,
         timestamp: new Date().toISOString()
       };
+
       // 1. Update Cache
       apiCache.secondary.set(sessionId, payload);
+
       // 2. Broadcast to room
       const roomName = serverName.toLowerCase();
       const room = io.sockets.adapter.rooms.get(roomName);
@@ -1487,7 +1544,8 @@ app.get('/flights/:sessionId', async (req, res) => {
   console.warn(`[api] /flights/${sessionId} cache miss. Fetching live.`);
   try {
     const flights = await getFlightsForSession(sessionId);
-    let simplified = flights.map(simplifyFlight);
+    // Pass sessionId here so it maps routing correctly
+    let simplified = flights.map(f => simplifyFlight(f, sessionId)); 
     if (callsignFilter) {
       const suffix = callsignFilter.toUpperCase();
       simplified = simplified.filter(f =>
