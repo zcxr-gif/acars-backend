@@ -25,32 +25,29 @@ const whitelist = [
     "capacitor://inflight-secure",
     "http://localhost:8888"
 ];
-
 const corsOptions = {
     origin: function (origin, callback) {
         // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
-        
         if (whitelist.indexOf(origin) !== -1) {
-            callback(null, true); // Origin is in the whitelist, allow it
+            callback(null, true);
+        // Origin is in the whitelist, allow it
         } else {
-            callback(new Error('Not allowed by CORS')); // Origin is not allowed
+            callback(new Error('Not allowed by CORS'));
+        // Origin is not allowed
         }
     },
     optionsSuccessStatus: 200
 };
-
 // 1. Apply CORS to Socket.IO
 const io = new Server(httpServer, {
   cors: corsOptions
 });
-
 // 2. Apply CORS to Express (for API requests like /if-sessions)
 app.use(cors(corsOptions));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-
 /* =========================
  * Config
  * ========================= */
@@ -63,11 +60,11 @@ const IF_API_KEY = RAW_IF_KEY.trim();
 const VA_BACKEND_URL = (process.env.VA_BACKEND_URL || 'http://localhost:5000').trim();
 const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 1000), 10); // 5 minutes
 const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
-
 const ACTIVE_POLL_MS = 10000; // 10 seconds (User connected)
 const IDLE_POLL_MS = 30000;   // 30 seconds (No users)
 
-const SECONDARY_ACTIVE_MS = 30000; // 30 seconds (User connected)
+const SECONDARY_ACTIVE_MS = 30000;
+// 30 seconds (User connected)
 const SECONDARY_IDLE_MS = 120000;   // 120 seconds (No users)
 
 /* =========================
@@ -81,7 +78,6 @@ const VA_STAFF_ROLES = [
   'head of training (cot)', 'chief marketing officer (cmo)', 'route manager (rm)',
   'events manager (em)', 'flight instructor (fi)'
 ];
-
 const apiCache = {
   sessions: [],
   flights: new Map(), // sessionId -> { server, sessionId, count, flights, timestamp }
@@ -94,8 +90,7 @@ const apiCache = {
   lastRedisSave: new Map(),
 };
 // Cache sessions for 1 minute to prevent spamming the /sessions endpoint
-const SESSIONS_CACHE_TTL_MS = 60 * 1000; 
-
+const SESSIONS_CACHE_TTL_MS = 60 * 1000;
 /* =========================
  * Axios client
  * ========================= */
@@ -107,19 +102,19 @@ const ifClient = axios.create({
     Accept: 'application/json',
   },
 });
-
 /* =========================
  * Data Loaders (Aircraft & Liveries)
  * ========================= */
-const aircraftNameMap = new Map(); // Map to store aircraft names (ID -> Name)
-const liveryNameMap = new Map();   // Map to store livery names (ID -> Name)
+const aircraftNameMap = new Map();
+// Map to store aircraft names (ID -> Name)
+const liveryNameMap = new Map();
+// Map to store livery names (ID -> Name)
 
 // NEW: Global storage to serve via API
 const globalMetadata = {
   aircraft: [],
   liveries: []
 };
-
 (async function loadMetadata() {
   try {
     if (!IF_API_KEY) {
@@ -138,7 +133,8 @@ const globalMetadata = {
   
     console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types.`);
 
-    // 2. Load Liveries from API
+    
+// 2. Load Liveries from API
     const liveryList = await getAllLiveries();
     globalMetadata.liveries = liveryList;
     for (const livery of liveryList) {
@@ -158,44 +154,42 @@ const globalMetadata = {
 /**
  * Fetches the pilot roster (IF Username + Role) from the main VA backend
  * and populates the in-memory vaRosterCache.
- */
+*/
 async function fetchVaRoster() {
   if (!VA_BACKEND_URL || !TRACK_WEBHOOK_SECRET) {
     console.warn('[va-roster] Skipping fetch: VA_BACKEND_URL or TRACK_WEBHOOK_SECRET is not set.');
-    return;
+return;
   }
   
   console.log('[va-roster] Fetching VA pilot roster...');
-
-  try {
+try {
     const { data: roster } = await axios.get(`${VA_BACKEND_URL}/api/internal/pilot-roster`, {
       timeout: 10000,
       headers: {
         'x-acars-signature': TRACK_WEBHOOK_SECRET
       }
     });
-
-    if (!Array.isArray(roster)) {
+if (!Array.isArray(roster)) {
       console.warn('[va-roster] Failed to update: Response was not an array.');
       return;
-    }
+}
     
     // Clear old cache and repopulate
     const newCache = new Map();
-    for (const pilot of roster) {
+for (const pilot of roster) {
       if (pilot.username) {
         newCache.set(pilot.username.toLowerCase(), {
           role: pilot.role || 'pilot'
         });
-      }
+}
     }
     
     apiCache.vaRosterCache = newCache;
-    console.log(`✅ [va-roster] Successfully loaded ${apiCache.vaRosterCache.size} VA pilots into cache.`);
+console.log(`✅ [va-roster] Successfully loaded ${apiCache.vaRosterCache.size} VA pilots into cache.`);
 
   } catch (e) {
     console.error(`❌ [va-roster] Failed to fetch VA roster from ${VA_BACKEND_URL}: ${e.message}`);
-  }
+}
 }
 
 /**
@@ -211,8 +205,6 @@ async function fetchVaRoster() {
       setTimeout(runRosterPoller, VA_ROSTER_POLL_MS);
     });
 })();
-
-
 /* =========================
  * Helpers
  * ========================= */
@@ -220,14 +212,13 @@ async function fetchVaRoster() {
 /**
  * ⬇️ NEW: Batch Fetcher for Routes
  * Fetches routes for multiple flight IDs in parallel.
- * Returns a map: { [flightId]: routeData[] }
+* Returns a map: { [flightId]: routeData[] }
  * If a specific flight fails (e.g. 404), it returns null for that ID instead of crashing.
- */
+*/
 async function getBatchFlightRoutes(sessionId, flightIds) {
   if (!sessionId) throw new Error('Missing sessionId');
   if (!Array.isArray(flightIds) || flightIds.length === 0) return {};
-
-  const results = {};
+const results = {};
   
   // Create an array of promises
   const promises = flightIds.map(async (flightId) => {
@@ -238,13 +229,13 @@ async function getBatchFlightRoutes(sessionId, flightIds) {
       results[flightId] = simplifyFlightRoute(rawRoute);
     } catch (e) {
       // If one flight fails (e.g. pilot disconnected), we just return null for that ID
-      // This prevents the whole batch from breaking.
+      // This prevents the whole 
+batch from breaking.
       // console.warn(`[batch-route] Could not fetch route for ${flightId}: ${e.message}`);
       results[flightId] = null;
     }
   });
-
-  // Wait for all requests to finish (whether success or fail)
+// Wait for all requests to finish (whether success or fail)
   await Promise.allSettled(promises);
   
   return results;
@@ -254,7 +245,8 @@ function unwrap(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data;
   if (Array.isArray(data.result)) return data.result;
-  return data.result ?? data.items ?? [];
+  return data.result ??
+data.items ?? [];
 }
 
 function err(status, message, extra = {}) {
@@ -271,35 +263,35 @@ function err(status, message, extra = {}) {
  * ========================= */
 
 /**
- * Fetches the current Oceanic Tracks from the Infinite Flight API [cite: 1]
+ * Fetches the current Oceanic Tracks from the Infinite Flight API
  */
 async function getOceanicTracks() {
   const url = '/tracks';
-  try {
+try {
     const { data } = await ifClient.get(url);
-    
-    // Validate response and check for errorCode 0 (Ok) [cite: 3, 4]
-    const payload = data && typeof data === 'object' ? data : {};
+// Validate response and check for errorCode 0 (Ok)
+    const payload = data && typeof data === 'object' ?
+data : {};
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
        throw new Error(`IF API errorCode ${payload.errorCode}`);
-    }
+}
 
     const items = unwrap(data);
     
-    // Map the response to the OceanicTrack schema [cite: 5, 6, 7]
+    // Map the response to the OceanicTrack schema
     return items.map(track => ({
-      name: track.name,           // Usually letters like 'A', 'B' [cite: 5]
+      name: track.name,           // Usually letters like 'A', 'B'
       path: track.path,           // Array of waypoints/coordinates 
       eastLevels: track.eastLevels, // Altitudes for eastbound flight 
-      westLevels: track.westLevels, // Altitudes for westbound flight [cite: 7]
-      type: track.type,           // Usually "North Atlantic Tracks" [cite: 7]
-      lastSeen: track.lastSeen     // Last update timestamp [cite: 9]
+      westLevels: track.westLevels, // Altitudes for westbound flight
+      type: track.type,           // Usually "North Atlantic Tracks"
+      lastSeen: track.lastSeen     // Last update timestamp
     }));
-  } catch (e) {
-    // Retry with query param if Authorization header fails [cite: 1, 2]
+} catch (e) {
+    // Retry with query param if Authorization header fails
     if (e?.response?.status === 401 || e?.response?.status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      return unwrap(retry);
+return unwrap(retry);
     }
     throw e;
   }
@@ -318,47 +310,42 @@ async function getOceanicTracks() {
     .finally(() => {
       // 24 Hour Refresh (24h * 60m * 60s * 1000ms)
       const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-      setTimeout(runTracksPoller, TWENTY_FOUR_HOURS);
+    
+  setTimeout(runTracksPoller, TWENTY_FOUR_HOURS);
     });
 })();
 
 async function getAircraftList() {
   const { data } = await ifClient.get('/aircraft');
-  const items = unwrap(data);
+const items = unwrap(data);
   return items.map((a) => ({
     id: a?.id || null,
     name: a?.name || '',
   })).filter(a => a.id && a.name);
 }
 
+// ⬇️ REPLACED: Get User Logbook mapping all properties properly
 async function getUserLogbook(userId, page = 1) {
   if (!userId) throw new Error('Missing userId');
   
-  // Documentation Source: 1, 17
-  // GET /users/{userId}/flights
   const url = `/users/${encodeURIComponent(userId)}/flights`;
-  const params = { page, apikey: IF_API_KEY }; // Source 18: Adding apikey param
-
+  const params = { page, apikey: IF_API_KEY };
+  
   try {
     const { data } = await ifClient.get(url, { params });
-    
-    // Manual error check based on Documentation Source 24 (errorCode)
     const payload = data && typeof data === 'object' ? data : {};
+    
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
        const err = new Error(`IF API errorCode ${payload.errorCode}`);
        err.response = { data: payload };
        throw err;
     }
-
-    // Return the 'result' object (PaginatedList)
+    
     return payload.result || null;
-
   } catch (e) {
     const status = e?.response?.status;
     
-    // Standard retry logic for 401/403
     if (status === 401 || status === 403) {
-      // Retry with explicit query param if header failed
       const { data: retry } = await ifClient.get(url, { params });
       const payload = retry && typeof retry === 'object' ? retry : {};
       
@@ -370,7 +357,6 @@ async function getUserLogbook(userId, page = 1) {
       return payload.result || null;
     }
     
-    // UserNotFound (errorCode 1) might return 404 or 400 depending on API version
     if (status === 404) {
       return null;
     }
@@ -379,203 +365,181 @@ async function getUserLogbook(userId, page = 1) {
   }
 }
 
-// ⬇️ REPLACEMENT FUNCTION
 async function getLiveriesForAircraft(aircraftId) {
   if (!aircraftId) throw new Error('Missing aircraftId');
-  
-  // Use the specific endpoint for a single aircraft model
+// Use the specific endpoint for a single aircraft model
   const url = `/aircraft/${encodeURIComponent(aircraftId)}/liveries`;
-
-  try {
+try {
     const { data } = await ifClient.get(url);
-    
-    // Use your existing unwrap helper to handle the response safely
-    const items = unwrap(data); 
-
-    // Map the results to match your existing data structure
+// Use your existing unwrap helper to handle the response safely
+    const items = unwrap(data);
+// Map the results to match your existing data structure
     return items.map((l) => ({
       id: l?.id || null,
       name: l?.liveryName || '',
       aircraftId: l?.aircraftID || aircraftId, // Note: API sometimes uses 'aircraftID' or 'aircraftId'
       aircraftName: l?.aircraftName || ''
     })).filter(l => l.id && l.name);
-
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status;
-    
-    // Retry logic for 401/403 (Token Expiry)
+// Retry logic for 401/403 (Token Expiry)
     if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const items = unwrap(retry);
+const items = unwrap(retry);
       return items.map((l) => ({
         id: l?.id || null,
         name: l?.liveryName || '',
         aircraftId: l?.aircraftID || aircraftId,
         aircraftName: l?.aircraftName || ''
       })).filter(l => l.id && l.name);
-    }
+}
     
     // If the aircraft ID is invalid, return empty array instead of crashing
     if (status === 404) {
       return [];
-    }
+}
     
     throw e;
-  }
+}
 }
 
 async function getAirportInfo(icao) {
   if (!icao) throw new Error('Missing airport ICAO');
   
   const cleanIcao = icao.toUpperCase().trim();
-  // Documentation Source 1: GET .../airport/{airportIcao}
   const url = `/airport/${encodeURIComponent(cleanIcao)}`;
-
-  try {
+try {
     const { data } = await ifClient.get(url);
-    
-    // Manual error check based on Documentation Source 5 (errorCode)
-    const payload = data && typeof data === 'object' ? data : {};
+    const payload = data && typeof data === 'object' ?
+data : {};
     
     // Check if errorCode is not 0 (Ok)
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
        const err = new Error(`IF API errorCode ${payload.errorCode}`);
-       err.response = { data: payload };
+err.response = { data: payload };
        throw err;
     }
 
     // Return the 'result' object (AirportInfo)
-    return payload.result || null;
+    return payload.result ||
+null;
 
   } catch (e) {
     const status = e?.response?.status;
-    
-    // Standard retry logic for 401/403 (Token Expiry)
+// Standard retry logic for 401/403 (Token Expiry)
     if (status === 401 || status === 403) {
-      // Documentation Source 1: fallback to adding apikey query parameter
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
          const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-         err.response = { data: payload };
+err.response = { data: payload };
          throw err;
       }
 
       return payload.result || null;
-    }
+}
 
     // If API returns 404, it means the airport doesn't exist
     if (status === 404) {
       return null;
-    }
+}
     
     throw e;
-  }
+}
 }
 
 async function getAirportAtis(sessionId, icao) {
   if (!sessionId || !icao) throw new Error('Missing sessionId or airport ICAO');
-  
-  const cleanIcao = icao.toUpperCase().trim();
-  // Documentation Source 1: GET .../sessions/{sessionId}/airport/{airportIcao}/atis
+const cleanIcao = icao.toUpperCase().trim();
   const url = `/sessions/${encodeURIComponent(sessionId)}/airport/${encodeURIComponent(cleanIcao)}/atis`;
-
-  try {
+try {
     const { data } = await ifClient.get(url);
-    
-    // Manual error check based on Documentation Source 5 (errorCode)
-    const payload = data && typeof data === 'object' ? data : {};
+    const payload = data && typeof data === 'object' ?
+data : {};
     
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
-       // Documentation Source 4: errorCode 7 means "NoAtisAvailable"
+       // errorCode 7 means "NoAtisAvailable"
        // We return null strictly for this case, so it's not treated as a crash.
-       if (payload.errorCode === 7) {
-         return null; 
-       }
+if (payload.errorCode === 7) {
+         return null;
+}
 
        const err = new Error(`IF API errorCode ${payload.errorCode}`);
-       err.response = { data: payload };
+err.response = { data: payload };
        throw err;
     }
 
     // Return the 'result' string (The ATIS message)
-    return payload.result || null;
+    return payload.result ||
+null;
 
   } catch (e) {
     const status = e?.response?.status;
-    
-    // Standard retry logic for 401/403 (Token Expiry)
+// Standard retry logic for 401/403 (Token Expiry)
     if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
-         if (payload.errorCode === 7) return null; // Handle "No ATIS" on retry as well
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+         if (payload.errorCode === 7) return null;
+// Handle "No ATIS" on retry as well
 
          const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-         err.response = { data: payload };
+err.response = { data: payload };
          throw err;
       }
 
       return payload.result || null;
-    }
+}
 
     // If API returns 404, the session or endpoint might be invalid
     if (status === 404) {
       return null;
-    }
+}
     
     throw e;
-  }
+}
 }
 
 async function getAirportStatus(sessionId, icao) {
   if (!sessionId || !icao) throw new Error('Missing sessionId or airport ICAO');
-  
-  const cleanIcao = icao.toUpperCase().trim();
-  // Documentation Source 1: GET .../sessions/{sessionId}/airport/{airportIcao}/status
+const cleanIcao = icao.toUpperCase().trim();
   const url = `/sessions/${encodeURIComponent(sessionId)}/airport/${encodeURIComponent(cleanIcao)}/status`;
-
-  try {
+try {
     const { data } = await ifClient.get(url);
-    
-    // Manual error check based on Documentation Source 5 (errorCode)
-    const payload = data && typeof data === 'object' ? data : {};
+    const payload = data && typeof data === 'object' ?
+data : {};
     
     // Check if errorCode is not 0 (Ok) 
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
        // errorCode 5 is ServerNotFound, 6 is FlightNotFound, etc. 
        const err = new Error(`IF API errorCode ${payload.errorCode}`);
-       err.response = { data: payload };
+err.response = { data: payload };
        throw err;
     }
 
     // Return the 'result' object (AirportStatus) which contains inboundFlights, atcFacilities, etc.
-    return payload.result || null;
+    return payload.result ||
+null;
 
   } catch (e) {
     const status = e?.response?.status;
-    
-    // Standard retry logic for 401/403 (Token Expiry)
+// Standard retry logic for 401/403 (Token Expiry)
     if (status === 401 || status === 403) {
-      // Documentation Source 2: fallback to adding apikey query parameter
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
          const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-         err.response = { data: payload };
+err.response = { data: payload };
          throw err;
       }
 
       return payload.result || null;
-    }
+}
 
     // If API returns 404, it might mean the session or airport is invalid in this context
     if (status === 404) {
       return null;
-    }
+}
     
     throw e;
   }
@@ -583,58 +547,53 @@ async function getAirportStatus(sessionId, icao) {
 
 async function getAllLiveries() {
   const url = '/aircraft/liveries';
-  try {
+try {
     const { data } = await ifClient.get(url);
     const items = unwrap(data);
-    
-    // Map the results according to the 'LiveryData' definition you provided
+// Map the results according to the 'LiveryData' definition you provided
     return items.map((l) => ({
       id: l?.id || null,
       name: l?.liveryName || '',
       aircraftId: l?.aircraftID || null, // Note: API doc says 'aircraftID' (capital D)
       aircraftName: l?.aircraftName || ''
     })).filter(l => l.id && l.name);
-
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status;
-    
-    // Standard retry logic for 401/403 (Token Expiry)
+// Standard retry logic for 401/403 (Token Expiry)
     if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const items = unwrap(retry);
+const items = unwrap(retry);
       return items.map((l) => ({
         id: l?.id || null,
         name: l?.liveryName || '',
         aircraftId: l?.aircraftID || null,
         aircraftName: l?.aircraftName || ''
       })).filter(l => l.id && l.name);
-    }
+}
     
     throw e;
-  }
+}
 }
 
 /**
- * ⬇️ REPLACED FUNCTION
  * This function now uses the in-memory cache to avoid spamming the API.
- */
+*/
 async function getSessions() {
   const now = Date.now();
   // 1. Check if cache is valid (not older than TTL and not empty)
   if (now - apiCache.lastSessionsUpdate < SESSIONS_CACHE_TTL_MS && apiCache.sessions.length > 0) {
     return apiCache.sessions;
-  }
+}
   
   console.log('[getSessions] Fetching fresh sessions from API.');
   const { data } = await ifClient.get('/sessions');
-  const items = unwrap(data);
+const items = unwrap(data);
   const sessions = items.map((s) => ({
     id: s?.id || s?.uuid || null,
     name: s?.name || s?.serverName || '',
     raw: s,
   })).filter(s => s.id && s.name);
-  
-  // 3. Update cache
+// 3. Update cache
   apiCache.sessions = sessions;
   apiCache.lastSessionsUpdate = now;
   return sessions;
@@ -642,20 +601,20 @@ async function getSessions() {
 
 function pickSessionIdByName(sessions, desiredName = 'Expert Server') {
   if (!Array.isArray(sessions) || sessions.length === 0) return null;
-  const want = String(desiredName || '').trim().toLowerCase();
+const want = String(desiredName || '').trim().toLowerCase();
   const exact = sessions.find(s => (s.name || '').toLowerCase() === want);
   if (exact) return exact.id;
-  const fuzzy = sessions.find(s => (s.name || '').toLowerCase().includes(want));
+const fuzzy = sessions.find(s => (s.name || '').toLowerCase().includes(want));
   if (fuzzy) return fuzzy.id;
-  const aliases = {
+const aliases = {
     expert: ['expert server', 'expert'],
     training: ['training server', 'training'],
     casual: ['casual server', 'casual'],
   };
-  for (const [key, keys] of Object.entries(aliases)) {
+for (const [key, keys] of Object.entries(aliases)) {
     if (keys.includes(want)) {
       const found = sessions.find(s => (s.name || '').toLowerCase().includes(key));
-      if (found) return found.id;
+if (found) return found.id;
     }
   }
   return sessions[0]?.id ?? null;
@@ -663,84 +622,93 @@ function pickSessionIdByName(sessions, desiredName = 'Expert Server') {
 
 async function getFlightsForSession(sessionId) {
   if (!sessionId) throw new Error('Missing sessionId');
-  try {
+try {
     const { data } = await ifClient.get(`/sessions/${encodeURIComponent(sessionId)}/flights`);
-    const payload = data && typeof data === 'object' ? data : {};
-    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = data && typeof data === 'object' ? data : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
       const err = new Error(`IF API errorCode ${payload.errorCode}`);
-      err.response = { data: payload };
+err.response = { data: payload };
       throw err;
     }
-    return Array.isArray(payload.result) ? payload.result : (Array.isArray(data) ? data : []);
+    return Array.isArray(payload.result) ?
+payload.result : (Array.isArray(data) ? data : []);
   } catch (e) {
     const status = e?.response?.status;
-    if (status === 401 || status === 403 || status === 404) {
+if (status === 401 || status === 403 || status === 404) {
       const { data: retry } = await ifClient.get(
         `/sessions/${encodeURIComponent(sessionId)}/flights`,
         { params: { apikey: IF_API_KEY } }
       );
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-        err.response = { data: payload };
+err.response = { data: payload };
         throw err;
       }
-      return Array.isArray(payload.result) ? payload.result : (Array.isArray(retry) ? retry : []);
+      return Array.isArray(payload.result) ?
+payload.result : (Array.isArray(retry) ? retry : []);
     }
     throw e;
-  }
+}
 }
 
 
 function simplifyFlight(f, sessionId) {
   const aircraftId = f?.aircraftId || null;
   const liveryId = f?.liveryId || null;
-  const username = f?.username || null;
+const username = f?.username || null;
   const flightId = f?.flightId || null;
-  
-  // Resolve readable names from maps
+// Resolve readable names from maps
   const aircraftName = aircraftNameMap.get(aircraftId) || null;
   const liveryName = liveryNameMap.get(liveryId) || null;
-
-  // Simple VA Roster Check (No grouping logic)
+// Simple VA Roster Check (No grouping logic)
   const profile = username ? apiCache.vaRosterCache.get(username.toLowerCase()) : null;
-  const isVAMember = !!profile;
+const isVAMember = !!profile;
   const vaRole = profile?.role || null;
   const isStaff = vaRole ? VA_STAFF_ROLES.includes(vaRole.toLowerCase()) : false;
-
-  // ⬇️ NEW: Grab routing info from our persistent cache
+// ⬇️ NEW: Grab routing info from our persistent cache
   let arrivalIcao = f?.arrivalIcao || null;
-  let departureIcao = f?.departureIcao || null;
+let departureIcao = f?.departureIcao || null;
 
   if (sessionId && flightId && apiCache.flightRouting.has(sessionId)) {
       const sessionRouting = apiCache.flightRouting.get(sessionId);
-      const routing = sessionRouting.get(flightId);
+const routing = sessionRouting.get(flightId);
       if (routing) {
-          arrivalIcao = routing.arrivalIcao || arrivalIcao;
+          arrivalIcao = routing.arrivalIcao ||
+arrivalIcao;
           departureIcao = routing.departureIcao || departureIcao;
       }
   }
 
   return {
     flightId: flightId,
-    userId: f?.userId || null,
+    userId: f?.userId ||
+null,
     callsign: f?.callsign || '',
     username: username,
-    virtualOrganization: f?.virtualOrganization || null,
+    virtualOrganization: f?.virtualOrganization ||
+null,
     arrivalIcao: arrivalIcao,  
     departureIcao: departureIcao, 
     isVAMember,
     isStaff,
     vaRole,
     position: {
-      lat: typeof f?.latitude === 'number' ? f.latitude : null,
-      lon: typeof f?.longitude === 'number' ? f.longitude : null,
-      alt_ft: typeof f?.altitude === 'number' ? f.altitude : null,
-      gs_kt: typeof f?.speed === 'number' ? f.speed : null,
-      vs_fpm: typeof f?.verticalSpeed === 'number' ? f.verticalSpeed : null,
-      heading_deg: typeof f?.heading === 'number' ? f.heading : null,
+      lat: typeof f?.latitude === 'number' ?
+f.latitude : null,
+      lon: typeof f?.longitude === 'number' ?
+f.longitude : null,
+      alt_ft: typeof f?.altitude === 'number' ?
+f.altitude : null,
+      gs_kt: typeof f?.speed === 'number' ?
+f.speed : null,
+      vs_fpm: typeof f?.verticalSpeed === 'number' ?
+f.verticalSpeed : null,
+      heading_deg: typeof f?.heading === 'number' ?
+f.heading : null,
       lastReport: f?.lastReport || null,
-      lastReportMs: f?.lastReport ? Date.parse(f.lastReport) || null : null,
+      lastReportMs: f?.lastReport ?
+Date.parse(f.lastReport) || null : null,
     },
     aircraft: {
       aircraftId,
@@ -748,7 +716,8 @@ function simplifyFlight(f, sessionId) {
       aircraftName,
       liveryName
     },
-    pilotState: typeof f?.pilotState === 'number' ? f.pilotState : null,
+    pilotState: typeof f?.pilotState === 'number' ?
+f.pilotState : null,
     isConnected: typeof f?.isConnected === 'boolean' ? f.isConnected : null,
   };
 }
@@ -756,32 +725,32 @@ function simplifyFlight(f, sessionId) {
 async function getFlightPlan(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/flightplan`;
-  try {
+try {
     const { data } = await ifClient.get(url);
-    const payload = data && typeof data === 'object' ? data : {};
-    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = data && typeof data === 'object' ? data : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
       if (payload.errorCode === 6) return null;
-      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+const err = new Error(`IF API errorCode ${payload.errorCode}`);
       err.response = { data: payload };
       throw err;
-    }
+}
     return payload.result || null;
   } catch (e) {
     const status = e?.response?.status;
-    if (status === 401 || status === 403) {
+if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
         if (payload.errorCode === 6) return null;
-        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
         err.response = { data: payload };
         throw err;
-      }
+}
       return payload.result || null;
-    }
+}
     if (status === 404) {
       return null;
-    }
+}
     throw e;
   }
 }
@@ -789,37 +758,37 @@ async function getFlightPlan(sessionId, flightId) {
 
 function simplifyFlightPlan(plan) {
   if (!plan || !Array.isArray(plan.flightPlanItems)) {
-    return { flightPlanId: plan?.flightPlanId || null, waypoints: [] };
+    return { flightPlanId: plan?.flightPlanId ||
+null, waypoints: [] };
   }
   
   const waypoints = [];
-  
-  const extractWaypoints = (items) => {
-    if (!Array.isArray(items)) return; // Safety check
+const extractWaypoints = (items) => {
+    if (!Array.isArray(items)) return;
+// Safety check
     
     for (const item of items) {
       // According to the documentation, an item is a procedure IF it has children.
-      if (Array.isArray(item.children) && item.children.length > 0) {
+if (Array.isArray(item.children) && item.children.length > 0) {
         // This is a procedure (e.g., "L12R").
-        // Do NOT add this item itself; just process its children.
+// Do NOT add this item itself; just process its children.
         extractWaypoints(item.children);
-      } else {
+} else {
         // This is a waypoint (e.g., "AMAHE", "ZESTY", "RW12R").
-        // Add it, but keep the safety check for (0,0) locations just in case.
-        if (item.location && (item.location.latitude !== 0 || item.location.longitude !== 0)) {
+// Add it, but keep the safety check for (0,0) locations just in case.
+if (item.location && (item.location.latitude !== 0 || item.location.longitude !== 0)) {
           waypoints.push({
             name: item.name,
             lat: item.location.latitude,
             lon: item.location.longitude,
           });
-        }
+}
       }
     }
   };
   
   extractWaypoints(plan.flightPlanItems);
-  
-  return {
+return {
     flightPlanId: plan.flightPlanId,
     waypoints,
   };
@@ -828,39 +797,39 @@ function simplifyFlightPlan(plan) {
 async function getFlightRoute(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/route`;
-  try {
+try {
     const { data } = await ifClient.get(url);
-    const payload = data && typeof data === 'object' ? data : {};
-    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = data && typeof data === 'object' ? data : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
       if (payload.errorCode === 6) return [];
-      const err = new Error(`IF API errorCode ${payload.errorCode}`);
+const err = new Error(`IF API errorCode ${payload.errorCode}`);
       err.response = { data: payload };
       throw err;
-    }
+}
     return Array.isArray(payload.result) ? payload.result : [];
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status;
-    if (status === 401 || status === 403) {
+if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
         if (payload.errorCode === 6) return [];
-        const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
         err.response = { data: payload };
         throw err;
-      }
+}
       return Array.isArray(payload.result) ? payload.result : [];
-    }
+}
     if (status === 404) {
       return [];
-    }
+}
     throw e;
   }
 }
 
 function simplifyFlightRoute(routeData) {
   if (!Array.isArray(routeData)) return [];
-  return routeData.map(p => ({
+return routeData.map(p => ({
     lat: p.latitude,
     lon: p.longitude,
     altitude: p.altitude,
@@ -873,61 +842,61 @@ function simplifyFlightRoute(routeData) {
 async function getActiveATC(sessionId) {
   if (!sessionId) throw new Error('Missing sessionId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/atc`;
-  try {
+try {
     const { data } = await ifClient.get(url);
-    const payload = data && typeof data === 'object' ? data : {};
-    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = data && typeof data === 'object' ? data : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
       const err = new Error(`IF API errorCode ${payload.errorCode}`);
-      err.response = { data: payload };
+err.response = { data: payload };
       throw err;
     }
     return Array.isArray(payload.result) ? payload.result : [];
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status;
-    if (status === 401 || status === 403) {
+if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-        err.response = { data: payload };
+err.response = { data: payload };
         throw err;
       }
       return Array.isArray(payload.result) ? payload.result : [];
-    }
+}
     if (status === 404) {
       return [];
-    }
+}
     throw e;
   }
 }
 
 async function getNotams(sessionId) {
   if (!sessionId) throw new Error('Missing sessionId');
-  const url = `/sessions/${encodeURIComponent(sessionId)}/notams`;
+const url = `/sessions/${encodeURIComponent(sessionId)}/notams`;
   try {
     const { data } = await ifClient.get(url);
-    const payload = data && typeof data === 'object' ? data : {};
-    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = data && typeof data === 'object' ? data : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
       const err = new Error(`IF API errorCode ${payload.errorCode}`);
-      err.response = { data: payload };
+err.response = { data: payload };
       throw err;
     }
     return Array.isArray(payload.result) ? payload.result : [];
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status;
-    if (status === 401 || status === 403) {
+if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-        err.response = { data: payload };
+err.response = { data: payload };
         throw err;
       }
       return Array.isArray(payload.result) ? payload.result : [];
-    }
+}
     if (status === 404) {
       return [];
-    }
+}
     throw e;
   }
 }
@@ -938,92 +907,98 @@ async function getNotams(sessionId) {
  */
 async function getWorldStatus(sessionId) {
   if (!sessionId) throw new Error('Missing sessionId');
-  const url = `/sessions/${encodeURIComponent(sessionId)}/world`;
+const url = `/sessions/${encodeURIComponent(sessionId)}/world`;
   
   try {
     const { data } = await ifClient.get(url);
-    const payload = data && typeof data === 'object' ? data : {};
-    
-    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = data && typeof data === 'object' ? data : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
       const err = new Error(`IF API errorCode ${payload.errorCode}`);
-      err.response = { data: payload };
+err.response = { data: payload };
       throw err;
     }
     
     // Returns an array of AirportStatus objects
-    return Array.isArray(payload.result) ? payload.result : [];
+    return Array.isArray(payload.result) ?
+payload.result : [];
 
   } catch (e) {
     const status = e?.response?.status;
-    if (status === 401 || status === 403) {
+if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-        err.response = { data: payload };
+err.response = { data: payload };
         throw err;
       }
       return Array.isArray(payload.result) ? payload.result : [];
-    }
+}
     if (status === 404) {
       return [];
-    }
+}
     throw e;
   }
 }
 
 async function getUserStats(params) {
   const url = '/users';
-  if (!params || (!params.userIds && !params.discourseNames && !params.userHashes)) {
+if (!params || (!params.userIds && !params.discourseNames && !params.userHashes)) {
     throw new Error('At least one search parameter (userIds, discourseNames, userHashes) is required.');
-  }
+}
 
   try {
     // This is a POST request, so we send the params in the body
     const { data } = await ifClient.post(url, params);
-    const payload = data && typeof data === 'object' ? data : {};
-    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = data && typeof data === 'object' ? data : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
       const err = new Error(`IF API errorCode ${payload.errorCode}`);
-      err.response = { data: payload };
+err.response = { data: payload };
       throw err;
     }
     return Array.isArray(payload.result) ? payload.result : [];
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status;
-    // Replicate the retry logic from your other functions for consistency
+// Replicate the retry logic from your other functions for consistency
     if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.post(url, params, { params: { apikey: IF_API_KEY } });
-      const payload = retry && typeof retry === 'object' ? retry : {};
-      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+const payload = retry && typeof retry === 'object' ? retry : {};
+if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
-        err.response = { data: payload };
+err.response = { data: payload };
         throw err;
       }
       return Array.isArray(payload.result) ? payload.result : [];
-    }
+}
     throw e;
   }
 }
 
+// ⬇️ REPLACED: getUserGrade mapped exactly to apis.txt
 async function getUserGrade(userId) {
   if (!userId) throw new Error('Missing userId');
+  
   const url = `/users/${encodeURIComponent(userId)}`;
+  
   try {
     const { data } = await ifClient.get(url);
     const payload = data && typeof data === 'object' ? data : {};
+    
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
       if (payload.errorCode === 1) return null; // UserNotFound
       const err = new Error(`IF API errorCode ${payload.errorCode}`);
       err.response = { data: payload };
       throw err;
     }
+    
     return payload.result || null;
   } catch (e) {
     const status = e?.response?.status;
+    
     if (status === 401 || status === 403) {
       const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
       const payload = retry && typeof retry === 'object' ? retry : {};
+      
       if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
         if (payload.errorCode === 1) return null; // UserNotFound
         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
@@ -1032,9 +1007,99 @@ async function getUserGrade(userId) {
       }
       return payload.result || null;
     }
+    
     if (status === 404) {
       return null;
     }
+    
+    throw e;
+  }
+}
+
+// ⬇️ NEW: getUserAtcSessions wrapper
+async function getUserAtcSessions(userId, page = 1) {
+  if (!userId) throw new Error('Missing userId');
+  
+  // GET /users/{userId}/atc
+  const url = `/users/${encodeURIComponent(userId)}/atc`;
+  const params = { page, apikey: IF_API_KEY }; 
+
+  try {
+    const { data } = await ifClient.get(url, { params });
+    const payload = data && typeof data === 'object' ? data : {};
+    
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+       const err = new Error(`IF API errorCode ${payload.errorCode}`);
+       err.response = { data: payload };
+       throw err;
+    }
+
+    return payload.result || null;
+
+  } catch (e) {
+    const status = e?.response?.status;
+    
+    // Standard retry logic for 401/403
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+         const err = new Error(`IF API errorCode ${payload.errorCode} (retry)`);
+         err.response = { data: payload };
+         throw err;
+      }
+      return payload.result || null;
+    }
+    
+    // UserNotFound might return 404
+    if (status === 404) {
+      return null;
+    }
+    
+    throw e;
+  }
+}
+
+// ⬇️ NEW: getUserAtcSessionDetails wrapper
+async function getUserAtcSessionDetails(userId, atcSessionId) {
+  if (!userId || !atcSessionId) throw new Error('Missing userId or atcSessionId');
+  
+  // GET /users/{userId}/atc/{atcSessionId}
+  const url = `/users/${encodeURIComponent(userId)}/atc/${encodeURIComponent(atcSessionId)}`;
+  
+  try {
+    const { data } = await ifClient.get(url);
+    const payload = data && typeof data === 'object' ? data : {};
+    
+    if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+       const err = new Error(`IF API errorCode ${payload.errorCode}`);
+       err.response = { data: payload };
+       throw err;
+    }
+
+    return payload.result || null;
+
+  } catch (e) {
+    const status = e?.response?.status;
+    
+    // Standard retry logic for 401/403 (Token Expiry)
+    if (status === 401 || status === 403) {
+      const { data: retry } = await ifClient.get(url, { params: { apikey: IF_API_KEY } });
+      const payload = retry && typeof retry === 'object' ? retry : {};
+      
+      if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
+         const err = new Error(`IF API errorCode ${payload.errorCode} (query param)`);
+         err.response = { data: payload };
+         throw err;
+      }
+      return payload.result || null;
+    }
+
+    if (status === 404) {
+      return null;
+    }
+    
     throw e;
   }
 }
@@ -1056,7 +1121,8 @@ io.on('connection', (socket) => {
     // Define the specific flight data rooms we manage
     const validServerRooms = ['expert server', 'training server', 'casual server'];
 
-    // 1. LEAVE OLD ROOMS
+   
+ // 1. LEAVE OLD ROOMS
     for (const room of socket.rooms) {
       if (validServerRooms.includes(room) && room !== targetRoom) {
         socket.leave(room);
@@ -1067,103 +1133,95 @@ io.on('connection', (socket) => {
     // 2. JOIN NEW ROOM
     socket.join(targetRoom);
     console.log(`[socket] 🚪 ${socket.id} joined room: ${targetRoom}`);
-
-    // --- [PERFORMANCE FIX] ---
+// --- [PERFORMANCE FIX] ---
     // Immediately send the last known data from cache to THIS specific user.
-    // This prevents the user from waiting for the next polling cycle (2-5s delay).
-    try {
+// This prevents the user from waiting for the next polling cycle (2-5s delay).
+try {
       // A. Get current sessions (Uses existing cache logic in getSessions)
       const sessions = await getSessions();
-      
-      // B. Find the ID for the server they just joined
+// B. Find the ID for the server they just joined
       // Note: pickSessionIdByName handles fuzzy matching (e.g. "expert server" vs "Expert Server")
       const sessionId = pickSessionIdByName(sessions, serverName);
-
-      if (sessionId) {
+if (sessionId) {
         // C. Send cached FLIGHTS
         const cachedFlights = apiCache.flights.get(sessionId);
-        if (cachedFlights) {
+if (cachedFlights) {
           socket.emit('all_flights_update', cachedFlights);
-          console.log(`[socket] 🚀 Fast-forwarded FLIGHTS to ${socket.id} for ${serverName}`);
+console.log(`[socket] 🚀 Fast-forwarded FLIGHTS to ${socket.id} for ${serverName}`);
         }
 
         // D. Send cached ATC/NOTAMS (Secondary) - NEW FIX
         const cachedSecondary = apiCache.secondary.get(sessionId);
-        if (cachedSecondary) {
+if (cachedSecondary) {
           socket.emit('secondary_data_update', cachedSecondary);
-          console.log(`[socket] 🚀 Fast-forwarded ATC/NOTAMS to ${socket.id} for ${serverName}`);
+console.log(`[socket] 🚀 Fast-forwarded ATC/NOTAMS to ${socket.id} for ${serverName}`);
         }
       }
     } catch (err) {
       console.warn(`[socket] Failed to send immediate cache for ${serverName}:`, err.message);
-    }
+}
     // --- [END FIX] ---
   });
-
-  socket.on('disconnect', () => {
+socket.on('disconnect', () => {
     console.log(`[socket] ❌ User disconnected: ${socket.id}`);
   });
 });
-
-
 // ⬇️ UPDATED: Dynamic poll interval logic
-let nextBroadcastPollMs = 0; // Initialize to 0 so we calculate it dynamically
+let nextBroadcastPollMs = 0;
+// Initialize to 0 so we calculate it dynamically
 
 async function pollAndBroadcastFlights() {
   let sessions = [];
-  try {
+try {
     sessions = await getSessions();
   } catch (e) {
     console.warn('[broadcast] Sessions fetch failed', e?.message);
-    if (e?.message?.includes('429')) nextBroadcastPollMs = 60000;
+if (e?.message?.includes('429')) nextBroadcastPollMs = 60000;
     return;
   }
 
   const serverNames = ["Expert Server", "Training Server", "Casual Server"];
-  for (const serverName of serverNames) {
+for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
     if (!sessionId) continue;
-
-    const roomName = serverName.toLowerCase();
+const roomName = serverName.toLowerCase();
     const room = io.sockets.adapter.rooms.get(roomName);
 
     // Optional: optimization to skip if room is empty
     if (!room || room.size === 0) {
        // continue;
-    }
+}
 
     try {
       const rawFlights = await getFlightsForSession(sessionId);
-
-      // Blip Guard Logic
+// Blip Guard Logic
       const newFlightCount = (Array.isArray(rawFlights) ? rawFlights.length : 0);
-      const cachedData = apiCache.flights.get(sessionId);
+const cachedData = apiCache.flights.get(sessionId);
       const cachedFlightCount = (cachedData && cachedData.count > 0) ? cachedData.count : 0;
-
-      if ((newFlightCount === 0 && cachedFlightCount > 0) || 
+if ((newFlightCount === 0 && cachedFlightCount > 0) || 
           (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50))) {
         console.warn(`[broadcast] ⚠️ BLIP GUARD: Skipping ${serverName}`);
-        continue;
+continue;
       }
 
       // ⬇️ NEW: Cleanup disconnected flights from routing cache to prevent memory leaks
       if (Array.isArray(rawFlights) && apiCache.flightRouting.has(sessionId)) {
           const activeFlightIds = new Set(rawFlights.map(f => f.flightId));
-          const sessionRouting = apiCache.flightRouting.get(sessionId);
+const sessionRouting = apiCache.flightRouting.get(sessionId);
           
           for (const cachedFlightId of sessionRouting.keys()) {
               if (!activeFlightIds.has(cachedFlightId)) {
-                  sessionRouting.delete(cachedFlightId); // Clears data when user leaves
+                  sessionRouting.delete(cachedFlightId);
+// Clears data when user leaves
               }
           }
       }
 
       // Pass sessionId to simplifyFlight so it can pull from the cache
       const finalFlights = rawFlights.map(f => simplifyFlight(f, sessionId));
-
-      // --- ⬇️ SQLITE HISTORY SAVING (Ported from your old function) ⬇️ ---
+// --- ⬇️ SQLITE HISTORY SAVING (Ported from your old function) ⬇️ ---
       const now = Date.now();
-      // Filter flights to only update DB once every 30 seconds per flight
+// Filter flights to only update DB once every 30 seconds per flight
       const flightsToSave = finalFlights.filter(f => {
         const lastSave = apiCache.lastRedisSave.get(f.flightId) || 0;
         if (now - lastSave >= 30000) {
@@ -1172,11 +1230,10 @@ async function pollAndBroadcastFlights() {
         }
         return false;
       });
-
-      // Execute the save
+// Execute the save
       if (flightsToSave.length > 0) {
         updateBatch(flightsToSave);
-      }
+}
       // --- ⬆️ END SQLITE LOGIC ⬆️ ---
 
       const payload = {
@@ -1186,18 +1243,17 @@ async function pollAndBroadcastFlights() {
         flights: finalFlights,
         timestamp: new Date().toISOString()
       };
-
-      // Update Cache and Broadcast
+// Update Cache and Broadcast
       apiCache.flights.set(sessionId, payload);
-      if (room && room.size > 0) {
+if (room && room.size > 0) {
         io.to(roomName).emit('all_flights_update', payload);
-      }
+}
 
     } catch (e) {
       console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
-      if (e?.message?.includes('429')) {
+if (e?.message?.includes('429')) {
          nextBroadcastPollMs = 60000;
-      }
+}
     }
   }
 }
@@ -1214,7 +1270,8 @@ async function pollAndBroadcastFlights() {
             nextBroadcastPollMs = 60000; 
          }
     })
-    .finally(() => {
+   
+ .finally(() => {
       // 2. Determine Dynamic Interval
       // Check how many users are connected to Socket.IO
       const connectedUsers = io.engine.clientsCount;
@@ -1224,32 +1281,31 @@ async function pollAndBroadcastFlights() {
 
       // 3. Check if a major backoff (like 60s from a 429 error) was triggered
       if (nextBroadcastPollMs > targetInterval) {
-        timeToWait = nextBroadcastPollMs;
+      
+  timeToWait = nextBroadcastPollMs;
         console.log(`[broadcast] Backoff triggered. Waiting ${timeToWait}ms.`);
         
         // Reset for the next cycle
         nextBroadcastPollMs = 0;
-      } else {
+} else {
         // 4. Calculate standard "steady tick"
         const pollEndTime = Date.now();
-        const executionTime = pollEndTime - pollStartTime;
+const executionTime = pollEndTime - pollStartTime;
         
         timeToWait = targetInterval - executionTime;
-
-        // If execution took longer than interval, run immediately (with tiny buffer)
+// If execution took longer than interval, run immediately (with tiny buffer)
         if (timeToWait <= 0) {
           timeToWait = 10;
-        }
+}
         
         // Debug log (optional - helpful to see it working)
         // console.log(`[broadcast] Users: ${connectedUsers} | Took: ${executionTime}ms | Next in: ${timeToWait}ms`);
-        
-        nextBroadcastPollMs = 0;
+nextBroadcastPollMs = 0;
       }
       
       // 5. Schedule next run
       setTimeout(runBroadcastPoller, timeToWait);
-    });
+});
 })();
 
 /* =========================
@@ -1257,21 +1313,20 @@ async function pollAndBroadcastFlights() {
  * ========================= */
 async function pollAndBroadcastSecondary() {
   let sessions = [];
-  try {
+try {
     sessions = await getSessions();
   } catch (e) {
     return;
-  }
+}
 
   const serverNames = ["Expert Server", "Training Server", "Casual Server"];
-  for (const serverName of serverNames) {
+for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
     if (!sessionId) continue;
-
-    // ⬇️ NEW: Initialize session routing cache if it doesn't exist
+// ⬇️ NEW: Initialize session routing cache if it doesn't exist
     if (!apiCache.flightRouting.has(sessionId)) {
         apiCache.flightRouting.set(sessionId, new Map());
-    }
+}
     const sessionRouting = apiCache.flightRouting.get(sessionId);
 
     try {
@@ -1281,21 +1336,20 @@ async function pollAndBroadcastSecondary() {
         getNotams(sessionId).catch(() => []),
         getWorldStatus(sessionId).catch(() => [])
       ]);
-
-      // ⬇️ NEW: Process world data to map departures and arrivals into memory
+// ⬇️ NEW: Process world data to map departures and arrivals into memory
       if (Array.isArray(world)) {
         for (const airport of world) {
           const icao = airport.airportIcao;
-          if (!icao) continue;
+if (!icao) continue;
 
           // Process Departures (Outbound)
           if (Array.isArray(airport.outboundFlights)) {
             for (const flightId of airport.outboundFlights) {
               if (!sessionRouting.has(flightId)) {
                 sessionRouting.set(flightId, { departureIcao: null, arrivalIcao: null });
-              }
+}
               sessionRouting.get(flightId).departureIcao = icao;
-            }
+}
           }
 
           // Process Arrivals (Inbound)
@@ -1303,9 +1357,9 @@ async function pollAndBroadcastSecondary() {
             for (const flightId of airport.inboundFlights) {
               if (!sessionRouting.has(flightId)) {
                 sessionRouting.set(flightId, { departureIcao: null, arrivalIcao: null });
-              }
+}
               sessionRouting.get(flightId).arrivalIcao = icao;
-            }
+}
           }
         }
       }
@@ -1318,20 +1372,18 @@ async function pollAndBroadcastSecondary() {
         world: world,
         timestamp: new Date().toISOString()
       };
-
-      // 1. Update Cache
+// 1. Update Cache
       apiCache.secondary.set(sessionId, payload);
-
-      // 2. Broadcast to room
+// 2. Broadcast to room
       const roomName = serverName.toLowerCase();
       const room = io.sockets.adapter.rooms.get(roomName);
-      if (room && room.size > 0) {
+if (room && room.size > 0) {
           io.to(roomName).emit('secondary_data_update', payload);
-      }
+}
 
     } catch (e) {
       console.warn(`[secondary] Failed to update secondary data for ${serverName}`, e.message);
-    }
+}
   }
 }
 
@@ -1349,20 +1401,63 @@ async function pollAndBroadcastSecondary() {
       const duration = Date.now() - start;
       let timeToWait = targetInterval - duration;
 
+ 
       // Safety buffer
       if (timeToWait <= 0) timeToWait = 1000;
 
       setTimeout(runSecondaryPoller, timeToWait);
     });
 })();
-
-
 /* =========================
  * API Endpoints
  * ========================= */
 
-// ⬇️ NEW ROUTE: Get User Logbook (History)
-app.get('/api/users/:userId/logbook', async (req, res) => {
+// ⬇️ REPLACED ROUTE: Get User Stats (Grade Info)
+app.get('/api/users/:userId/stats', async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    const userStats = await getUserGrade(userId);
+    
+    if (!userStats) {
+      return res.status(404).json(err(404, 'User not found or has no stats/grade information.'));
+    }
+    
+    // Exact mapping from apis.txt schema
+    res.json({ 
+      ok: true, 
+      userId: userStats.userId || userId,
+      stats: {
+        virtualOrganization: userStats.virtualOrganization,
+        discourseUsername: userStats.discourseUsername,
+        groups: userStats.groups,
+        roles: userStats.roles,
+        gradeDetails: userStats.gradeDetails,
+        violationCountByLevel: userStats.violationCountByLevel,
+        totalXP: userStats.totalXP,
+        atcOperations: userStats.atcOperations,
+        atcRank: userStats.atcRank,
+        total12MonthsViolations: userStats.total12MonthsViolations,
+        lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
+        lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
+        lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
+        lastReportViolationDate: userStats.lastReportViolationDate
+      }
+    });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch user stats', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
+  }
+});
+
+// ⬇️ REPLACED ROUTE: Get User Flights (Logbook)
+app.get('/api/users/:userId/flights', async (req, res) => {
   const { userId } = req.params;
   const page = parseInt(req.query.page || '1', 10);
 
@@ -1373,12 +1468,15 @@ app.get('/api/users/:userId/logbook', async (req, res) => {
       return res.status(404).json(err(404, 'User logbook not found or user does not exist.'));
     }
 
+    // Exact mapping from apis.txt schema including missing booleans
     res.json({ 
       ok: true, 
       userId, 
-      page: logbook.pageIndex,
+      pageIndex: logbook.pageIndex,
       totalPages: logbook.totalPages,
       totalCount: logbook.totalCount,
+      hasPreviousPage: logbook.hasPreviousPage,
+      hasNextPage: logbook.hasNextPage,
       flights: logbook.data
     });
 
@@ -1387,7 +1485,72 @@ app.get('/api/users/:userId/logbook', async (req, res) => {
     const apiError = e?.response?.data;
     
     res.status(status).json(
-      err(status, 'Failed to fetch user logbook', { 
+      err(status, 'Failed to fetch user flights', { 
+        detail: e?.message,
+        apiErrorCode: apiError?.errorCode 
+      })
+    );
+  }
+});
+
+// ⬇️ NEW ROUTE: Get User ATC Sessions (Paginated)
+app.get('/api/users/:userId/atc', async (req, res) => {
+  const { userId } = req.params;
+  const page = parseInt(req.query.page || '1', 10);
+
+  try {
+    const atcSessions = await getUserAtcSessions(userId, page);
+    
+    if (!atcSessions) {
+      return res.status(404).json(err(404, 'User ATC sessions not found or user does not exist.'));
+    }
+
+    res.json({ 
+      ok: true, 
+      userId, 
+      page: atcSessions.pageIndex,
+      totalPages: atcSessions.totalPages,
+      totalCount: atcSessions.totalCount,
+      data: atcSessions.data
+    });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    
+    res.status(status).json(
+      err(status, 'Failed to fetch user ATC sessions', { 
+        detail: e?.message,
+        apiErrorCode: apiError?.errorCode 
+      })
+    );
+  }
+});
+
+// ⬇️ NEW ROUTE: Get Specific User ATC Session Details
+app.get('/api/users/:userId/atc/:atcSessionId', async (req, res) => {
+  const { userId, atcSessionId } = req.params;
+
+  try {
+    const sessionDetails = await getUserAtcSessionDetails(userId, atcSessionId);
+    
+    if (!sessionDetails) {
+      return res.status(404).json(err(404, 'ATC session not found or user does not exist.'));
+    }
+
+    res.json({ 
+      ok: true, 
+      userId,
+      atcSessionId,
+      data: sessionDetails
+    });
+
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    
+    res.status(status).json(
+      err(status, 'Failed to fetch specific user ATC session', { 
         detail: e?.message,
         apiErrorCode: apiError?.errorCode 
       })
@@ -1403,7 +1566,6 @@ app.get('/api/flights/:flightId/history', async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
-
 // ⬇️ NEW ROUTE: Batch Route Fetcher (The Fix)
 // Usage: POST /api/flights/routes/batch
 // Body: { "sessionId": "...", "flightIds": ["id1", "id2", "id3"] }
@@ -1423,7 +1585,8 @@ app.post('/api/flights/routes/batch', async (req, res) => {
   }
 
   try {
-    // 1. Fetch routes in parallel
+  
+  // 1. Fetch routes in parallel
     const routeMap = await getBatchFlightRoutes(sessionId, flightIds);
 
     // 2. Return the map
@@ -1435,11 +1598,11 @@ app.post('/api/flights/routes/batch', async (req, res) => {
     });
 
   } catch (e) {
-    const status = e?.response?.status || 500;
+    const status = e?.response?.status ||
+500;
     res.status(status).json(err(status, 'Failed to process batch routes', { detail: e?.message }));
   }
 });
-
 app.get('/api/metadata', (req, res) => {
   res.json({
     ok: true,
@@ -1447,11 +1610,9 @@ app.get('/api/metadata', (req, res) => {
     liveries: globalMetadata.liveries
   });
 });
-
 app.get('/health', (req, res) => {
   res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
 });
-
 app.get('/if-key-debug', (req, res) => {
   const masked = IF_API_KEY ? `${IF_API_KEY.slice(0, 4)}...${IF_API_KEY.slice(-4)}` : '(missing)';
   res.json({
@@ -1463,11 +1624,10 @@ app.get('/if-key-debug', (req, res) => {
     baseURL: IF_API_BASE_URL
   });
 });
-
 /**
  * ⬇️ REPLACED FUNCTION
  * This endpoint now uses the cache-aware getSessions() function.
- */
+*/
 app.get('/if-sessions', async (req, res) => {
   try {
     if (!IF_API_KEY) return res.status(500).json(err(500, 'INFINITE_FLIGHT_API_KEY is not set'));
@@ -1479,7 +1639,6 @@ app.get('/if-sessions', async (req, res) => {
     res.status(status).json(err(status, 'Failed to fetch sessions', { detail: e?.message }));
   }
 });
-
 // GET /api/live/tracks
 app.get('/api/live/tracks', (req, res) => {
   res.json({
@@ -1488,7 +1647,6 @@ app.get('/api/live/tracks', (req, res) => {
     tracks: apiCache.tracks
   });
 });
-
 app.get('/if-sessions-test', async (req, res) => {
   try {
     if (!IF_API_KEY) return res.status(500).json(err(500, 'INFINITE_FLIGHT_API_KEY is not set'));
@@ -1502,7 +1660,8 @@ app.get('/if-sessions-test', async (req, res) => {
     res.json({
       ok: true,
       server: targetServer,
-      sessionId,
+ 
+     sessionId,
       totalFlights: Array.isArray(flights) ? flights.length : 0,
       sample: flights?.slice(0, 3) || []
     });
@@ -1514,7 +1673,8 @@ app.get('/if-sessions-test', async (req, res) => {
         apiErrorCode: apiError?.errorCode,
         apiErrorMessage: apiError?.result,
         detail: e?.message
-      })
+     
+ })
     );
   }
 });
@@ -1522,7 +1682,7 @@ app.get('/if-sessions-test', async (req, res) => {
 /**
  * ⬇️ REPLACED FUNCTION
  * This endpoint now reads from the flights cache first.
- */
+*/
 app.get('/flights/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   const callsignFilter = req.query.callsignEndsWith;
@@ -1537,7 +1697,8 @@ app.get('/flights/:sessionId', async (req, res) => {
         f.callsign && f.callsign.toUpperCase().endsWith(suffix)
       );
     }
-    return res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: true });
+    return res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: true 
+});
   }
 
   // 2. Fallback to live fetch if not in cache
@@ -1548,17 +1709,16 @@ app.get('/flights/:sessionId', async (req, res) => {
     let simplified = flights.map(f => simplifyFlight(f, sessionId)); 
     if (callsignFilter) {
       const suffix = callsignFilter.toUpperCase();
-      simplified = simplified.filter(f =>
+simplified = simplified.filter(f =>
         f.callsign && f.callsign.toUpperCase().endsWith(suffix)
       );
-    }
+}
     res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: false });
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status || 500;
-    res.status(status).json(err(status, 'Failed to fetch flights', { detail: e?.message }));
+res.status(status).json(err(status, 'Failed to fetch flights', { detail: e?.message }));
   }
 });
-
 app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
   const { sessionId, flightId } = req.params;
   try {
@@ -1571,14 +1731,14 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
     res.status(status).json(
-      err(status, 'Failed to fetch flight plan', {
+      err(status, 'Failed to 
+fetch flight plan', {
         apiErrorCode: apiError?.errorCode,
         detail: e?.message
       })
     );
   }
 });
-
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
   const { sessionId, flightId } = req.params;
   try {
@@ -1591,14 +1751,14 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
     res.status(status).json(
-      err(status, 'Failed to fetch flight route', {
+    
+  err(status, 'Failed to fetch flight route', {
         apiErrorCode: apiError?.errorCode,
         detail: e?.message
       })
     );
   }
 });
-
 // ⬇️ REPLACED: ATC Endpoint now uses secondary cache
 app.get('/atc/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
@@ -1615,7 +1775,8 @@ app.get('/atc/:sessionId', async (req, res) => {
     res.json({ ok: true, count: atcFacilities.length, atc: atcFacilities });
   } catch (e) {
     const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
+  
+  const apiError = e?.response?.data;
     res.status(status).json(
       err(status, 'Failed to fetch ATC facilities', {
         apiErrorCode: apiError?.errorCode,
@@ -1624,7 +1785,6 @@ app.get('/atc/:sessionId', async (req, res) => {
     );
   }
 });
-
 // ⬇️ REPLACED: NOTAMs Endpoint now uses secondary cache
 app.get('/notams/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
@@ -1641,7 +1801,8 @@ app.get('/notams/:sessionId', async (req, res) => {
     res.json({ ok: true, count: notams.length, notams: notams });
   } catch (e) {
     const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
+    
+const apiError = e?.response?.data;
     res.status(status).json(
       err(status, 'Failed to fetch NOTAMs', {
         apiErrorCode: apiError?.errorCode,
@@ -1650,11 +1811,10 @@ app.get('/notams/:sessionId', async (req, res) => {
     );
   }
 });
-
 /**
  * ⬇️ NEW ROUTE: Get World Status (Airport statuses for a whole session)
  * This uses the /world endpoint and reads from the secondary cache.
- */
+*/
 app.get('/api/live/world/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
 
@@ -1671,7 +1831,8 @@ app.get('/api/live/world/:sessionId', async (req, res) => {
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
-    res.status(status).json(
+ 
+   res.status(status).json(
       err(status, 'Failed to fetch world status', {
         apiErrorCode: apiError?.errorCode,
         detail: e?.message
@@ -1679,7 +1840,6 @@ app.get('/api/live/world/:sessionId', async (req, res) => {
     );
   }
 });
-
 app.post('/users', async (req, res) => {
   const { userIds, discourseNames, userHashes } = req.body;
 
@@ -1694,7 +1854,8 @@ app.post('/users', async (req, res) => {
 
   try {
     const stats = await getUserStats({ userIds, discourseNames, userHashes });
-    res.json({ ok: true, count: stats.length, users: stats });
+  
+  res.json({ ok: true, count: stats.length, users: stats });
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
@@ -1706,27 +1867,6 @@ app.post('/users', async (req, res) => {
     );
   }
 });
-
-app.get('/users/:userId/grade', async (req, res) => {
-  const { userId } = req.params;
-  try {
-    const gradeInfo = await getUserGrade(userId);
-    if (!gradeInfo) {
-      return res.status(404).json(err(404, 'User not found or has no grade information.'));
-    }
-    res.json({ ok: true, userId, gradeInfo });
-  } catch (e) {
-    const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
-    res.status(status).json(
-      err(status, 'Failed to fetch user grade information', {
-        apiErrorCode: apiError?.errorCode,
-        detail: e?.message
-      })
-    );
-  }
-});
-
 // ⬇️ NEW ROUTE: Get liveries for a specific aircraft
 app.get('/api/aircraft/:aircraftId/liveries', async (req, res) => {
   const { aircraftId } = req.params;
@@ -1744,11 +1884,11 @@ app.get('/api/aircraft/:aircraftId/liveries', async (req, res) => {
   } catch (e) {
     const status = e?.response?.status || 500;
     res.status(status).json(
-      err(status, 'Failed to fetch liveries for aircraft', { detail: e?.message })
+      
+err(status, 'Failed to fetch liveries for aircraft', { detail: e?.message })
     );
   }
 });
-
 // ⬇️ NEW ROUTE: Get Airport Information (Direct Passthrough)
 app.get('/api/airport/:icao', async (req, res) => {
   const { icao } = req.params;
@@ -1763,7 +1903,8 @@ app.get('/api/airport/:icao', async (req, res) => {
     
     // Send the exact structure requested
     res.json({ 
-      ok: true, 
+      ok: 
+true, 
       icao: airportInfo.icao, // 
       airport: airportInfo 
     });
@@ -1780,7 +1921,6 @@ app.get('/api/airport/:icao', async (req, res) => {
     );
   }
 });
-
 // ⬇️ NEW ROUTE: Get Live Airport Status (Inbound/Outbound/ATC)
 app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
   const { sessionId, icao } = req.params;
@@ -1796,19 +1936,22 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
     res.json({ 
       ok: true, 
       sessionId,
-      icao: airportStatus.airportIcao,
+   
+   icao: airportStatus.airportIcao,
       status: {
         airportName: airportStatus.airportName,
         inboundFlightsCount: airportStatus.inboundFlightsCount, //
         inboundFlights: airportStatus.inboundFlights,           //
         outboundFlightsCount: airportStatus.outboundFlightsCount, //
         outboundFlights: airportStatus.outboundFlights,         //
-        atcFacilities: airportStatus.atcFacilities              //
+        atcFacilities: airportStatus.atcFacilities             
+ //
       }
     });
 
   } catch (e) {
-    const status = e?.response?.status || 500;
+    const status = e?.response?.status ||
+500;
     const apiError = e?.response?.data;
     
     res.status(status).json(
@@ -1817,7 +1960,7 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
         apiErrorCode: apiError?.errorCode // 
       })
     );
-  }
+}
 });
 
 // ⬇️ NEW ROUTE: Get Airport ATIS
@@ -1833,6 +1976,7 @@ app.get('/api/live/airport/:sessionId/:icao/atis', async (req, res) => {
       sessionId,
       icao: icao.toUpperCase(),
       atis: atisString // This will be the text string or null 
+
     });
 
   } catch (e) {
@@ -1847,7 +1991,6 @@ app.get('/api/live/airport/:sessionId/:icao/atis', async (req, res) => {
     );
   }
 });
-
 /* =========================
  * Startup
  * ========================= */
