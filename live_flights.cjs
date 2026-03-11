@@ -1478,36 +1478,55 @@ app.get('/api/users/:userId/atc', async (req, res) => {
     );
   }
 });
-// ⬇️ NEW ROUTE: Get Specific User ATC Session Details
-app.get('/api/users/:userId/atc/:atcSessionId', async (req, res) => {
-  const { userId, atcSessionId } = req.params;
-
+// ⬇️ REPLACED ROUTE: Get User Stats (Grade Info)
+app.get('/api/users/:userId/stats', async (req, res) => {
+  const { userId } = req.params;
+  
   try {
-    const sessionDetails = await getUserAtcSessionDetails(userId, atcSessionId);
+    const userStats = await getUserGrade(userId);
     
-    if (!sessionDetails) {
-      return res.status(404).json(err(404, 'ATC session not found or user does not exist.'));
+    if (!userStats) {
+      return res.status(404).json(err(404, 'User not found or has no stats/grade information.'));
     }
-
+    
+    // Exact mapping from apis.txt schema + Extended telemetry
     res.json({ 
       ok: true, 
-      userId,
-      atcSessionId,
-      data: sessionDetails
+      userId: userStats.userId || userId,
+      stats: {
+        virtualOrganization: userStats.virtualOrganization,
+        discourseUsername: userStats.discourseUsername,
+        groups: userStats.groups,
+        roles: userStats.roles,
+        gradeDetails: userStats.gradeDetails,
+        violationCountByLevel: userStats.violationCountByLevel,
+        totalXP: userStats.totalXP,
+        atcOperations: userStats.atcOperations,
+        atcRank: userStats.atcRank,
+        total12MonthsViolations: userStats.total12MonthsViolations,
+        lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
+        lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
+        lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
+        lastReportViolationDate: userStats.lastReportViolationDate,
+        // ⬇️ NEW: Extended Global Stats mapped from IF API
+        flightTime: userStats.flightTime,
+        landingCount: userStats.landingCount,
+        onlineFlights: userStats.onlineFlights,
+        violations: userStats.violations
+      }
     });
-
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
-    
     res.status(status).json(
-      err(status, 'Failed to fetch specific user ATC session', { 
-        detail: e?.message,
-        apiErrorCode: apiError?.errorCode 
+      err(status, 'Failed to fetch user stats', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
       })
     );
   }
 });
+
 app.get('/api/flights/:flightId/history', async (req, res) => {
   try {
     const path = await getFlightPath(req.params.flightId);
