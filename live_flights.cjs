@@ -60,10 +60,10 @@ const IF_API_KEY = RAW_IF_KEY.trim();
 const VA_BACKEND_URL = (process.env.VA_BACKEND_URL || 'http://localhost:5000').trim();
 const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 1000), 10); // 5 minutes
 const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
-const ACTIVE_POLL_MS = 10000; // 10 seconds (User connected)
-const IDLE_POLL_MS = 30000;   // 30 seconds (No users)
+const ACTIVE_POLL_MS = 30000; // 10 seconds (User connected)
+const IDLE_POLL_MS = 50000;   // 30 seconds (No users)
 
-const SECONDARY_ACTIVE_MS = 30000;
+const SECONDARY_ACTIVE_MS = 50000;
 // 30 seconds (User connected)
 const SECONDARY_IDLE_MS = 120000;   // 120 seconds (No users)
 
