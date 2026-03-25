@@ -103,6 +103,80 @@ const ifClient = axios.create({
   },
 });
 /* =========================
+ * Axios 429 Interceptor (Exponential Backoff)
+ * ========================= */
+ifClient.interceptors.response.use(
+  response => response,
+  async (error) => {
+    const config = error.config;
+    if (error?.response?.status === 429) {
+      config._retryCount = (config._retryCount || 0) + 1;
+      const MAX_RETRIES = 4;
+      if (config._retryCount <= MAX_RETRIES) {
+        // Respect Retry-After header if provided, otherwise exponential backoff
+        const retryAfterHeader = error.response.headers?.['retry-after'];
+        const retryAfterMs = retryAfterHeader
+          ? parseFloat(retryAfterHeader) * 1000
+          : Math.min(1000 * Math.pow(2, config._retryCount), 32000);
+        console.warn(`[if-api] ⏳ 429 Too Many Requests. Retry ${config._retryCount}/${MAX_RETRIES} in ${Math.round(retryAfterMs / 1000)}s.`);
+        await new Promise(r => setTimeout(r, retryAfterMs));
+        return ifClient(config);
+      }
+      console.error(`[if-api] 🛑 429 persisted after ${MAX_RETRIES} retries. Giving up.`);
+    }
+    return Promise.reject(error);
+  }
+);
+
+/* =========================
+ * Concurrency Limiter (for batch requests)
+ * ========================= */
+function createConcurrencyLimiter(maxConcurrent) {
+  let active = 0;
+  const queue = [];
+  return function limit(fn) {
+    return new Promise((resolve, reject) => {
+      const run = async () => {
+        active++;
+        try { resolve(await fn()); }
+        catch (e) { reject(e); }
+        finally {
+          active--;
+          if (queue.length > 0) queue.shift()();
+        }
+      };
+      active < maxConcurrent ? run() : queue.push(run);
+    });
+  };
+}
+// Max 3 concurrent route fetches to stay well under rate limits
+const routeLimiter = createConcurrencyLimiter(3);
+
+/* =========================
+ * On-Demand TTL Cache (for per-request endpoints)
+ * ========================= */
+const onDemandCache = new Map();
+
+function getOnDemandCached(key) {
+  const entry = onDemandCache.get(key);
+  if (entry && Date.now() < entry.expiresAt) return entry.data;
+  onDemandCache.delete(key);
+  return null;
+}
+
+function setOnDemandCached(key, data, ttlMs) {
+  onDemandCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
+// Periodically prune expired on-demand cache entries (every 5 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of onDemandCache.entries()) {
+    if (now >= entry.expiresAt) onDemandCache.delete(key);
+  }
+}, 5 * 60 * 1000);
+
+/* =========================
  * Data Loaders (Aircraft & Liveries)
  * ========================= */
 const aircraftNameMap = new Map();
@@ -219,20 +293,17 @@ async function getBatchFlightRoutes(sessionId, flightIds) {
   if (!Array.isArray(flightIds) || flightIds.length === 0) return {};
   const results = {};
   
-  // Create an array of promises
-  const promises = flightIds.map(async (flightId) => {
-    try {
-      // Reuse existing single-route fetcher
-      const rawRoute = await getFlightRoute(sessionId, flightId);
-      // Simplify immediately to save bandwidth
-      results[flightId] = simplifyFlightRoute(rawRoute);
-    } catch (e) {
-      // If one flight fails (e.g. pilot disconnected), we just return null for that ID
-      // This prevents the whole batch from breaking.
-      // console.warn(`[batch-route] Could not fetch route for ${flightId}: ${e.message}`);
-      results[flightId] = null;
-    }
-  });
+  // Throttle to max 3 concurrent requests to avoid rate limiting
+  const promises = flightIds.map((flightId) =>
+    routeLimiter(async () => {
+      try {
+        const rawRoute = await getFlightRoute(sessionId, flightId);
+        results[flightId] = simplifyFlightRoute(rawRoute);
+      } catch (e) {
+        results[flightId] = null;
+      }
+    })
+  );
   // Wait for all requests to finish (whether success or fail)
   await Promise.allSettled(promises);
   
@@ -1367,7 +1438,9 @@ async function pollAndBroadcastSecondary() {
 // ⬇️ REPLACED ROUTE: Get User Stats (Grade Info)
 app.get('/api/users/:userId/stats', async (req, res) => {
   const { userId } = req.params;
-  
+  const cacheKey = `userStats:${userId}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) return res.json({ ok: true, userId: cached.userId || userId, stats: cached.stats, fromCache: true });
   try {
     const userStats = await getUserGrade(userId);
     
@@ -1375,27 +1448,24 @@ app.get('/api/users/:userId/stats', async (req, res) => {
       return res.status(404).json(err(404, 'User not found or has no stats/grade information.'));
     }
     
-    // Exact mapping from apis.txt schema
-    res.json({ 
-      ok: true, 
-      userId: userStats.userId || userId,
-      stats: {
-        virtualOrganization: userStats.virtualOrganization,
-        discourseUsername: userStats.discourseUsername,
-        groups: userStats.groups,
-        roles: userStats.roles,
-        gradeDetails: userStats.gradeDetails,
-        violationCountByLevel: userStats.violationCountByLevel,
-        totalXP: userStats.totalXP,
-        atcOperations: userStats.atcOperations,
-        atcRank: userStats.atcRank,
-        total12MonthsViolations: userStats.total12MonthsViolations,
-        lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
-        lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
-        lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
-        lastReportViolationDate: userStats.lastReportViolationDate
-      }
-    });
+    const statsPayload = {
+      virtualOrganization: userStats.virtualOrganization,
+      discourseUsername: userStats.discourseUsername,
+      groups: userStats.groups,
+      roles: userStats.roles,
+      gradeDetails: userStats.gradeDetails,
+      violationCountByLevel: userStats.violationCountByLevel,
+      totalXP: userStats.totalXP,
+      atcOperations: userStats.atcOperations,
+      atcRank: userStats.atcRank,
+      total12MonthsViolations: userStats.total12MonthsViolations,
+      lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
+      lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
+      lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
+      lastReportViolationDate: userStats.lastReportViolationDate
+    };
+    setOnDemandCached(cacheKey, { userId: userStats.userId || userId, stats: statsPayload }, 5 * 60 * 1000); // 5min TTL
+    res.json({ ok: true, userId: userStats.userId || userId, stats: statsPayload });
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
@@ -1685,11 +1755,15 @@ app.get('/flights/:sessionId', async (req, res) => {
 });
 app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
   const { sessionId, flightId } = req.params;
+  const cacheKey = `plan:${sessionId}:${flightId}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) return res.json({ ok: true, flightId, plan: cached, fromCache: true });
   try {
     const rawPlan = await getFlightPlan(sessionId, flightId);
     if (!rawPlan) {
       return res.status(404).json(err(404, 'Flight plan not found. The flight may not exist or has no filed plan.'));
     }
+    setOnDemandCached(cacheKey, rawPlan, 60 * 1000); // 60s TTL
     res.json({ ok: true, flightId, plan: rawPlan });
   } catch (e) {
     const status = e?.response?.status || 500;
@@ -1704,11 +1778,15 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
 });
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
   const { sessionId, flightId } = req.params;
+  const cacheKey = `route:${sessionId}:${flightId}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) return res.json({ ok: true, flightId, route: cached, fromCache: true });
   try {
     const rawRoute = await getFlightRoute(sessionId, flightId);
     if (!rawRoute || rawRoute.length === 0) {
       return res.status(404).json(err(404, 'Flight route not found. The flight may not exist or has no position reports available.'));
     }
+    setOnDemandCached(cacheKey, rawRoute, 30 * 1000); // 30s TTL
     res.json({ ok: true, flightId, route: rawRoute });
   } catch (e) {
     const status = e?.response?.status || 500;
@@ -1849,19 +1927,19 @@ app.get('/api/aircraft/:aircraftId/liveries', async (req, res) => {
 // ⬇️ NEW ROUTE: Get Airport Information (Direct Passthrough)
 app.get('/api/airport/:icao', async (req, res) => {
   const { icao } = req.params;
-
+  const cacheKey = `airport:${icao.toUpperCase()}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) return res.json({ ok: true, icao: cached.icao, airport: cached, fromCache: true });
   try {
     const airportInfo = await getAirportInfo(icao);
     
     if (!airportInfo) {
-      // Return 404 if the airport code is invalid or not found in IF
       return res.status(404).json(err(404, `Airport not found: ${icao}`));
     }
-    
-    // Send the exact structure requested
+    setOnDemandCached(cacheKey, airportInfo, 10 * 60 * 1000); // 10min TTL (static data)
     res.json({ 
       ok: true, 
-      icao: airportInfo.icao, // 
+      icao: airportInfo.icao,
       airport: airportInfo 
     });
 
@@ -1872,7 +1950,7 @@ app.get('/api/airport/:icao', async (req, res) => {
     res.status(status).json(
       err(status, 'Failed to fetch airport info', { 
         detail: e?.message,
-        apiErrorCode: apiError?.errorCode // 
+        apiErrorCode: apiError?.errorCode
       })
     );
   }
@@ -1880,7 +1958,9 @@ app.get('/api/airport/:icao', async (req, res) => {
 // ⬇️ NEW ROUTE: Get Live Airport Status (Inbound/Outbound/ATC)
 app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
   const { sessionId, icao } = req.params;
-
+  const cacheKey = `airportStatus:${sessionId}:${icao.toUpperCase()}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) return res.json({ ok: true, sessionId, icao: cached.airportIcao, status: cached._statusPayload, fromCache: true });
   try {
     const airportStatus = await getAirportStatus(sessionId, icao);
     
@@ -1888,21 +1968,18 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
       return res.status(404).json(err(404, `Airport status not found for ${icao} on session ${sessionId}`));
     }
     
-    // Return the structure defined in the documentation
-    res.json({ 
-      ok: true, 
-      sessionId,
-      icao: airportStatus.airportIcao,
-      status: {
-        airportName: airportStatus.airportName,
-        inboundFlightsCount: airportStatus.inboundFlightsCount, //
-        inboundFlights: airportStatus.inboundFlights,           //
-        outboundFlightsCount: airportStatus.outboundFlightsCount, //
-        outboundFlights: airportStatus.outboundFlights,         //
-        atcFacilities: airportStatus.atcFacilities             
- //
-      }
-    });
+    const statusPayload = {
+      airportName: airportStatus.airportName,
+      inboundFlightsCount: airportStatus.inboundFlightsCount,
+      inboundFlights: airportStatus.inboundFlights,
+      outboundFlightsCount: airportStatus.outboundFlightsCount,
+      outboundFlights: airportStatus.outboundFlights,
+      atcFacilities: airportStatus.atcFacilities
+    };
+    // Store with a helper property so cache hit can reconstruct response
+    airportStatus._statusPayload = statusPayload;
+    setOnDemandCached(cacheKey, airportStatus, 30 * 1000); // 30s TTL
+    res.json({ ok: true, sessionId, icao: airportStatus.airportIcao, status: statusPayload });
 
   } catch (e) {
     const status = e?.response?.status || 500;
@@ -1911,7 +1988,7 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
     res.status(status).json(
       err(status, 'Failed to fetch live airport status', { 
         detail: e?.message,
-        apiErrorCode: apiError?.errorCode // 
+        apiErrorCode: apiError?.errorCode
       })
     );
   }
@@ -1920,17 +1997,17 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
 // ⬇️ NEW ROUTE: Get Airport ATIS
 app.get('/api/live/airport/:sessionId/:icao/atis', async (req, res) => {
   const { sessionId, icao } = req.params;
-
+  const cacheKey = `atis:${sessionId}:${icao.toUpperCase()}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached !== null) return res.json({ ok: true, sessionId, icao: icao.toUpperCase(), atis: cached.atis, fromCache: true });
   try {
     const atisString = await getAirportAtis(sessionId, icao);
-    
-    // We return ok: true even if atis is null (which means no active ATIS at this airport)
+    setOnDemandCached(cacheKey, { atis: atisString }, 60 * 1000); // 60s TTL
     res.json({ 
       ok: true, 
       sessionId,
       icao: icao.toUpperCase(),
-      atis: atisString // This will be the text string or null 
-
+      atis: atisString
     });
 
   } catch (e) {
