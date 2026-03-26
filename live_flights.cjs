@@ -31,10 +31,10 @@ const corsOptions = {
         if (!origin) return callback(null, true);
         if (whitelist.indexOf(origin) !== -1) {
             callback(null, true);
-            // Origin is in the whitelist, allow it
+        // Origin is in the whitelist, allow it
         } else {
             callback(new Error('Not allowed by CORS'));
-            // Origin is not allowed
+        // Origin is not allowed
         }
     },
     optionsSuccessStatus: 200
@@ -115,6 +115,7 @@ ifClient.interceptors.response.use(
       if (config._retryCount <= MAX_RETRIES) {
         // Respect Retry-After header if provided, otherwise exponential backoff
         const retryAfterHeader = error.response.headers?.['retry-after'];
+        
         const retryAfterMs = retryAfterHeader
           ? parseFloat(retryAfterHeader) * 1000
           : Math.min(1000 * Math.pow(2, config._retryCount), 32000);
@@ -143,6 +144,7 @@ function createConcurrencyLimiter(maxConcurrent) {
         finally {
           active--;
           if (queue.length > 0) queue.shift()();
+       
         }
       };
       active < maxConcurrent ? run() : queue.push(run);
@@ -151,12 +153,10 @@ function createConcurrencyLimiter(maxConcurrent) {
 }
 // Max 3 concurrent route fetches to stay well under rate limits
 const routeLimiter = createConcurrencyLimiter(3);
-
 /* =========================
  * On-Demand TTL Cache (for per-request endpoints)
  * ========================= */
 const onDemandCache = new Map();
-
 function getOnDemandCached(key) {
   const entry = onDemandCache.get(key);
   if (entry && Date.now() < entry.expiresAt) return entry.data;
@@ -175,7 +175,6 @@ setInterval(() => {
     if (now >= entry.expiresAt) onDemandCache.delete(key);
   }
 }, 5 * 60 * 1000);
-
 /* =========================
  * Data Loaders (Aircraft & Liveries)
  * ========================= */
@@ -207,6 +206,7 @@ const globalMetadata = {
   
     console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types.`);
 
+    
     // 2. Load Liveries from API
     const liveryList = await getAllLiveries();
     globalMetadata.liveries = liveryList;
@@ -287,7 +287,7 @@ async function fetchVaRoster() {
  * Fetches routes for multiple flight IDs in parallel.
  * Returns a map: { [flightId]: routeData[] }
  * If a specific flight fails (e.g. 404), it returns null for that ID instead of crashing.
-*/
+ */
 async function getBatchFlightRoutes(sessionId, flightIds) {
   if (!sessionId) throw new Error('Missing sessionId');
   if (!Array.isArray(flightIds) || flightIds.length === 0) return {};
@@ -314,7 +314,8 @@ function unwrap(data) {
   if (!data) return [];
   if (Array.isArray(data)) return data;
   if (Array.isArray(data.result)) return data.result;
-  return data.result ?? data.items ?? [];
+  return data.result ??
+  data.items ?? [];
 }
 
 function err(status, message, extra = {}) {
@@ -338,7 +339,8 @@ async function getOceanicTracks() {
   try {
     const { data } = await ifClient.get(url);
     // Validate response and check for errorCode 0 (Ok)
-    const payload = data && typeof data === 'object' ? data : {};
+    const payload = data && typeof data === 'object' ?
+    data : {};
     if (typeof payload.errorCode === 'number' && payload.errorCode !== 0) {
        throw new Error(`IF API errorCode ${payload.errorCode}`);
     }
@@ -378,6 +380,7 @@ async function getOceanicTracks() {
     .finally(() => {
       // 24 Hour Refresh (24h * 60m * 60s * 1000ms)
       const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+    
       setTimeout(runTracksPoller, TWENTY_FOUR_HOURS);
     });
 })();
@@ -481,7 +484,8 @@ async function getAirportInfo(icao) {
     }
 
     // Return the 'result' object (AirportInfo)
-    return payload.result || null;
+    return payload.result ||
+    null;
 
   } catch (e) {
     const status = e?.response?.status;
@@ -527,7 +531,8 @@ try {
     }
 
     // Return the 'result' string (The ATIS message)
-    return payload.result || null;
+    return payload.result ||
+    null;
 
   } catch (e) {
     const status = e?.response?.status;
@@ -572,7 +577,8 @@ try {
     }
 
     // Return the 'result' object (AirportStatus) which contains inboundFlights, atcFacilities, etc.
-    return payload.result || null;
+    return payload.result ||
+    null;
 
   } catch (e) {
     const status = e?.response?.status;
@@ -630,7 +636,7 @@ async function getAllLiveries() {
 
 /**
  * This function now uses the in-memory cache to avoid spamming the API.
-*/
+ */
 async function getSessions() {
   const now = Date.now();
   // 1. Check if cache is valid (not older than TTL and not empty)
@@ -683,7 +689,8 @@ async function getFlightsForSession(sessionId) {
       err.response = { data: payload };
       throw err;
     }
-    return Array.isArray(payload.result) ? payload.result : (Array.isArray(data) ? data : []);
+    return Array.isArray(payload.result) ?
+    payload.result : (Array.isArray(data) ? data : []);
   } catch (e) {
     const status = e?.response?.status;
     if (status === 401 || status === 403 || status === 404) {
@@ -697,7 +704,8 @@ async function getFlightsForSession(sessionId) {
         err.response = { data: payload };
         throw err;
       }
-      return Array.isArray(payload.result) ? payload.result : (Array.isArray(retry) ? retry : []);
+      return Array.isArray(payload.result) ?
+      payload.result : (Array.isArray(retry) ? retry : []);
     }
     throw e;
   }
@@ -725,31 +733,41 @@ function simplifyFlight(f, sessionId) {
       const sessionRouting = apiCache.flightRouting.get(sessionId);
       const routing = sessionRouting.get(flightId);
       if (routing) {
-          arrivalIcao = routing.arrivalIcao || arrivalIcao;
+          arrivalIcao = routing.arrivalIcao ||
+          arrivalIcao;
           departureIcao = routing.departureIcao || departureIcao;
       }
   }
 
   return {
     flightId: flightId,
-    userId: f?.userId || null,
+    userId: f?.userId ||
+    null,
     callsign: f?.callsign || '',
     username: username,
-    virtualOrganization: f?.virtualOrganization || null,
+    virtualOrganization: f?.virtualOrganization ||
+    null,
     arrivalIcao: arrivalIcao,  
     departureIcao: departureIcao, 
     isVAMember,
     isStaff,
     vaRole,
     position: {
-      lat: typeof f?.latitude === 'number' ? f.latitude : null,
-      lon: typeof f?.longitude === 'number' ? f.longitude : null,
-      alt_ft: typeof f?.altitude === 'number' ? f.altitude : null,
-      gs_kt: typeof f?.speed === 'number' ? f.speed : null,
-      vs_fpm: typeof f?.verticalSpeed === 'number' ? f.verticalSpeed : null,
-      heading_deg: typeof f?.heading === 'number' ? f.heading : null,
+      lat: typeof f?.latitude === 'number' ?
+      f.latitude : null,
+      lon: typeof f?.longitude === 'number' ?
+      f.longitude : null,
+      alt_ft: typeof f?.altitude === 'number' ?
+      f.altitude : null,
+      gs_kt: typeof f?.speed === 'number' ?
+      f.speed : null,
+      vs_fpm: typeof f?.verticalSpeed === 'number' ?
+      f.verticalSpeed : null,
+      heading_deg: typeof f?.heading === 'number' ?
+      f.heading : null,
       lastReport: f?.lastReport || null,
-      lastReportMs: f?.lastReport ? Date.parse(f.lastReport) || null : null,
+      lastReportMs: f?.lastReport ?
+      Date.parse(f.lastReport) || null : null,
     },
     aircraft: {
       aircraftId,
@@ -757,7 +775,8 @@ function simplifyFlight(f, sessionId) {
       aircraftName,
       liveryName
     },
-    pilotState: typeof f?.pilotState === 'number' ? f.pilotState : null,
+    pilotState: typeof f?.pilotState === 'number' ?
+    f.pilotState : null,
     isConnected: typeof f?.isConnected === 'boolean' ? f.isConnected : null,
   };
 }
@@ -798,7 +817,8 @@ async function getFlightPlan(sessionId, flightId) {
 
 function simplifyFlightPlan(plan) {
   if (!plan || !Array.isArray(plan.flightPlanItems)) {
-    return { flightPlanId: plan?.flightPlanId || null, waypoints: [] };
+    return { flightPlanId: plan?.flightPlanId ||
+    null, waypoints: [] };
   }
   
   const waypoints = [];
@@ -958,7 +978,8 @@ async function getWorldStatus(sessionId) {
     }
     
     // Returns an array of AirportStatus objects
-    return Array.isArray(payload.result) ? payload.result : [];
+    return Array.isArray(payload.result) ?
+    payload.result : [];
 
   } catch (e) {
     const status = e?.response?.status;
@@ -1149,6 +1170,7 @@ io.on('connection', (socket) => {
    
  // 1. LEAVE OLD ROOMS
  
+
     for (const room of socket.rooms) {
       if (validServerRooms.includes(room) && room !== targetRoom) {
         socket.leave(room);
@@ -1192,9 +1214,9 @@ io.on('connection', (socket) => {
     console.log(`[socket] ❌ User disconnected: ${socket.id}`);
   });
 });
+
 // ⬇️ UPDATED: Dynamic poll interval logic
 let nextBroadcastPollMs = 0;
-// Initialize to 0 so we calculate it dynamically
 
 async function pollAndBroadcastFlights() {
   let sessions = [];
@@ -1207,47 +1229,66 @@ async function pollAndBroadcastFlights() {
   }
 
   const serverNames = ["Expert Server", "Training Server", "Casual Server"];
+  
   for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
     if (!sessionId) continue;
+    
     const roomName = serverName.toLowerCase();
     const room = io.sockets.adapter.rooms.get(roomName);
 
-    // Optional: optimization to skip if room is empty
+    // Skip heavy API fetching if absolutely no one is listening to this server
     if (!room || room.size === 0) {
-       // continue;
+       // continue; 
     }
 
     try {
       const rawFlights = await getFlightsForSession(sessionId);
+      
       // Blip Guard Logic
       const newFlightCount = (Array.isArray(rawFlights) ? rawFlights.length : 0);
       const cachedData = apiCache.flights.get(sessionId);
       const cachedFlightCount = (cachedData && cachedData.count > 0) ? cachedData.count : 0;
+      
       if ((newFlightCount === 0 && cachedFlightCount > 0) || 
           (newFlightCount > 0 && cachedFlightCount > 0 && newFlightCount < (cachedFlightCount * 0.50))) {
         console.warn(`[broadcast] ⚠️ BLIP GUARD: Skipping ${serverName}`);
         continue;
       }
 
-      // ⬇️ NEW: Cleanup disconnected flights from routing cache to prevent memory leaks
-      if (Array.isArray(rawFlights) && apiCache.flightRouting.has(sessionId)) {
-          const activeFlightIds = new Set(rawFlights.map(f => f.flightId));
+      const activeFlightIds = new Set();
+      
+      // ⬇️ NEW: Track active flights for memory cleanup
+      if (Array.isArray(rawFlights)) {
+        for (const f of rawFlights) {
+            if (f.flightId) activeFlightIds.add(f.flightId);
+        }
+      }
+
+      // ⬇️ OPTIMIZED: Unified Memory Leak Cleanup
+      // Clean up BOTH routing cache and the redisSave tracking map
+      if (apiCache.flightRouting.has(sessionId)) {
           const sessionRouting = apiCache.flightRouting.get(sessionId);
-          
           for (const cachedFlightId of sessionRouting.keys()) {
               if (!activeFlightIds.has(cachedFlightId)) {
-                  sessionRouting.delete(cachedFlightId);
-                  // Clears data when user leaves
+                  sessionRouting.delete(cachedFlightId); // Clears routing data
               }
           }
       }
+      
+      // Prevent Out-Of-Memory (OOM) by deleting stale flights from the save tracker
+      for (const trackedFlightId of apiCache.lastRedisSave.keys()) {
+          if (!activeFlightIds.has(trackedFlightId)) {
+              apiCache.lastRedisSave.delete(trackedFlightId);
+          }
+      }
 
-      // Pass sessionId to simplifyFlight so it can pull from the cache
+      // Map and simplify flights
       const finalFlights = rawFlights.map(f => simplifyFlight(f, sessionId));
-      // --- ⬇️ SQLITE HISTORY SAVING (Ported from your old function) ⬇️ ---
+      
       const now = Date.now();
-      // Filter flights to only update DB once every 30 seconds per flight
+      
+      // Filter flights for DB saving
       const flightsToSave = finalFlights.filter(f => {
         const lastSave = apiCache.lastRedisSave.get(f.flightId) || 0;
         if (now - lastSave >= 30000) {
@@ -1256,11 +1297,6 @@ async function pollAndBroadcastFlights() {
         }
         return false;
       });
-      // Execute the save
-      if (flightsToSave.length > 0) {
-        updateBatch(flightsToSave);
-      }
-      // --- ⬆️ END SQLITE LOGIC ⬆️ ---
 
       const payload = {
         server: serverName,
@@ -1269,10 +1305,25 @@ async function pollAndBroadcastFlights() {
         flights: finalFlights,
         timestamp: new Date().toISOString()
       };
-      // Update Cache and Broadcast
+      
+      // Update Cache and Broadcast IMMEDIATELY (Prioritize the user experience)
       apiCache.flights.set(sessionId, payload);
+      
       if (room && room.size > 0) {
         io.to(roomName).emit('all_flights_update', payload);
+      }
+
+      // ⬇️ OPTIMIZED: Non-blocking Database I/O
+      // Push the database write to the end of the Node.js event queue. 
+      // This ensures Socket.IO broadcasts instantly without waiting for SQLite to unlock/write.
+      if (flightsToSave.length > 0) {
+        setImmediate(() => {
+            try {
+                updateBatch(flightsToSave);
+            } catch (dbError) {
+                console.error(`[broadcast] ❌ Background DB batch update failed:`, dbError.message);
+            }
+        });
       }
 
     } catch (e) {
@@ -1296,6 +1347,7 @@ async function pollAndBroadcastFlights() {
             nextBroadcastPollMs = 60000; 
          }
     })
+   
     .finally(() => {
       // 2. Determine Dynamic Interval
       // Check how many users are connected to Socket.IO
@@ -1306,6 +1358,7 @@ async function pollAndBroadcastFlights() {
 
       // 3. Check if a major backoff (like 60s from a 429 error) was triggered
       if (nextBroadcastPollMs > targetInterval) {
+      
         timeToWait = nextBroadcastPollMs;
         console.log(`[broadcast] Backoff triggered. Waiting ${timeToWait}ms.`);
         
@@ -1329,7 +1382,7 @@ async function pollAndBroadcastFlights() {
       
       // 5. Schedule next run
       setTimeout(runBroadcastPoller, timeToWait);
-    });
+});
 })();
 
 /* =========================
@@ -1425,6 +1478,7 @@ async function pollAndBroadcastSecondary() {
       const duration = Date.now() - start;
       let timeToWait = targetInterval - duration;
 
+ 
       // Safety buffer
       if (timeToWait <= 0) timeToWait = 1000;
 
@@ -1448,7 +1502,8 @@ app.get('/api/users/:userId/stats', async (req, res) => {
       return res.status(404).json(err(404, 'User not found or has no stats/grade information.'));
     }
     
-    const statsPayload = {
+   
+  const statsPayload = {
       virtualOrganization: userStats.virtualOrganization,
       discourseUsername: userStats.discourseUsername,
       groups: userStats.groups,
@@ -1462,20 +1517,22 @@ app.get('/api/users/:userId/stats', async (req, res) => {
       lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
       lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
       lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
-      lastReportViolationDate: userStats.lastReportViolationDate
+     
+  lastReportViolationDate: userStats.lastReportViolationDate
     };
-    setOnDemandCached(cacheKey, { userId: userStats.userId || userId, stats: statsPayload }, 5 * 60 * 1000); // 5min TTL
+    setOnDemandCached(cacheKey, { userId: userStats.userId || userId, stats: statsPayload }, 5 * 60 * 1000);
+// 5min TTL
     res.json({ ok: true, userId: userStats.userId || userId, stats: statsPayload });
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
-    res.status(status).json(
+res.status(status).json(
       err(status, 'Failed to fetch user stats', {
         apiErrorCode: apiError?.errorCode,
         detail: e?.message
       })
     );
-  }
+}
 });
 
 // ⬇️ REPLACED ROUTE: Get User Flights (Logbook)
@@ -1493,7 +1550,8 @@ app.get('/api/users/:userId/flights', async (req, res) => {
     // Exact mapping from apis.txt schema including missing booleans
     res.json({ 
       ok: true, 
-      userId, 
+     
+  userId, 
       pageIndex: logbook.pageIndex,
       totalPages: logbook.totalPages,
       totalCount: logbook.totalCount,
@@ -1509,10 +1567,11 @@ app.get('/api/users/:userId/flights', async (req, res) => {
     res.status(status).json(
       err(status, 'Failed to fetch user flights', { 
         detail: e?.message,
+ 
         apiErrorCode: apiError?.errorCode 
       })
     );
-  }
+}
 });
 
 // ⬇️ NEW ROUTE: Get User ATC Sessions (Paginated)
@@ -1531,6 +1590,7 @@ app.get('/api/users/:userId/atc', async (req, res) => {
       ok: true, 
       userId, 
       page: atcSessions.pageIndex,
+ 
       totalPages: atcSessions.totalPages,
       totalCount: atcSessions.totalCount,
       data: atcSessions.data
@@ -1562,7 +1622,8 @@ app.get('/api/users/:userId/stats', async (req, res) => {
     // Exact mapping from apis.txt schema + Extended telemetry
     res.json({ 
       ok: true, 
-      userId: userStats.userId || userId,
+      userId: userStats.userId || 
+userId,
       stats: {
         virtualOrganization: userStats.virtualOrganization,
         discourseUsername: userStats.discourseUsername,
@@ -1574,7 +1635,8 @@ app.get('/api/users/:userId/stats', async (req, res) => {
         atcOperations: userStats.atcOperations,
         atcRank: userStats.atcRank,
         total12MonthsViolations: userStats.total12MonthsViolations,
-        lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
+   
+      lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
         lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
         lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
         lastReportViolationDate: userStats.lastReportViolationDate,
@@ -1585,16 +1647,16 @@ app.get('/api/users/:userId/stats', async (req, res) => {
         violations: userStats.violations
       }
     });
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
-    res.status(status).json(
+res.status(status).json(
       err(status, 'Failed to fetch user stats', {
         apiErrorCode: apiError?.errorCode,
         detail: e?.message
       })
     );
-  }
+}
 });
 
 app.get('/api/flights/:flightId/history', async (req, res) => {
@@ -1624,7 +1686,8 @@ app.post('/api/flights/routes/batch', async (req, res) => {
   }
 
   try {
-    // 1. Fetch routes in parallel
+  
+  // 1. Fetch routes in parallel
     const routeMap = await getBatchFlightRoutes(sessionId, flightIds);
 
     // 2. Return the map
@@ -1636,7 +1699,8 @@ app.post('/api/flights/routes/batch', async (req, res) => {
     });
 
   } catch (e) {
-    const status = e?.response?.status || 500;
+    const status = e?.response?.status ||
+500;
     res.status(status).json(err(status, 'Failed to process batch routes', { detail: e?.message }));
   }
 });
@@ -1697,6 +1761,7 @@ app.get('/if-sessions-test', async (req, res) => {
     res.json({
       ok: true,
       server: targetServer,
+ 
       sessionId,
       totalFlights: Array.isArray(flights) ? flights.length : 0,
       sample: flights?.slice(0, 3) || []
@@ -1709,7 +1774,8 @@ app.get('/if-sessions-test', async (req, res) => {
         apiErrorCode: apiError?.errorCode,
         apiErrorMessage: apiError?.result,
         detail: e?.message
-      })
+     
+  })
     );
   }
 });
@@ -1732,7 +1798,8 @@ app.get('/flights/:sessionId', async (req, res) => {
         f.callsign && f.callsign.toUpperCase().endsWith(suffix)
       );
     }
-    return res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: true });
+    return res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: true 
+});
   }
 
   // 2. Fallback to live fetch if not in cache
@@ -1743,27 +1810,35 @@ app.get('/flights/:sessionId', async (req, res) => {
     let simplified = flights.map(f => simplifyFlight(f, sessionId)); 
     if (callsignFilter) {
       const suffix = callsignFilter.toUpperCase();
-      simplified = simplified.filter(f =>
+simplified = simplified.filter(f =>
         f.callsign && f.callsign.toUpperCase().endsWith(suffix)
       );
-    }
+}
     res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: false });
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status || 500;
-    res.status(status).json(err(status, 'Failed to fetch flights', { detail: e?.message }));
+res.status(status).json(err(status, 'Failed to fetch flights', { detail: e?.message }));
   }
 });
+
+// ⬇️ EXTENDED CACHE TTL FOR FLIGHT PLANS (10 Minutes)
 app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
   const { sessionId, flightId } = req.params;
   const cacheKey = `plan:${sessionId}:${flightId}`;
   const cached = getOnDemandCached(cacheKey);
+  
   if (cached) return res.json({ ok: true, flightId, plan: cached, fromCache: true });
+  
   try {
     const rawPlan = await getFlightPlan(sessionId, flightId);
     if (!rawPlan) {
       return res.status(404).json(err(404, 'Flight plan not found. The flight may not exist or has no filed plan.'));
     }
-    setOnDemandCached(cacheKey, rawPlan, 60 * 1000); // 60s TTL
+    
+    // ⬇️ NEW TTL: 10 * 60 * 1000 = 10 minutes (600,000 ms). 
+    // This allows users to tap the same flight repeatedly without hammering the IF API.
+    setOnDemandCached(cacheKey, rawPlan, 10 * 60 * 1000); 
+    
     res.json({ ok: true, flightId, plan: rawPlan });
   } catch (e) {
     const status = e?.response?.status || 500;
@@ -1776,6 +1851,7 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
     );
   }
 });
+
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
   const { sessionId, flightId } = req.params;
   const cacheKey = `route:${sessionId}:${flightId}`;
@@ -1787,7 +1863,8 @@ app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
       return res.status(404).json(err(404, 'Flight route not found. The flight may not exist or has no position reports available.'));
     }
     setOnDemandCached(cacheKey, rawRoute, 30 * 1000); // 30s TTL
-    res.json({ ok: true, flightId, route: rawRoute });
+    res.json({ 
+ok: true, flightId, route: rawRoute });
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
@@ -1815,7 +1892,8 @@ app.get('/atc/:sessionId', async (req, res) => {
     res.json({ ok: true, count: atcFacilities.length, atc: atcFacilities });
   } catch (e) {
     const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
+  
+  const apiError = e?.response?.data;
     res.status(status).json(
       err(status, 'Failed to fetch ATC facilities', {
         apiErrorCode: apiError?.errorCode,
@@ -1840,7 +1918,8 @@ app.get('/notams/:sessionId', async (req, res) => {
     res.json({ ok: true, count: notams.length, notams: notams });
   } catch (e) {
     const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
+    
+const apiError = e?.response?.data;
     res.status(status).json(
       err(status, 'Failed to fetch NOTAMs', {
         apiErrorCode: apiError?.errorCode,
@@ -1869,7 +1948,8 @@ app.get('/api/live/world/:sessionId', async (req, res) => {
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
-    res.status(status).json(
+ 
+   res.status(status).json(
       err(status, 'Failed to fetch world status', {
         apiErrorCode: apiError?.errorCode,
         detail: e?.message
@@ -1891,7 +1971,8 @@ app.post('/users', async (req, res) => {
 
   try {
     const stats = await getUserStats({ userIds, discourseNames, userHashes });
-    res.json({ ok: true, count: stats.length, users: stats });
+  
+  res.json({ ok: true, count: stats.length, users: stats });
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
@@ -1920,7 +2001,8 @@ app.get('/api/aircraft/:aircraftId/liveries', async (req, res) => {
   } catch (e) {
     const status = e?.response?.status || 500;
     res.status(status).json(
-      err(status, 'Failed to fetch liveries for aircraft', { detail: e?.message })
+      
+err(status, 'Failed to fetch liveries for aircraft', { detail: e?.message })
     );
   }
 });
@@ -1938,6 +2020,7 @@ app.get('/api/airport/:icao', async (req, res) => {
     }
     setOnDemandCached(cacheKey, airportInfo, 10 * 60 * 1000); // 10min TTL (static data)
     res.json({ 
+ 
       ok: true, 
       icao: airportInfo.icao,
       airport: airportInfo 
@@ -1953,7 +2036,7 @@ app.get('/api/airport/:icao', async (req, res) => {
         apiErrorCode: apiError?.errorCode
       })
     );
-  }
+}
 });
 // ⬇️ NEW ROUTE: Get Live Airport Status (Inbound/Outbound/ATC)
 app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
@@ -1968,7 +2051,8 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
       return res.status(404).json(err(404, `Airport status not found for ${icao} on session ${sessionId}`));
     }
     
-    const statusPayload = {
+    const statusPayload = 
+{
       airportName: airportStatus.airportName,
       inboundFlightsCount: airportStatus.inboundFlightsCount,
       inboundFlights: airportStatus.inboundFlights,
@@ -1976,22 +2060,20 @@ app.get('/api/live/airport/:sessionId/:icao/status', async (req, res) => {
       outboundFlights: airportStatus.outboundFlights,
       atcFacilities: airportStatus.atcFacilities
     };
-    // Store with a helper property so cache hit can reconstruct response
+// Store with a helper property so cache hit can reconstruct response
     airportStatus._statusPayload = statusPayload;
-    setOnDemandCached(cacheKey, airportStatus, 30 * 1000); // 30s TTL
+setOnDemandCached(cacheKey, airportStatus, 30 * 1000); // 30s TTL
     res.json({ ok: true, sessionId, icao: airportStatus.airportIcao, status: statusPayload });
-
-  } catch (e) {
+} catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
-    
-    res.status(status).json(
+res.status(status).json(
       err(status, 'Failed to fetch live airport status', { 
         detail: e?.message,
         apiErrorCode: apiError?.errorCode
       })
     );
-  }
+}
 });
 
 // ⬇️ NEW ROUTE: Get Airport ATIS
@@ -2007,7 +2089,8 @@ app.get('/api/live/airport/:sessionId/:icao/atis', async (req, res) => {
       ok: true, 
       sessionId,
       icao: icao.toUpperCase(),
-      atis: atisString
+ 
+     atis: atisString
     });
 
   } catch (e) {
