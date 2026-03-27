@@ -15,170 +15,176 @@
                 extend: {
                     fontFamily: { sans: ['Inter', 'sans-serif'] },
                     colors: {
-                        background: '#09090b',
-                        surface: '#18181b',
-                        surfaceHover: '#27272a',
-                        border: '#27272a',
-                        accent: '#3b82f6',
-                        accentGlow: '#60a5fa'
+                        darkBg: '#09090b',
+                        darkSurface: '#18181b',
+                        darkBorder: '#27272a'
                     }
                 }
             }
         }
+
+        // Initialize theme before body loads to prevent flickering
+        if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+        } else {
+            document.documentElement.classList.remove('dark');
+        }
     </script>
     <style>
-        body { background-color: theme('colors.background'); color: #fafafa; }
-        .glass-card {
-            background: theme('colors.surface');
-            border: 1px solid theme('colors.border');
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
-            position: relative;
-            overflow: hidden;
+        /* Smooth theme transitions */
+        body {
+            transition: background-color 0.3s ease, color 0.3s ease;
         }
-        /* Subtle top gradient for cards */
-        .glass-card::before {
-            content: '';
-            position: absolute;
-            top: 0; left: 0; right: 0; height: 1px;
-            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
-        }
-        /* Custom sleek scrollbar */
+        
+        /* Premium custom scrollbar */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: theme('colors.surface'); }
-        ::-webkit-scrollbar-thumb { background: theme('colors.surfaceHover'); border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: theme('colors.border'); }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .dark ::-webkit-scrollbar-thumb { background: #3f3f46; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .dark ::-webkit-scrollbar-thumb:hover { background: #52525b; }
     </style>
 </head>
-<body class="p-4 md:p-8 min-h-screen">
+<body class="bg-slate-50 dark:bg-darkBg text-slate-900 dark:text-zinc-50 p-4 md:p-8 min-h-screen">
 
     <div class="max-w-6xl mx-auto space-y-6">
         
-        <!-- HEADER -->
         <header class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-10">
-            <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
-                    <i data-lucide="activity" class="text-white w-5 h-5"></i>
+            <div class="flex items-center gap-4">
+                <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30 text-white">
+                    <i data-lucide="activity" class="w-6 h-6"></i>
                 </div>
                 <div>
-                    <h1 class="text-2xl font-semibold tracking-tight">System Monitor</h1>
-                    <p class="text-sm text-zinc-400">Real-time telemetry and infrastructure health</p>
+                    <h1 class="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">System Monitor</h1>
+                    <p class="text-sm text-slate-500 dark:text-zinc-400 font-medium">Real-time telemetry and infrastructure health</p>
                 </div>
             </div>
             
             <div class="flex items-center gap-3">
-                <div id="status-indicator" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 text-sm font-medium transition-colors">
+                <div id="status-indicator" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-200 dark:bg-zinc-800 border border-slate-300 dark:border-zinc-700 text-sm font-semibold transition-colors">
                     <span class="relative flex h-2.5 w-2.5">
-                      <span id="status-ping" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-zinc-400 opacity-75"></span>
-                      <span id="status-dot" class="relative inline-flex rounded-full h-2.5 w-2.5 bg-zinc-500"></span>
+                      <span id="status-ping" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-slate-400 dark:bg-zinc-400 opacity-75"></span>
+                      <span id="status-dot" class="relative inline-flex rounded-full h-2.5 w-2.5 bg-slate-500 dark:bg-zinc-500"></span>
                     </span>
-                    <span id="status-text" class="text-zinc-300">Connecting...</span>
+                    <span id="status-text" class="text-slate-700 dark:text-zinc-300">Connecting...</span>
                 </div>
+                
+                <button onclick="toggleTheme()" class="p-2.5 rounded-full bg-white dark:bg-darkSurface border border-slate-200 dark:border-darkBorder shadow-sm hover:bg-slate-50 dark:hover:bg-zinc-800 transition-all focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <i data-lucide="sun" class="w-5 h-5 text-amber-500 hidden dark:block"></i>
+                    <i data-lucide="moon" class="w-5 h-5 text-indigo-500 block dark:hidden"></i>
+                </button>
             </div>
         </header>
 
-        <!-- KPI ROW -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div class="glass-card rounded-xl p-5">
-                <div class="flex justify-between items-start mb-2">
-                    <p class="text-sm font-medium text-zinc-400">Total API Requests</p>
-                    <i data-lucide="server" class="w-4 h-4 text-zinc-500"></i>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-5">
+            <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm transition-all duration-300 hover:shadow-md">
+                <div class="flex justify-between items-start mb-3">
+                    <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Total Requests</p>
+                    <div class="p-1.5 bg-slate-100 dark:bg-zinc-800 rounded-lg">
+                        <i data-lucide="server" class="w-4 h-4 text-slate-600 dark:text-zinc-400"></i>
+                    </div>
                 </div>
-                <h3 id="kpi-requests" class="text-3xl font-semibold tracking-tight text-white">--</h3>
-                <p class="text-xs text-zinc-500 mt-1">Last 7 Days</p>
+                <h3 id="kpi-requests" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                <p class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">Last 7 Days</p>
             </div>
             
-            <div class="glass-card rounded-xl p-5">
-                <div class="flex justify-between items-start mb-2">
-                    <p class="text-sm font-medium text-zinc-400">Peak Concurrent Sockets</p>
-                    <i data-lucide="users" class="w-4 h-4 text-indigo-400"></i>
+            <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm transition-all duration-300 hover:shadow-md">
+                <div class="flex justify-between items-start mb-3">
+                    <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Peak Sockets</p>
+                    <div class="p-1.5 bg-indigo-50 dark:bg-indigo-500/10 rounded-lg">
+                        <i data-lucide="users" class="w-4 h-4 text-indigo-500 dark:text-indigo-400"></i>
+                    </div>
                 </div>
-                <h3 id="kpi-sockets" class="text-3xl font-semibold tracking-tight text-white">--</h3>
-                <p id="kpi-sockets-time" class="text-xs text-zinc-500 mt-1">Awaiting Data</p>
+                <h3 id="kpi-sockets" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                <p id="kpi-sockets-time" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">Awaiting Data</p>
             </div>
             
-            <div class="glass-card rounded-xl p-5">
-                <div class="flex justify-between items-start mb-2">
-                    <p class="text-sm font-medium text-zinc-400">Busiest Day</p>
-                    <i data-lucide="calendar-check" class="w-4 h-4 text-emerald-400"></i>
+            <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm transition-all duration-300 hover:shadow-md">
+                <div class="flex justify-between items-start mb-3">
+                    <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Busiest Day</p>
+                    <div class="p-1.5 bg-emerald-50 dark:bg-emerald-500/10 rounded-lg">
+                        <i data-lucide="calendar-check" class="w-4 h-4 text-emerald-600 dark:text-emerald-400"></i>
+                    </div>
                 </div>
-                <h3 id="kpi-busy-day" class="text-3xl font-semibold tracking-tight text-white">--</h3>
-                <p id="kpi-busy-reqs" class="text-xs text-zinc-500 mt-1">-- Requests</p>
+                <h3 id="kpi-busy-day" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white truncate">--</h3>
+                <p id="kpi-busy-reqs" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">-- Requests</p>
             </div>
 
-            <div class="glass-card rounded-xl p-5 bg-gradient-to-b from-surface to-zinc-900">
-                <div class="flex justify-between items-start mb-2">
-                    <p class="text-sm font-medium text-zinc-400">System Uptime</p>
-                    <i data-lucide="clock" class="w-4 h-4 text-sky-400"></i>
+            <div class="bg-gradient-to-b from-white to-slate-50 dark:from-darkSurface dark:to-[#121214] backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm transition-all duration-300 flex flex-col justify-between">
+                <div>
+                    <div class="flex justify-between items-start mb-2">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">System Uptime</p>
+                        <i data-lucide="clock" class="w-4 h-4 text-sky-500 dark:text-sky-400"></i>
+                    </div>
+                    <h3 id="kpi-uptime" class="text-2xl font-bold tracking-tight text-slate-900 dark:text-white mt-1 truncate">--</h3>
                 </div>
-                <h3 id="kpi-uptime" class="text-xl font-semibold tracking-tight text-white mt-2 truncate">--</h3>
-                <button onclick="checkHealth()" class="mt-3 text-xs w-full py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors border border-zinc-700">Refresh Check</button>
+                <button onclick="checkHealth()" class="mt-4 text-xs font-semibold w-full py-2 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-slate-700 dark:text-zinc-300 transition-colors border border-slate-200 dark:border-zinc-700">Refresh Check</button>
             </div>
         </div>
 
-        <!-- MAIN CHART SECTION -->
-        <div class="glass-card rounded-xl p-1 relative">
-            <div class="absolute inset-0 bg-gradient-to-r from-indigo-500/10 via-purple-500/5 to-transparent rounded-xl pointer-events-none"></div>
-            <div class="p-5 relative z-10">
+        <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm relative overflow-hidden transition-all duration-300">
+            <div class="absolute inset-0 bg-gradient-to-r from-indigo-500/5 via-purple-500/5 to-transparent pointer-events-none"></div>
+            
+            <div class="p-6 relative z-10">
                 <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-lg font-medium">Traffic & Socket Connections</h2>
-                    <select id="time-range" onchange="fetchTelemetry()" class="bg-zinc-800 border border-zinc-700 text-sm rounded-md px-3 py-1.5 outline-none focus:border-indigo-500">
+                    <h2 class="text-lg font-bold text-slate-800 dark:text-white">Traffic & Socket Connections</h2>
+                    <select id="time-range" onchange="fetchTelemetry()" class="bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-700 text-slate-700 dark:text-zinc-300 text-sm rounded-lg px-4 py-2 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-medium cursor-pointer">
                         <option value="1">Last 24 Hours</option>
                         <option value="3">Last 3 Days</option>
                         <option value="7" selected>Last 7 Days</option>
                     </select>
                 </div>
-                <div class="h-[300px] w-full">
+                <div class="h-[320px] w-full">
                     <canvas id="telemetryChart"></canvas>
                 </div>
             </div>
         </div>
 
-        <!-- BOTTOM TOOLS ROW -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
-            <!-- FLIGHT HISTORY CHECKER -->
-            <div class="lg:col-span-1 glass-card rounded-xl p-6 flex flex-col h-full">
-                <h2 class="text-lg font-medium mb-1">Flight Data Verification</h2>
-                <p class="text-sm text-zinc-400 mb-6">Retrieve breadcrumb history for flights active within the last 24h.</p>
+            <div class="lg:col-span-1 bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6 flex flex-col h-full transition-all duration-300">
+                <h2 class="text-lg font-bold text-slate-800 dark:text-white mb-2">Flight Data Verification</h2>
+                <p class="text-sm text-slate-500 dark:text-zinc-400 mb-6 font-medium">Retrieve breadcrumb history for flights active within the last 24h.</p>
                 
-                <div class="space-y-4 flex-grow">
+                <div class="space-y-5 flex-grow">
                     <div>
-                        <label class="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1 block">Flight ID</label>
+                        <label class="text-xs font-bold text-slate-500 dark:text-zinc-500 uppercase tracking-wider mb-2 block">Flight ID</label>
                         <div class="relative">
-                            <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500"></i>
-                            <input type="text" id="flight-id-input" placeholder="e.g. 5f8d...a1b2" class="w-full bg-zinc-900 border border-zinc-700 rounded-lg pl-9 pr-3 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all">
+                            <i data-lucide="search" class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-zinc-500"></i>
+                            <input type="text" id="flight-id-input" placeholder="e.g. 5f8d...a1b2" class="w-full bg-slate-50 dark:bg-[#09090b] border border-slate-200 dark:border-zinc-800 rounded-xl pl-10 pr-4 py-3 text-sm text-slate-900 dark:text-white outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-medium placeholder:text-slate-400 dark:placeholder:text-zinc-600">
                         </div>
                     </div>
-                    <button onclick="checkHistory()" class="w-full bg-white text-black font-medium py-2.5 rounded-lg hover:bg-zinc-200 transition-colors flex justify-center items-center gap-2">
+                    <button onclick="checkHistory()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-xl transition-colors flex justify-center items-center gap-2 shadow-lg shadow-indigo-500/20">
                         <i data-lucide="database" class="w-4 h-4"></i> Query SQLite
                     </button>
                 </div>
             </div>
 
-            <!-- BREADCRUMBS TABLE -->
-            <div class="lg:col-span-2 glass-card rounded-xl flex flex-col h-full overflow-hidden">
-                <div class="p-5 border-b border-zinc-800 flex justify-between items-center bg-zinc-900/50">
-                    <h2 class="text-lg font-medium flex items-center gap-2">
-                        <i data-lucide="map" class="w-4 h-4 text-zinc-400"></i> Route Coordinates
+            <div class="lg:col-span-2 bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm flex flex-col h-full overflow-hidden transition-all duration-300">
+                <div class="p-5 border-b border-slate-200 dark:border-darkBorder flex justify-between items-center bg-slate-50/50 dark:bg-zinc-900/30">
+                    <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                        <i data-lucide="map" class="w-4 h-4 text-slate-400 dark:text-zinc-400"></i> Route Coordinates
                     </h2>
-                    <span id="coord-count" class="text-xs font-medium bg-zinc-800 text-zinc-300 px-2.5 py-1 rounded border border-zinc-700">0 Points</span>
+                    <span id="coord-count" class="text-xs font-bold bg-slate-200 dark:bg-zinc-800 text-slate-600 dark:text-zinc-300 px-3 py-1 rounded-full border border-slate-300 dark:border-zinc-700">0 Points</span>
                 </div>
                 
                 <div class="overflow-x-auto flex-grow max-h-[350px]">
                     <table class="w-full text-left text-sm whitespace-nowrap">
-                        <thead class="bg-zinc-900/80 sticky top-0 z-10 backdrop-blur-md">
+                        <thead class="bg-slate-100/80 dark:bg-zinc-900/80 sticky top-0 z-10 backdrop-blur-md">
                             <tr>
-                                <th class="py-3 px-5 text-zinc-400 font-medium text-xs uppercase tracking-wider">Timestamp</th>
-                                <th class="py-3 px-5 text-zinc-400 font-medium text-xs uppercase tracking-wider">Coordinates</th>
-                                <th class="py-3 px-5 text-zinc-400 font-medium text-xs uppercase tracking-wider text-right">Altitude</th>
-                                <th class="py-3 px-5 text-zinc-400 font-medium text-xs uppercase tracking-wider text-right">Speed</th>
+                                <th class="py-3.5 px-6 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider border-b border-slate-200 dark:border-zinc-800">Timestamp</th>
+                                <th class="py-3.5 px-6 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider border-b border-slate-200 dark:border-zinc-800">Coordinates</th>
+                                <th class="py-3.5 px-6 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right border-b border-slate-200 dark:border-zinc-800">Altitude</th>
+                                <th class="py-3.5 px-6 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right border-b border-slate-200 dark:border-zinc-800">Speed</th>
                             </tr>
                         </thead>
-                        <tbody id="history-body" class="divide-y divide-zinc-800/50">
+                        <tbody id="history-body" class="divide-y divide-slate-100 dark:divide-zinc-800/50">
                             <tr>
-                                <td colspan="4" class="py-12 text-center text-zinc-500 flex flex-col items-center justify-center gap-2">
-                                    <i data-lucide="plane-takeoff" class="w-8 h-8 opacity-50 mb-2"></i>
-                                    Enter a Flight ID to view telemetry
+                                <td colspan="4" class="py-16 text-center text-slate-400 dark:text-zinc-500 flex flex-col items-center justify-center gap-3">
+                                    <div class="p-4 rounded-full bg-slate-50 dark:bg-zinc-900 border border-slate-100 dark:border-zinc-800">
+                                        <i data-lucide="plane-takeoff" class="w-8 h-8 text-slate-300 dark:text-zinc-600"></i>
+                                    </div>
+                                    <span class="font-medium">Enter a Flight ID to view telemetry</span>
                                 </td>
                             </tr>
                         </tbody>
@@ -193,10 +199,24 @@
         // Initialize Icons
         lucide.createIcons();
 
-        // Global Chart Instance
+        // Global State
         let chartInstance = null;
+        let currentChartData = [];
 
-        // 1. Health Status Logic
+        // --- THEME MANAGEMENT ---
+        function toggleTheme() {
+            const htmlClasses = document.documentElement.classList;
+            htmlClasses.toggle('dark');
+            const isDark = htmlClasses.contains('dark');
+            localStorage.theme = isDark ? 'dark' : 'light';
+            
+            // Re-render chart to update grid & text colors for the new theme
+            if (currentChartData.length > 0) {
+                renderChart(currentChartData);
+            }
+        }
+
+        // --- 1. HEALTH STATUS LOGIC ---
         async function checkHealth() {
             const dot = document.getElementById('status-dot');
             const ping = document.getElementById('status-ping');
@@ -210,23 +230,25 @@
                 
                 if (data.ok) {
                     text.innerText = 'System Online';
+                    text.className = 'text-emerald-700 dark:text-emerald-400';
                     dot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500';
                     ping.className = 'animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75';
-                    indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-sm font-medium text-emerald-400';
+                    indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 text-sm font-semibold';
                     
                     const uptime = new Date(data.timestamp);
                     uptimeText.innerText = uptime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
                 }
             } catch (e) {
                 text.innerText = 'System Offline';
+                text.className = 'text-red-700 dark:text-red-400';
                 dot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500';
-                ping.className = 'hidden'; // Stop pinging when offline
-                indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-500/10 border border-red-500/20 text-sm font-medium text-red-400';
+                ping.className = 'hidden'; 
+                indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 text-sm font-semibold';
                 uptimeText.innerText = 'Connection Lost';
             }
         }
 
-        // 2. Telemetry / Analytics Logic
+        // --- 2. TELEMETRY / ANALYTICS LOGIC ---
         async function fetchTelemetry() {
             const days = document.getElementById('time-range').value;
             try {
@@ -248,18 +270,26 @@
                     document.getElementById('kpi-busy-reqs').innerText = '--';
                 }
 
-                renderChart(data.hourlyBreakdown);
+                currentChartData = data.hourlyBreakdown;
+                renderChart(currentChartData);
 
             } catch (e) {
                 console.error("Failed to load telemetry", e);
             }
         }
 
-        // 3. Render Chart.js
+        // --- 3. DYNAMIC CHART.JS LOGIC ---
         function renderChart(historicalData) {
             const ctx = document.getElementById('telemetryChart').getContext('2d');
+            const isDark = document.documentElement.classList.contains('dark');
             
-            // Format data
+            // Theme specific colors
+            const textColor = isDark ? '#a1a1aa' : '#64748b';
+            const gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+            const tooltipBg = isDark ? '#18181b' : '#ffffff';
+            const tooltipText = isDark ? '#fafafa' : '#0f172a';
+            const tooltipBorder = isDark ? '#27272a' : '#e2e8f0';
+
             const labels = historicalData.map(row => `${row.record_date.slice(5)} ${row.record_hour}`);
             const socketsData = historicalData.map(row => row.peak_concurrent_users);
             const reqsData = historicalData.map(row => row.total_api_requests);
@@ -276,21 +306,23 @@
                         {
                             label: 'Peak Active Sockets',
                             data: socketsData,
-                            borderColor: '#818cf8', // Indigo 400
-                            backgroundColor: 'rgba(129, 140, 248, 0.1)',
-                            borderWidth: 2,
-                            tension: 0.4, // Smooth curves
+                            borderColor: '#6366f1', // Indigo 500
+                            backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                            borderWidth: 2.5,
+                            tension: 0.4, 
                             fill: true,
-                            yAxisID: 'y'
+                            yAxisID: 'y',
+                            pointRadius: 0,
+                            pointHoverRadius: 6
                         },
                         {
                             label: 'API Requests',
                             type: 'bar',
                             data: reqsData,
-                            backgroundColor: 'rgba(56, 189, 248, 0.2)', // Sky 400 with opacity
-                            borderColor: 'rgba(56, 189, 248, 0.5)',
+                            backgroundColor: 'rgba(56, 189, 248, 0.3)', // Sky 400
+                            borderColor: 'rgba(56, 189, 248, 0.6)',
                             borderWidth: 1,
-                            borderRadius: 4,
+                            borderRadius: 6,
                             yAxisID: 'y1'
                         }
                     ]
@@ -302,43 +334,45 @@
                     plugins: {
                         legend: { display: false },
                         tooltip: {
-                            backgroundColor: '#18181b',
-                            titleColor: '#fafafa',
-                            bodyColor: '#a1a1aa',
-                            borderColor: '#27272a',
+                            backgroundColor: tooltipBg,
+                            titleColor: tooltipText,
+                            bodyColor: textColor,
+                            borderColor: tooltipBorder,
                             borderWidth: 1,
                             padding: 12,
                             boxPadding: 6,
-                            usePointStyle: true
+                            usePointStyle: true,
+                            titleFont: { family: 'Inter', size: 13, weight: 'bold' },
+                            bodyFont: { family: 'Inter', size: 12 }
                         }
                     },
                     scales: {
                         x: {
                             grid: { display: false, drawBorder: false },
-                            ticks: { color: '#71717a', maxTicksLimit: 8 }
+                            ticks: { color: textColor, maxTicksLimit: 8, font: { family: 'Inter' } }
                         },
                         y: {
                             type: 'linear',
                             display: true,
                             position: 'left',
-                            grid: { color: 'rgba(255, 255, 255, 0.05)', drawBorder: false },
-                            ticks: { color: '#71717a' },
-                            title: { display: true, text: 'Sockets', color: '#52525b', font: {size: 10} }
+                            grid: { color: gridColor, drawBorder: false },
+                            ticks: { color: textColor, font: { family: 'Inter' } },
+                            title: { display: true, text: 'Sockets', color: textColor, font: { family: 'Inter', size: 11, weight: '600' } }
                         },
                         y1: {
                             type: 'linear',
                             display: true,
                             position: 'right',
                             grid: { display: false },
-                            ticks: { color: '#71717a' },
-                            title: { display: true, text: 'Requests', color: '#52525b', font: {size: 10} }
+                            ticks: { color: textColor, font: { family: 'Inter' } },
+                            title: { display: true, text: 'Requests', color: textColor, font: { family: 'Inter', size: 11, weight: '600' } }
                         }
                     }
                 }
             });
         }
 
-        // 4. Flight History Check Logic
+        // --- 4. FLIGHT HISTORY CHECK LOGIC ---
         async function checkHistory() {
             const flightId = document.getElementById('flight-id-input').value.trim();
             if (!flightId) return alert('Please enter a flight ID');
@@ -347,7 +381,7 @@
             const countLabel = document.getElementById('coord-count');
             
             // Loading State
-            tbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center"><i data-lucide="loader-2" class="w-6 h-6 animate-spin mx-auto text-indigo-500"></i></td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" class="py-12 text-center"><i data-lucide="loader-2" class="w-7 h-7 animate-spin mx-auto text-indigo-500"></i></td></tr>';
             lucide.createIcons();
 
             try {
@@ -355,23 +389,24 @@
                 const data = await res.json();
 
                 if (!data.ok || !data.path.length) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center text-zinc-500">No path data found for this ID in SQLite memory.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="4" class="py-12 text-center text-slate-500 dark:text-zinc-500 font-medium">No path data found for this ID in SQLite memory.</td></tr>';
                     countLabel.innerText = '0 Points';
                     return;
                 }
 
                 countLabel.innerText = `${data.path.length} Points`;
                 tbody.innerHTML = data.path.reverse().map(pt => `
-                    <tr class="hover:bg-white/[0.02] transition-colors group cursor-default">
-                        <td class="py-3 px-5 text-zinc-300">${new Date(pt.time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}</td>
-                        <td class="py-3 px-5 font-mono text-indigo-300 text-xs">${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}</td>
-                        <td class="py-3 px-5 text-right font-medium text-emerald-400">${Math.round(pt.alt).toLocaleString()} <span class="text-zinc-600 text-xs ml-0.5 font-normal">ft</span></td>
-                        <td class="py-3 px-5 text-right font-medium text-amber-400/90">${Math.round(pt.gs)} <span class="text-zinc-600 text-xs ml-0.5 font-normal">kt</span></td>
+                    <tr class="hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors group cursor-default">
+                        <td class="py-3.5 px-6 text-slate-700 dark:text-zinc-300 font-medium">${new Date(pt.time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}</td>
+                        <td class="py-3.5 px-6 font-mono text-indigo-600 dark:text-indigo-400 text-xs">${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}</td>
+                        <td class="py-3.5 px-6 text-right font-bold text-emerald-600 dark:text-emerald-400">${Math.round(pt.alt).toLocaleString()} <span class="text-slate-400 dark:text-zinc-600 text-xs ml-0.5 font-medium">ft</span></td>
+                        <td class="py-3.5 px-6 text-right font-bold text-amber-600 dark:text-amber-400/90">${Math.round(pt.gs)} <span class="text-slate-400 dark:text-zinc-600 text-xs ml-0.5 font-medium">kt</span></td>
                     </tr>
                 `).join('');
 
             } catch (e) {
-                tbody.innerHTML = `<tr><td colspan="4" class="py-8 text-center text-red-400">Error: ${e.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" class="py-12 text-center text-red-600 dark:text-red-400 font-medium flex justify-center items-center gap-2"><i data-lucide="alert-circle" class="w-5 h-5"></i> Error: ${e.message}</td></tr>`;
+                lucide.createIcons();
             }
         }
 
