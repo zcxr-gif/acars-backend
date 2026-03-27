@@ -10,6 +10,7 @@ const axios = require('axios');
 const cors = require('cors');
 const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs');
 require('dotenv').config();
+const telemetry = require('./telemetry.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -48,6 +49,16 @@ app.use(cors(corsOptions));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Telemetry Middleware: Track all incoming HTTP requests
+app.use((req, res, next) => {
+    // Only track actual API hits, ignore static file polling if needed
+    if (req.path.startsWith('/api/') || req.path.startsWith('/if-') || req.path.startsWith('/flights/')) {
+        // req.ip works best if 'trust proxy' is enabled in Express for reverse proxies (like NGINX/Cloudflare)
+        telemetry.recordApiHit(req.headers['x-forwarded-for'] || req.socket.remoteAddress);
+    }
+    next();
+});
 /* =========================
  * Config
  * ========================= */
@@ -1489,6 +1500,20 @@ async function pollAndBroadcastSecondary() {
  * API Endpoints
  * ========================= */
 
+// ⬇️ NEW ROUTE: Retrieve Telemetry Analytics for Dashboard
+app.get('/api/admin/telemetry', (req, res) => {
+    // Optional: Add a simple secret key check here to prevent public access
+    // if (req.query.secret !== process.env.TRACK_WEBHOOK_SECRET) return res.status(403).json(err(403, 'Forbidden'));
+    
+    try {
+        const days = parseInt(req.query.days || '7', 10);
+        const stats = telemetry.getAnalytics(days);
+        res.json({ ok: true, data: stats });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
 // ⬇️ REPLACED ROUTE: Get User Stats (Grade Info)
 app.get('/api/users/:userId/stats', async (req, res) => {
   const { userId } = req.params;
@@ -2117,6 +2142,13 @@ httpServer.listen(PORT, () => {
   // Updated logs to use the new constants
   console.log(`📡 Flight Polling: ${ACTIVE_POLL_MS/1000}s (active) / ${IDLE_POLL_MS/1000}s (idle)`);
   console.log(`📡 Secondary Polling: ${SECONDARY_ACTIVE_MS/1000}s (active) / ${SECONDARY_IDLE_MS/1000}s (idle)`);
+
+  // Start the Telemetry Snapshotter (Runs every 15 minutes)
+  const FIFTEEN_MINUTES = 15 * 60 * 1000;
+  setInterval(() => {
+      const activeSockets = io.engine.clientsCount;
+      telemetry.saveSnapshot(activeSockets);
+  }, FIFTEEN_MINUTES);
   
   if (!IF_API_KEY) {
     console.warn('⚠️  IF API key is missing. Set INFINITE_FLIGHT_API_KEY in your .env file.');

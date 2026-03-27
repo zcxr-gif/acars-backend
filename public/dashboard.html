@@ -1,80 +1,344 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Backend Health & History Monitor</title>
+    <title>Telemetry & Health | System Monitor</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    colors: {
+                        background: '#09090b',
+                        surface: '#18181b',
+                        surfaceHover: '#27272a',
+                        border: '#27272a',
+                        accent: '#3b82f6',
+                        accentGlow: '#60a5fa'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background-color: theme('colors.background'); color: #fafafa; }
+        .glass-card {
+            background: theme('colors.surface');
+            border: 1px solid theme('colors.border');
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
+            position: relative;
+            overflow: hidden;
+        }
+        /* Subtle top gradient for cards */
+        .glass-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+        }
+        /* Custom sleek scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: theme('colors.surface'); }
+        ::-webkit-scrollbar-thumb { background: theme('colors.surfaceHover'); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: theme('colors.border'); }
+    </style>
 </head>
-<body class="bg-slate-900 text-white p-8">
+<body class="p-4 md:p-8 min-h-screen">
 
-    <div class="max-w-4xl mx-auto">
-        <header class="flex justify-between items-center mb-8">
-            <h1 class="text-3xl font-bold text-sky-400">System Monitor</h1>
-            <div id="status-badge" class="px-4 py-1 rounded-full bg-slate-700 text-sm">Checking Status...</div>
+    <div class="max-w-6xl mx-auto space-y-6">
+        
+        <!-- HEADER -->
+        <header class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-10">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                    <i data-lucide="activity" class="text-white w-5 h-5"></i>
+                </div>
+                <div>
+                    <h1 class="text-2xl font-semibold tracking-tight">System Monitor</h1>
+                    <p class="text-sm text-zinc-400">Real-time telemetry and infrastructure health</p>
+                </div>
+            </div>
+            
+            <div class="flex items-center gap-3">
+                <div id="status-indicator" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 text-sm font-medium transition-colors">
+                    <span class="relative flex h-2.5 w-2.5">
+                      <span id="status-ping" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-zinc-400 opacity-75"></span>
+                      <span id="status-dot" class="relative inline-flex rounded-full h-2.5 w-2.5 bg-zinc-500"></span>
+                    </span>
+                    <span id="status-text" class="text-zinc-300">Connecting...</span>
+                </div>
+            </div>
         </header>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
-            <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
-                <h2 class="text-xl font-semibold mb-4">Backend Health</h2>
-                <div id="health-details" class="space-y-2 text-slate-300">
-                    <p>Uptime: <span id="health-time">--</span></p>
-                    <p>API Version: <span class="text-sky-400">v2 (Infinite Flight)</span></p>
+        <!-- KPI ROW -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="glass-card rounded-xl p-5">
+                <div class="flex justify-between items-start mb-2">
+                    <p class="text-sm font-medium text-zinc-400">Total API Requests</p>
+                    <i data-lucide="server" class="w-4 h-4 text-zinc-500"></i>
                 </div>
-                <button onclick="checkHealth()" class="mt-4 bg-sky-600 hover:bg-sky-500 px-4 py-2 rounded text-sm transition">Refresh Health</button>
+                <h3 id="kpi-requests" class="text-3xl font-semibold tracking-tight text-white">--</h3>
+                <p class="text-xs text-zinc-500 mt-1">Last 7 Days</p>
+            </div>
+            
+            <div class="glass-card rounded-xl p-5">
+                <div class="flex justify-between items-start mb-2">
+                    <p class="text-sm font-medium text-zinc-400">Peak Concurrent Sockets</p>
+                    <i data-lucide="users" class="w-4 h-4 text-indigo-400"></i>
+                </div>
+                <h3 id="kpi-sockets" class="text-3xl font-semibold tracking-tight text-white">--</h3>
+                <p id="kpi-sockets-time" class="text-xs text-zinc-500 mt-1">Awaiting Data</p>
+            </div>
+            
+            <div class="glass-card rounded-xl p-5">
+                <div class="flex justify-between items-start mb-2">
+                    <p class="text-sm font-medium text-zinc-400">Busiest Day</p>
+                    <i data-lucide="calendar-check" class="w-4 h-4 text-emerald-400"></i>
+                </div>
+                <h3 id="kpi-busy-day" class="text-3xl font-semibold tracking-tight text-white">--</h3>
+                <p id="kpi-busy-reqs" class="text-xs text-zinc-500 mt-1">-- Requests</p>
             </div>
 
-            <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
-                <h2 class="text-xl font-semibold mb-4">Path History Check</h2>
-                <div class="flex gap-2">
-                    <input type="text" id="flight-id-input" placeholder="Paste Flight ID..." class="bg-slate-900 border border-slate-600 rounded px-3 py-2 text-sm w-full outline-none focus:border-sky-500">
-                    <button onclick="checkHistory()" class="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded text-sm transition">Verify</button>
+            <div class="glass-card rounded-xl p-5 bg-gradient-to-b from-surface to-zinc-900">
+                <div class="flex justify-between items-start mb-2">
+                    <p class="text-sm font-medium text-zinc-400">System Uptime</p>
+                    <i data-lucide="clock" class="w-4 h-4 text-sky-400"></i>
                 </div>
-                <p class="text-xs text-slate-500 mt-2 italic">Note: Only flights active in the last 24h are stored.</p>
+                <h3 id="kpi-uptime" class="text-xl font-semibold tracking-tight text-white mt-2 truncate">--</h3>
+                <button onclick="checkHealth()" class="mt-3 text-xs w-full py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors border border-zinc-700">Refresh Check</button>
             </div>
         </div>
 
-        <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
-            <div class="p-6 border-b border-slate-700 flex justify-between items-center">
-                <h2 class="text-xl font-semibold">Stored Coordinates (Breadcrumbs)</h2>
-                <span id="coord-count" class="text-sm bg-slate-700 px-3 py-1 rounded">0 Points</span>
+        <!-- MAIN CHART SECTION -->
+        <div class="glass-card rounded-xl p-1 relative">
+            <div class="absolute inset-0 bg-gradient-to-r from-indigo-500/10 via-purple-500/5 to-transparent rounded-xl pointer-events-none"></div>
+            <div class="p-5 relative z-10">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-lg font-medium">Traffic & Socket Connections</h2>
+                    <select id="time-range" onchange="fetchTelemetry()" class="bg-zinc-800 border border-zinc-700 text-sm rounded-md px-3 py-1.5 outline-none focus:border-indigo-500">
+                        <option value="1">Last 24 Hours</option>
+                        <option value="3">Last 3 Days</option>
+                        <option value="7" selected>Last 7 Days</option>
+                    </select>
+                </div>
+                <div class="h-[300px] w-full">
+                    <canvas id="telemetryChart"></canvas>
+                </div>
             </div>
-            <div class="max-h-96 overflow-y-auto">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-900 sticky top-0">
-                        <tr>
-                            <th class="p-4">Timestamp</th>
-                            <th class="p-4">Lat/Lon</th>
-                            <th class="p-4">Altitude</th>
-                            <th class="p-4">Speed</th>
-                        </tr>
-                    </thead>
-                    <tbody id="history-body" class="divide-y divide-slate-700">
+        </div>
+
+        <!-- BOTTOM TOOLS ROW -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            
+            <!-- FLIGHT HISTORY CHECKER -->
+            <div class="lg:col-span-1 glass-card rounded-xl p-6 flex flex-col h-full">
+                <h2 class="text-lg font-medium mb-1">Flight Data Verification</h2>
+                <p class="text-sm text-zinc-400 mb-6">Retrieve breadcrumb history for flights active within the last 24h.</p>
+                
+                <div class="space-y-4 flex-grow">
+                    <div>
+                        <label class="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1 block">Flight ID</label>
+                        <div class="relative">
+                            <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500"></i>
+                            <input type="text" id="flight-id-input" placeholder="e.g. 5f8d...a1b2" class="w-full bg-zinc-900 border border-zinc-700 rounded-lg pl-9 pr-3 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all">
+                        </div>
+                    </div>
+                    <button onclick="checkHistory()" class="w-full bg-white text-black font-medium py-2.5 rounded-lg hover:bg-zinc-200 transition-colors flex justify-center items-center gap-2">
+                        <i data-lucide="database" class="w-4 h-4"></i> Query SQLite
+                    </button>
+                </div>
+            </div>
+
+            <!-- BREADCRUMBS TABLE -->
+            <div class="lg:col-span-2 glass-card rounded-xl flex flex-col h-full overflow-hidden">
+                <div class="p-5 border-b border-zinc-800 flex justify-between items-center bg-zinc-900/50">
+                    <h2 class="text-lg font-medium flex items-center gap-2">
+                        <i data-lucide="map" class="w-4 h-4 text-zinc-400"></i> Route Coordinates
+                    </h2>
+                    <span id="coord-count" class="text-xs font-medium bg-zinc-800 text-zinc-300 px-2.5 py-1 rounded border border-zinc-700">0 Points</span>
+                </div>
+                
+                <div class="overflow-x-auto flex-grow max-h-[350px]">
+                    <table class="w-full text-left text-sm whitespace-nowrap">
+                        <thead class="bg-zinc-900/80 sticky top-0 z-10 backdrop-blur-md">
+                            <tr>
+                                <th class="py-3 px-5 text-zinc-400 font-medium text-xs uppercase tracking-wider">Timestamp</th>
+                                <th class="py-3 px-5 text-zinc-400 font-medium text-xs uppercase tracking-wider">Coordinates</th>
+                                <th class="py-3 px-5 text-zinc-400 font-medium text-xs uppercase tracking-wider text-right">Altitude</th>
+                                <th class="py-3 px-5 text-zinc-400 font-medium text-xs uppercase tracking-wider text-right">Speed</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-body" class="divide-y divide-zinc-800/50">
+                            <tr>
+                                <td colspan="4" class="py-12 text-center text-zinc-500 flex flex-col items-center justify-center gap-2">
+                                    <i data-lucide="plane-takeoff" class="w-8 h-8 opacity-50 mb-2"></i>
+                                    Enter a Flight ID to view telemetry
+                                </td>
+                            </tr>
                         </tbody>
-                </table>
+                    </table>
+                </div>
             </div>
+
         </div>
     </div>
 
     <script>
-        // 1. Health Check Logic
+        // Initialize Icons
+        lucide.createIcons();
+
+        // Global Chart Instance
+        let chartInstance = null;
+
+        // 1. Health Status Logic
         async function checkHealth() {
-            const badge = document.getElementById('status-badge');
+            const dot = document.getElementById('status-dot');
+            const ping = document.getElementById('status-ping');
+            const text = document.getElementById('status-text');
+            const indicator = document.getElementById('status-indicator');
+            const uptimeText = document.getElementById('kpi-uptime');
+
             try {
                 const res = await fetch('/health');
                 const data = await res.json();
+                
                 if (data.ok) {
-                    badge.innerText = '● SYSTEM ONLINE';
-                    badge.className = 'px-4 py-1 rounded-full bg-emerald-900 text-emerald-300 text-sm';
-                    document.getElementById('health-time').innerText = new Date(data.timestamp).toLocaleString();
+                    text.innerText = 'System Online';
+                    dot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500';
+                    ping.className = 'animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75';
+                    indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-sm font-medium text-emerald-400';
+                    
+                    const uptime = new Date(data.timestamp);
+                    uptimeText.innerText = uptime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
                 }
             } catch (e) {
-                badge.innerText = '● SYSTEM OFFLINE';
-                badge.className = 'px-4 py-1 rounded-full bg-red-900 text-red-300 text-sm';
+                text.innerText = 'System Offline';
+                dot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500';
+                ping.className = 'hidden'; // Stop pinging when offline
+                indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-500/10 border border-red-500/20 text-sm font-medium text-red-400';
+                uptimeText.innerText = 'Connection Lost';
             }
         }
 
-        // 2. History Check Logic
+        // 2. Telemetry / Analytics Logic
+        async function fetchTelemetry() {
+            const days = document.getElementById('time-range').value;
+            try {
+                const res = await fetch(`/api/admin/telemetry?days=${days}`);
+                const { ok, data } = await res.json();
+                
+                if (!ok) return;
+
+                // Update KPIs
+                document.getElementById('kpi-requests').innerText = data.totalRequestsWindow.toLocaleString();
+                document.getElementById('kpi-sockets').innerText = data.highestPeakUsers.toLocaleString();
+                document.getElementById('kpi-sockets-time').innerText = data.busiestHour || 'No Data';
+                
+                if (data.busiestDay) {
+                    document.getElementById('kpi-busy-day').innerText = data.busiestDay.date;
+                    document.getElementById('kpi-busy-reqs').innerText = `${data.busiestDay.requests.toLocaleString()} Reqs`;
+                } else {
+                    document.getElementById('kpi-busy-day').innerText = '--';
+                    document.getElementById('kpi-busy-reqs').innerText = '--';
+                }
+
+                renderChart(data.hourlyBreakdown);
+
+            } catch (e) {
+                console.error("Failed to load telemetry", e);
+            }
+        }
+
+        // 3. Render Chart.js
+        function renderChart(historicalData) {
+            const ctx = document.getElementById('telemetryChart').getContext('2d');
+            
+            // Format data
+            const labels = historicalData.map(row => `${row.record_date.slice(5)} ${row.record_hour}`);
+            const socketsData = historicalData.map(row => row.peak_concurrent_users);
+            const reqsData = historicalData.map(row => row.total_api_requests);
+
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Peak Active Sockets',
+                            data: socketsData,
+                            borderColor: '#818cf8', // Indigo 400
+                            backgroundColor: 'rgba(129, 140, 248, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.4, // Smooth curves
+                            fill: true,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'API Requests',
+                            type: 'bar',
+                            data: reqsData,
+                            backgroundColor: 'rgba(56, 189, 248, 0.2)', // Sky 400 with opacity
+                            borderColor: 'rgba(56, 189, 248, 0.5)',
+                            borderWidth: 1,
+                            borderRadius: 4,
+                            yAxisID: 'y1'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: '#18181b',
+                            titleColor: '#fafafa',
+                            bodyColor: '#a1a1aa',
+                            borderColor: '#27272a',
+                            borderWidth: 1,
+                            padding: 12,
+                            boxPadding: 6,
+                            usePointStyle: true
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { display: false, drawBorder: false },
+                            ticks: { color: '#71717a', maxTicksLimit: 8 }
+                        },
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            grid: { color: 'rgba(255, 255, 255, 0.05)', drawBorder: false },
+                            ticks: { color: '#71717a' },
+                            title: { display: true, text: 'Sockets', color: '#52525b', font: {size: 10} }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            grid: { display: false },
+                            ticks: { color: '#71717a' },
+                            title: { display: true, text: 'Requests', color: '#52525b', font: {size: 10} }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 4. Flight History Check Logic
         async function checkHistory() {
             const flightId = document.getElementById('flight-id-input').value.trim();
             if (!flightId) return alert('Please enter a flight ID');
@@ -82,35 +346,42 @@
             const tbody = document.getElementById('history-body');
             const countLabel = document.getElementById('coord-count');
             
+            // Loading State
+            tbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center"><i data-lucide="loader-2" class="w-6 h-6 animate-spin mx-auto text-indigo-500"></i></td></tr>';
+            lucide.createIcons();
+
             try {
                 const res = await fetch(`/api/flights/${flightId}/history`);
                 const data = await res.json();
 
                 if (!data.ok || !data.path.length) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="p-8 text-center text-slate-500">No path data found for this ID.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="4" class="py-8 text-center text-zinc-500">No path data found for this ID in SQLite memory.</td></tr>';
                     countLabel.innerText = '0 Points';
                     return;
                 }
 
                 countLabel.innerText = `${data.path.length} Points`;
                 tbody.innerHTML = data.path.reverse().map(pt => `
-                    <tr class="hover:bg-slate-700/50 transition">
-                        <td class="p-4 text-slate-400">${new Date(pt.time).toLocaleTimeString()}</td>
-                        <td class="p-4 font-mono text-sky-300">${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}</td>
-                        <td class="p-4">${Math.round(pt.alt)} ft</td>
-                        <td class="p-4">${Math.round(pt.gs)} kt</td>
+                    <tr class="hover:bg-white/[0.02] transition-colors group cursor-default">
+                        <td class="py-3 px-5 text-zinc-300">${new Date(pt.time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}</td>
+                        <td class="py-3 px-5 font-mono text-indigo-300 text-xs">${pt.lat.toFixed(4)}, ${pt.lon.toFixed(4)}</td>
+                        <td class="py-3 px-5 text-right font-medium text-emerald-400">${Math.round(pt.alt).toLocaleString()} <span class="text-zinc-600 text-xs ml-0.5 font-normal">ft</span></td>
+                        <td class="py-3 px-5 text-right font-medium text-amber-400/90">${Math.round(pt.gs)} <span class="text-zinc-600 text-xs ml-0.5 font-normal">kt</span></td>
                     </tr>
                 `).join('');
 
             } catch (e) {
-                alert('Error fetching history: ' + e.message);
+                tbody.innerHTML = `<tr><td colspan="4" class="py-8 text-center text-red-400">Error: ${e.message}</td></tr>`;
             }
         }
 
-        // Run health check on load
+        // Initialize Data on Load
         checkHealth();
-        // Refresh health every 30 seconds
-        setInterval(checkHealth, 30000);
+        fetchTelemetry();
+
+        // Setup Polling Intervals
+        setInterval(checkHealth, 30000); // 30s Health check
+        setInterval(fetchTelemetry, 60000); // 1min Telemetry refresh
     </script>
 </body>
 </html>
