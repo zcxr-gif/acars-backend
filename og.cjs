@@ -11,7 +11,6 @@ const cors = require('cors');
 const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
-const badgePresence = require('./badge_presence.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -103,9 +102,6 @@ const apiCache = {
 };
 // Cache sessions for 1 minute to prevent spamming the /sessions endpoint
 const SESSIONS_CACHE_TTL_MS = 60 * 1000;
-
-// Attach badge + presence endpoints (uses apiCache.usernameIndex populated by indexFlights below)
-badgePresence.attach({ app, apiCache });
 /* =========================
  * Axios client
  * ========================= */
@@ -1300,9 +1296,6 @@ async function pollAndBroadcastFlights() {
 
       // Map and simplify flights
       const finalFlights = rawFlights.map(f => simplifyFlight(f, sessionId));
-
-      // Build username index for /badge and /api/presence (replaces previous index for this session — no leak)
-      badgePresence.indexFlights(apiCache, sessionId, serverName, finalFlights);
       
       const now = Date.now();
       
