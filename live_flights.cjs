@@ -11,7 +11,6 @@ const cors = require('cors');
 const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
-const badgePresence = require('./badge_presence.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -72,8 +71,8 @@ const IF_API_KEY = RAW_IF_KEY.trim();
 const VA_BACKEND_URL = (process.env.VA_BACKEND_URL || 'http://localhost:5000').trim();
 const VA_ROSTER_POLL_MS = parseInt(process.env.VA_ROSTER_POLL_MS || (5 * 60 * 1000), 10); // 5 minutes
 const TRACK_WEBHOOK_SECRET = process.env.TRACK_WEBHOOK_SECRET || '';
-const ACTIVE_POLL_MS = 30000; // 10 seconds (User connected)
-const IDLE_POLL_MS = 50000;   // 30 seconds (No users)
+const ACTIVE_POLL_MS = 15000; // 10 seconds (User connected)
+const IDLE_POLL_MS = 35000;   // 30 seconds (No users)
 
 const SECONDARY_ACTIVE_MS = 50000;
 // 30 seconds (User connected)
@@ -103,9 +102,6 @@ const apiCache = {
 };
 // Cache sessions for 1 minute to prevent spamming the /sessions endpoint
 const SESSIONS_CACHE_TTL_MS = 60 * 1000;
-
-// Attach badge + presence endpoints (uses apiCache.usernameIndex populated by indexFlights below)
-badgePresence.attach({ app, apiCache });
 /* =========================
  * Axios client
  * ========================= */
@@ -1300,16 +1296,13 @@ async function pollAndBroadcastFlights() {
 
       // Map and simplify flights
       const finalFlights = rawFlights.map(f => simplifyFlight(f, sessionId));
-
-      // Build username index for /badge and /api/presence (replaces previous index for this session — no leak)
-      badgePresence.indexFlights(apiCache, sessionId, serverName, finalFlights);
       
       const now = Date.now();
       
       // Filter flights for DB saving
       const flightsToSave = finalFlights.filter(f => {
         const lastSave = apiCache.lastRedisSave.get(f.flightId) || 0;
-        if (now - lastSave >= 30000) {
+        if (now - lastSave >= 15000) {
           apiCache.lastRedisSave.set(f.flightId, now);
           return true;
         }
