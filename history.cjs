@@ -6,6 +6,14 @@ const fs = require('fs');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'flight_history.db');
 
+// Tunables — change these in one place if you ever need to.
+const MAX_FLIGHTS_PER_USER = 5;     // was effectively 2
+const MAX_POINTS_PER_FLIGHT = 1500; // was 3000 — halved, since per-point cost dropped ~45%
+const MAX_SESSIONS_PER_FLIGHT = 3;
+const SESSION_GAP_MS = 30 * 60 * 1000;
+const CRUISE_THROTTLE_MS = 120000;
+const CRUISE_ALT_FT = 20000;
+
 // Ensure the directory exists (Critical for Volumes!)
 if (!fs.existsSync(DATA_DIR)) {
   console.log(`[history] Creating data directory: ${DATA_DIR}`);
@@ -31,7 +39,7 @@ try {
 // 2. High-Performance & Memory Safety Configuration
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = OFF');
-db.pragma('cache_size = -50000'); 
+db.pragma('cache_size = -50000');
 
 // 3. Create Tables
 db.prepare(`
@@ -46,8 +54,50 @@ db.prepare(`
 `).run();
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_user_time ON flight_history (userId, lastSeen)`).run();
 
+/* =========================
+ * Compact point format
+ * On-disk: [lat, lon, alt, gs, time]  (~40 bytes/point)
+ * In-memory: { lat, lon, alt, gs, time }
+ * Convert only at the read/write boundary.
+ * ========================= */
+const I_LAT = 0, I_LON = 1, I_ALT = 2, I_GS = 3, I_TIME = 4;
+
+function packPoint(p) {
+  return [
+    Math.round(p.lat * 10000) / 10000, // ~11m precision — plenty for tracking
+    Math.round(p.lon * 10000) / 10000,
+    Math.round(p.alt),
+    Math.round(p.gs),
+    p.time
+  ];
+}
+
+function unpackPoint(a) {
+  return { lat: a[I_LAT], lon: a[I_LON], alt: a[I_ALT], gs: a[I_GS], time: a[I_TIME] };
+}
+
 /**
- * Clean up data older than 24 hours 
+ * Reads a path_json string and returns it as an array of {lat,lon,alt,gs,time}.
+ * Transparently handles both the new compact format (array of arrays) and
+ * the legacy object format that may still be on disk pre-migration.
+ */
+function readPath(json) {
+  if (!json) return [];
+  let parsed;
+  try { parsed = JSON.parse(json); } catch { return []; }
+  if (!Array.isArray(parsed) || parsed.length === 0) return [];
+  // Compact format: first element is an array
+  if (Array.isArray(parsed[0])) return parsed.map(unpackPoint);
+  // Legacy object format
+  return parsed;
+}
+
+function writePath(pointsArr) {
+  return JSON.stringify(pointsArr.map(packPoint));
+}
+
+/**
+ * Clean up data older than 24 hours
  */
 function purgeOldData() {
   const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
@@ -55,17 +105,26 @@ function purgeOldData() {
 }
 
 /**
- * Enforces the "Max 2 Flights per User" rule for a specific user
+ * Enforces the "Max N Flights per User" rule.
+ * Deletes as many oldest flights as needed so that adding ONE new flight
+ * keeps the user at or under MAX_FLIGHTS_PER_USER.
  */
 function enforceUserLimit(userId) {
-  const userFlights = db.prepare('SELECT flightId FROM flight_history WHERE userId = ? ORDER BY lastSeen ASC').all(userId);
-  if (userFlights.length >= 2) {
-    db.prepare('DELETE FROM flight_history WHERE flightId = ?').run(userFlights[0].flightId);
+  const userFlights = db.prepare(
+    'SELECT flightId FROM flight_history WHERE userId = ? ORDER BY lastSeen ASC'
+  ).all(userId);
+
+  const excess = userFlights.length - (MAX_FLIGHTS_PER_USER - 1);
+  if (excess > 0) {
+    const delStmt = db.prepare('DELETE FROM flight_history WHERE flightId = ?');
+    for (let i = 0; i < excess; i++) {
+      delStmt.run(userFlights[i].flightId);
+    }
   }
 }
 
 /**
- * Logic to determine if we should skip recording a point to the JSON array 
+ * Logic to determine if we should skip recording a point to the array
  */
 function shouldSkipPoint(flight, lastPoint, now) {
   if (!lastPoint) return false;
@@ -76,9 +135,9 @@ function shouldSkipPoint(flight, lastPoint, now) {
   }
 
   // 2. Cruising Altitude Throttling
-  const isCruising = flight.position.alt_ft >= 20000;
+  const isCruising = flight.position.alt_ft >= CRUISE_ALT_FT;
   const timeSinceLast = now - lastPoint.time;
-  if (isCruising && timeSinceLast < 120000) {
+  if (isCruising && timeSinceLast < CRUISE_THROTTLE_MS) {
     return true;
   }
 
@@ -89,26 +148,26 @@ function shouldSkipPoint(flight, lastPoint, now) {
  * Calculates distance between two coordinates in Nautical Miles
  */
 function getDistanceNM(lat1, lon1, lat2, lon2) {
-    const R = 3440.065; 
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-              Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c;
+  const R = 3440.065;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
 /**
  * Keeps only the last N flight sessions within the path array.
  */
-function trimFlightSessions(pathArray, maxSessions = 3, sessionGapMs = 1800000) { 
+function trimFlightSessions(pathArray, maxSessions = MAX_SESSIONS_PER_FLIGHT, sessionGapMs = SESSION_GAP_MS) {
   if (pathArray.length < 2) return pathArray;
 
-  let sessionBoundaries = [];
-  
+  const sessionBoundaries = [];
+
   for (let i = 1; i < pathArray.length; i++) {
-    const p1 = pathArray[i-1];
+    const p1 = pathArray[i - 1];
     const p2 = pathArray[i];
 
     const isTimeGap = (p2.time - p1.time) > sessionGapMs;
@@ -125,29 +184,31 @@ function trimFlightSessions(pathArray, maxSessions = 3, sessionGapMs = 1800000) 
     pathArray = pathArray.slice(sliceIndex);
   }
 
-  if (pathArray.length > 3000) {
-      return pathArray.slice(-3000);
+  if (pathArray.length > MAX_POINTS_PER_FLIGHT) {
+    return pathArray.slice(-MAX_POINTS_PER_FLIGHT);
   }
 
   return pathArray;
 }
 
 /**
- * [NEW] Retroactive Database Cleaner
- * Sweeps the entire DB to enforce limits and compress existing bloated arrays.
+ * Retroactive Database Cleaner
+ * Sweeps the entire DB to enforce limits, compress existing bloated arrays,
+ * and migrate legacy object-format paths to the new compact array format.
  */
 function runDeepClean() {
   console.log('[history] 🧹 Starting deep clean of existing database...');
-  
+
   // Phase 1: Enforce global user limits
   const users = db.prepare('SELECT DISTINCT userId FROM flight_history').all();
   let deletedFlights = 0;
-  
+
   for (const u of users) {
-    const userFlights = db.prepare('SELECT flightId FROM flight_history WHERE userId = ? ORDER BY lastSeen ASC').all(u.userId);
-    // If a user has more than 2 flights, delete the oldest ones
-    if (userFlights.length > 2) {
-      const flightsToDelete = userFlights.slice(0, userFlights.length - 2);
+    const userFlights = db.prepare(
+      'SELECT flightId FROM flight_history WHERE userId = ? ORDER BY lastSeen ASC'
+    ).all(u.userId);
+    if (userFlights.length > MAX_FLIGHTS_PER_USER) {
+      const flightsToDelete = userFlights.slice(0, userFlights.length - MAX_FLIGHTS_PER_USER);
       for (const f of flightsToDelete) {
         db.prepare('DELETE FROM flight_history WHERE flightId = ?').run(f.flightId);
         deletedFlights++;
@@ -155,50 +216,60 @@ function runDeepClean() {
     }
   }
 
-  // Phase 2: Compress historical flight paths
+  // Phase 2: Compress historical flight paths + migrate format
   const allFlights = db.prepare('SELECT flightId, path_json FROM flight_history').all();
   let updatedPaths = 0;
+  let migratedPaths = 0;
   const updateStmt = db.prepare('UPDATE flight_history SET path_json = ? WHERE flightId = ?');
 
   const cleanBatch = db.transaction((flights) => {
     for (const flight of flights) {
       if (!flight.path_json) continue;
-      
-      let pathArray;
-      try {
-         pathArray = JSON.parse(flight.path_json);
-      } catch(e) { continue; }
 
-      if (pathArray.length < 2) continue;
+      let raw;
+      try { raw = JSON.parse(flight.path_json); } catch { continue; }
+      if (!Array.isArray(raw) || raw.length === 0) continue;
 
-      // Rebuild the array, stripping out old stationary bloat
+      const wasLegacy = !Array.isArray(raw[0]); // object-format detection
+      const pathArray = wasLegacy ? raw : raw.map(unpackPoint);
+
+      if (pathArray.length < 2) {
+        // Still migrate single-point legacy entries
+        if (wasLegacy) {
+          updateStmt.run(writePath(pathArray), flight.flightId);
+          migratedPaths++;
+        }
+        continue;
+      }
+
+      // Strip old stationary / over-sampled cruise bloat
       let cleanedPath = [pathArray[0]];
       for (let i = 1; i < pathArray.length; i++) {
         const p1 = cleanedPath[cleanedPath.length - 1];
         const p2 = pathArray[i];
-        
-        // Retrospectively apply the stationary rule (gs is saved as 'gs', not 'gs_kt')
+
         if (p2.gs < 2 && p1.gs < 2) continue;
-        
-        // Retrospectively apply the cruising rule (alt is saved as 'alt', not 'alt_ft')
-        if (p2.alt >= 20000 && (p2.time - p1.time) < 120000) continue;
-        
+        if (p2.alt >= CRUISE_ALT_FT && (p2.time - p1.time) < CRUISE_THROTTLE_MS) continue;
+
         cleanedPath.push(p2);
       }
 
-      // Trim sessions based on the newly cleaned timeline
-      cleanedPath = trimFlightSessions(cleanedPath, 3, 30 * 60 * 1000);
+      cleanedPath = trimFlightSessions(cleanedPath);
 
-      // Only write to the DB if we actually compressed the data
-      if (cleanedPath.length < pathArray.length) {
-        updateStmt.run(JSON.stringify(cleanedPath), flight.flightId);
-        updatedPaths++;
+      // Write back if we compressed OR if we still need to migrate the format
+      if (cleanedPath.length < pathArray.length || wasLegacy) {
+        updateStmt.run(writePath(cleanedPath), flight.flightId);
+        if (cleanedPath.length < pathArray.length) updatedPaths++;
+        if (wasLegacy) migratedPaths++;
       }
     }
   });
 
   cleanBatch(allFlights);
-  console.log(`[history] ✨ Deep clean complete! Deleted ${deletedFlights} old flights, compressed ${updatedPaths} flight paths.`);
+  console.log(
+    `[history] ✨ Deep clean complete! Deleted ${deletedFlights} old flights, ` +
+    `compressed ${updatedPaths} paths, migrated ${migratedPaths} legacy paths to compact format.`
+  );
 }
 
 /**
@@ -206,7 +277,7 @@ function runDeepClean() {
  */
 function updateBatch(flights) {
   const now = Date.now();
-  
+
   purgeOldData();
 
   const upsertStmt = db.prepare(`
@@ -217,27 +288,26 @@ function updateBatch(flights) {
       path_json = excluded.path_json
   `);
 
+  const selectPathStmt = db.prepare('SELECT path_json FROM flight_history WHERE flightId = ?');
+  const touchLastSeenStmt = db.prepare('UPDATE flight_history SET lastSeen = ? WHERE flightId = ?');
+
   const runBatch = db.transaction((flightList) => {
     for (const flight of flightList) {
-      const existing = db.prepare('SELECT path_json FROM flight_history WHERE flightId = ?').get(flight.flightId);
+      const existing = selectPathStmt.get(flight.flightId);
       let flightPath = [];
-      
+
       if (existing?.path_json) {
-        try { 
-            flightPath = JSON.parse(existing.path_json); 
-        } 
-        catch (e) { 
-            flightPath = []; 
-        }
+        flightPath = readPath(existing.path_json);
       } else {
+        // New flightId for this user — make room first
         enforceUserLimit(flight.userId);
       }
 
       const lastPoint = flightPath[flightPath.length - 1];
-  
+
       if (shouldSkipPoint(flight, lastPoint, now)) {
-        db.prepare('UPDATE flight_history SET lastSeen = ? WHERE flightId = ?').run(now, flight.flightId);
-        continue; 
+        touchLastSeenStmt.run(now, flight.flightId);
+        continue;
       }
 
       flightPath.push({
@@ -248,14 +318,14 @@ function updateBatch(flights) {
         time: now
       });
 
-      flightPath = trimFlightSessions(flightPath, 3, 30 * 60 * 1000);
+      flightPath = trimFlightSessions(flightPath);
 
       upsertStmt.run({
         userId: flight.userId,
         flightId: flight.flightId,
         callsign: flight.callsign,
         lastSeen: now,
-        path_json: JSON.stringify(flightPath)
+        path_json: writePath(flightPath)
       });
     }
   });
@@ -265,7 +335,7 @@ function updateBatch(flights) {
 
 async function getFlightPath(flightId) {
   const row = db.prepare('SELECT path_json FROM flight_history WHERE flightId = ?').get(flightId);
-  return row ? JSON.parse(row.path_json) : [];
+  return row ? readPath(row.path_json) : [];
 }
 
 // Run the deep clean 5 seconds after startup so it doesn't block the initial boot process
