@@ -7,7 +7,6 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'flight_history.db');
 
 // Tunables — change these in one place if you ever need to.
-const MAX_FLIGHTS_PER_USER = 20;
 const MAX_POINTS_PER_FLIGHT = 1500; // was 3000 — halved, since per-point cost dropped ~45%
 const MAX_SESSIONS_PER_FLIGHT = 3;
 const SESSION_GAP_MS = 30 * 60 * 1000;
@@ -106,30 +105,11 @@ function writePath(pointsArr) {
 }
 
 /**
- * Clean up data older than 24 hours
+ * Wipe flights not updated in the last 48 hours.
  */
 function purgeOldData() {
-  const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
-  db.prepare('DELETE FROM flight_history WHERE lastSeen < ?').run(oneDayAgo);
-}
-
-/**
- * Enforces the "Max N Flights per User" rule.
- * Deletes as many oldest flights as needed so that adding ONE new flight
- * keeps the user at or under MAX_FLIGHTS_PER_USER.
- */
-function enforceUserLimit(userId) {
-  const userFlights = db.prepare(
-    'SELECT flightId FROM flight_history WHERE userId = ? ORDER BY lastSeen ASC'
-  ).all(userId);
-
-  const excess = userFlights.length - (MAX_FLIGHTS_PER_USER - 1);
-  if (excess > 0) {
-    const delStmt = db.prepare('DELETE FROM flight_history WHERE flightId = ?');
-    for (let i = 0; i < excess; i++) {
-      delStmt.run(userFlights[i].flightId);
-    }
-  }
+  const twoDaysAgo = Date.now() - (48 * 60 * 60 * 1000);
+  db.prepare('DELETE FROM flight_history WHERE lastSeen < ?').run(twoDaysAgo);
 }
 
 /**
@@ -202,35 +182,13 @@ function trimFlightSessions(pathArray, maxSessions = MAX_SESSIONS_PER_FLIGHT, se
 
 /**
  * Retroactive Database Cleaner
- * Sweeps the entire DB to enforce limits, compress existing bloated arrays,
- * and migrate legacy object-format paths to the new compact array format.
+ * Sweeps the entire DB to compress existing bloated arrays and migrate
+ * legacy object-format paths to the new compact array format.
  */
 function runDeepClean() {
   console.log('[history] 🧹 Starting deep clean of existing database...');
 
-  // Phase 1: Enforce global user limits (single transaction for atomicity + speed)
-  const users = db.prepare('SELECT DISTINCT userId FROM flight_history').all();
-  let deletedFlights = 0;
-
-  const enforceAllLimits = db.transaction(() => {
-    const getUserFlights = db.prepare(
-      'SELECT flightId FROM flight_history WHERE userId = ? ORDER BY lastSeen ASC'
-    );
-    const delFlight = db.prepare('DELETE FROM flight_history WHERE flightId = ?');
-    for (const u of users) {
-      const userFlights = getUserFlights.all(u.userId);
-      if (userFlights.length > MAX_FLIGHTS_PER_USER) {
-        const flightsToDelete = userFlights.slice(0, userFlights.length - MAX_FLIGHTS_PER_USER);
-        for (const f of flightsToDelete) {
-          delFlight.run(f.flightId);
-          deletedFlights++;
-        }
-      }
-    }
-  });
-  enforceAllLimits();
-
-  // Phase 2: Compress historical flight paths + migrate format
+  // Compress historical flight paths + migrate format
   const allFlights = db.prepare('SELECT flightId, path_json FROM flight_history').all();
   let updatedPaths = 0;
   let migratedPaths = 0;
@@ -281,8 +239,7 @@ function runDeepClean() {
 
   cleanBatch(allFlights);
   console.log(
-    `[history] ✨ Deep clean complete! Deleted ${deletedFlights} old flights, ` +
-    `compressed ${updatedPaths} paths, migrated ${migratedPaths} legacy paths to compact format.`
+    `[history] ✨ Deep clean complete! Compressed ${updatedPaths} paths, migrated ${migratedPaths} legacy paths to compact format.`
   );
 }
 
@@ -312,9 +269,6 @@ function updateBatch(flights) {
 
       if (existing?.path_json) {
         flightPath = readPath(existing.path_json);
-      } else {
-        // New flightId for this user — make room first
-        enforceUserLimit(flight.userId);
       }
 
       const lastPoint = flightPath[flightPath.length - 1];
@@ -356,8 +310,8 @@ async function getFlightPath(flightId) {
 // Startup: deep clean after 5s so it doesn't block boot
 setTimeout(runDeepClean, 5000);
 
-// Periodic maintenance: purge stale flights (>24h) every hour,
-// and enforce per-user limits + compress paths once a day.
+// Periodic maintenance: purge flights older than 48h every hour,
+// and compress paths once a day.
 setInterval(purgeOldData, 60 * 60 * 1000);
 setInterval(runDeepClean, 24 * 60 * 60 * 1000);
 
