@@ -60,7 +60,7 @@ db.prepare(`CREATE INDEX IF NOT EXISTS idx_user_time ON flight_history (userId, 
  * In-memory: { lat, lon, alt, gs, time }
  * Convert only at the read/write boundary.
  * ========================= */
-const I_LAT = 0, I_LON = 1, I_ALT = 2, I_GS = 3, I_TIME = 4;
+const I_LAT = 0, I_LON = 1, I_ALT = 2, I_GS = 3, I_TIME = 4, I_HDG = 5;
 
 function packPoint(p) {
   return [
@@ -68,13 +68,22 @@ function packPoint(p) {
     Math.round(p.lon * 10000) / 10000,
     Math.round(p.alt),
     Math.round(p.gs),
-    p.time
+    p.time,
+    Math.round(p.hdg || 0)
   ];
 }
 
 function unpackPoint(a) {
-  return { lat: a[I_LAT], lon: a[I_LON], alt: a[I_ALT], gs: a[I_GS], time: a[I_TIME] };
+  return { 
+    lat: a[I_LAT], 
+    lon: a[I_LON], 
+    alt: a[I_ALT], 
+    gs: a[I_GS], 
+    time: a[I_TIME],
+    hdg: a[I_HDG] || 0
+  };
 }
+
 
 /**
  * Reads a path_json string and returns it as an array of {lat,lon,alt,gs,time}.
@@ -315,7 +324,8 @@ function updateBatch(flights) {
         lon: flight.position.lon,
         alt: flight.position.alt_ft,
         gs: flight.position.gs_kt,
-        time: now
+        time: now,
+        hdg: flight.position.heading_deg
       });
 
       flightPath = trimFlightSessions(flightPath);
