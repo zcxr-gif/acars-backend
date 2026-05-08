@@ -7,7 +7,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'flight_history.db');
 
 // Tunables — change these in one place if you ever need to.
-const MAX_FLIGHTS_PER_USER = 5;     // was effectively 2
+const MAX_FLIGHTS_PER_USER = 20;
 const MAX_POINTS_PER_FLIGHT = 1500; // was 3000 — halved, since per-point cost dropped ~45%
 const MAX_SESSIONS_PER_FLIGHT = 3;
 const SESSION_GAP_MS = 30 * 60 * 1000;
@@ -208,22 +208,27 @@ function trimFlightSessions(pathArray, maxSessions = MAX_SESSIONS_PER_FLIGHT, se
 function runDeepClean() {
   console.log('[history] 🧹 Starting deep clean of existing database...');
 
-  // Phase 1: Enforce global user limits
+  // Phase 1: Enforce global user limits (single transaction for atomicity + speed)
   const users = db.prepare('SELECT DISTINCT userId FROM flight_history').all();
   let deletedFlights = 0;
 
-  for (const u of users) {
-    const userFlights = db.prepare(
+  const enforceAllLimits = db.transaction(() => {
+    const getUserFlights = db.prepare(
       'SELECT flightId FROM flight_history WHERE userId = ? ORDER BY lastSeen ASC'
-    ).all(u.userId);
-    if (userFlights.length > MAX_FLIGHTS_PER_USER) {
-      const flightsToDelete = userFlights.slice(0, userFlights.length - MAX_FLIGHTS_PER_USER);
-      for (const f of flightsToDelete) {
-        db.prepare('DELETE FROM flight_history WHERE flightId = ?').run(f.flightId);
-        deletedFlights++;
+    );
+    const delFlight = db.prepare('DELETE FROM flight_history WHERE flightId = ?');
+    for (const u of users) {
+      const userFlights = getUserFlights.all(u.userId);
+      if (userFlights.length > MAX_FLIGHTS_PER_USER) {
+        const flightsToDelete = userFlights.slice(0, userFlights.length - MAX_FLIGHTS_PER_USER);
+        for (const f of flightsToDelete) {
+          delFlight.run(f.flightId);
+          deletedFlights++;
+        }
       }
     }
-  }
+  });
+  enforceAllLimits();
 
   // Phase 2: Compress historical flight paths + migrate format
   const allFlights = db.prepare('SELECT flightId, path_json FROM flight_history').all();
@@ -348,7 +353,12 @@ async function getFlightPath(flightId) {
   return row ? readPath(row.path_json) : [];
 }
 
-// Run the deep clean 5 seconds after startup so it doesn't block the initial boot process
+// Startup: deep clean after 5s so it doesn't block boot
 setTimeout(runDeepClean, 5000);
+
+// Periodic maintenance: purge stale flights (>24h) every hour,
+// and enforce per-user limits + compress paths once a day.
+setInterval(purgeOldData, 60 * 60 * 1000);
+setInterval(runDeepClean, 24 * 60 * 60 * 1000);
 
 module.exports = { updateBatch, getFlightPath, runDeepClean };
