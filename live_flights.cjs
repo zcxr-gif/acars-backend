@@ -1515,52 +1515,6 @@ app.get('/api/admin/telemetry', (req, res) => {
     }
 });
 
-// ⬇️ REPLACED ROUTE: Get User Stats (Grade Info)
-app.get('/api/users/:userId/stats', async (req, res) => {
-  const { userId } = req.params;
-  const cacheKey = `userStats:${userId}`;
-  const cached = getOnDemandCached(cacheKey);
-  if (cached) return res.json({ ok: true, userId: cached.userId || userId, stats: cached.stats, fromCache: true });
-  try {
-    const userStats = await getUserGrade(userId);
-    
-    if (!userStats) {
-      return res.status(404).json(err(404, 'User not found or has no stats/grade information.'));
-    }
-    
-   
-  const statsPayload = {
-      virtualOrganization: userStats.virtualOrganization,
-      discourseUsername: userStats.discourseUsername,
-      groups: userStats.groups,
-      roles: userStats.roles,
-      gradeDetails: userStats.gradeDetails,
-      violationCountByLevel: userStats.violationCountByLevel,
-      totalXP: userStats.totalXP,
-      atcOperations: userStats.atcOperations,
-      atcRank: userStats.atcRank,
-      total12MonthsViolations: userStats.total12MonthsViolations,
-      lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
-      lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
-      lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
-     
-  lastReportViolationDate: userStats.lastReportViolationDate
-    };
-    setOnDemandCached(cacheKey, { userId: userStats.userId || userId, stats: statsPayload }, 5 * 60 * 1000);
-// 5min TTL
-    res.json({ ok: true, userId: userStats.userId || userId, stats: statsPayload });
-} catch (e) {
-    const status = e?.response?.status || 500;
-    const apiError = e?.response?.data;
-res.status(status).json(
-      err(status, 'Failed to fetch user stats', {
-        apiErrorCode: apiError?.errorCode,
-        detail: e?.message
-      })
-    );
-}
-});
-
 // ⬇️ REPLACED ROUTE: Get User Flights (Logbook)
 app.get('/api/users/:userId/flights', async (req, res) => {
   const { userId } = req.params;
@@ -1634,9 +1588,14 @@ app.get('/api/users/:userId/atc', async (req, res) => {
     );
   }
 });
-// ⬇️ REPLACED ROUTE: Get User Stats (Grade Info)
+
+// ⬇️ MERGED ROUTE: Get User Stats (Grade Info + Extended Telemetry cool)
 app.get('/api/users/:userId/stats', async (req, res) => {
   const { userId } = req.params;
+  const cacheKey = `userStats:${userId}`;
+  const cached = getOnDemandCached(cacheKey);
+  
+  if (cached) return res.json({ ok: true, userId: cached.userId || userId, stats: cached.stats, fromCache: true });
   
   try {
     const userStats = await getUserGrade(userId);
@@ -1645,44 +1604,43 @@ app.get('/api/users/:userId/stats', async (req, res) => {
       return res.status(404).json(err(404, 'User not found or has no stats/grade information.'));
     }
     
-    // Exact mapping from apis.txt schema + Extended telemetry
-    res.json({ 
-      ok: true, 
-      userId: userStats.userId || 
-userId,
-      stats: {
-        virtualOrganization: userStats.virtualOrganization,
-        discourseUsername: userStats.discourseUsername,
-        groups: userStats.groups,
-        roles: userStats.roles,
-        gradeDetails: userStats.gradeDetails,
-        violationCountByLevel: userStats.violationCountByLevel,
-        totalXP: userStats.totalXP,
-        atcOperations: userStats.atcOperations,
-        atcRank: userStats.atcRank,
-        total12MonthsViolations: userStats.total12MonthsViolations,
-   
+    const statsPayload = {
+      virtualOrganization: userStats.virtualOrganization,
+      discourseUsername: userStats.discourseUsername,
+      groups: userStats.groups,
+      roles: userStats.roles,
+      gradeDetails: userStats.gradeDetails,
+      violationCountByLevel: userStats.violationCountByLevel,
+      totalXP: userStats.totalXP,
+      atcOperations: userStats.atcOperations,
+      atcRank: userStats.atcRank,
+      total12MonthsViolations: userStats.total12MonthsViolations,
       lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
-        lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
-        lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
-        lastReportViolationDate: userStats.lastReportViolationDate,
-        // ⬇️ NEW: Extended Global Stats mapped from IF API
-        flightTime: userStats.flightTime,
-        landingCount: userStats.landingCount,
-        onlineFlights: userStats.onlineFlights,
-        violations: userStats.violations
-      }
-    });
-} catch (e) {
+      lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
+      lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
+      lastReportViolationDate: userStats.lastReportViolationDate,
+      // ⬇️ EXTENDED GLOBAL STATS
+      flightTime: userStats.flightTime,
+      landingCount: userStats.landingCount,
+      onlineFlights: userStats.onlineFlights,
+      violations: userStats.violations
+    };
+    
+    // 5min TTL cache
+    setOnDemandCached(cacheKey, { userId: userStats.userId || userId, stats: statsPayload }, 5 * 60 * 1000); 
+    
+    res.json({ ok: true, userId: userStats.userId || userId, stats: statsPayload });
+  } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
-res.status(status).json(
+    
+    res.status(status).json(
       err(status, 'Failed to fetch user stats', {
         apiErrorCode: apiError?.errorCode,
         detail: e?.message
       })
     );
-}
+  }
 });
 
 app.get('/api/flights/:flightId/history', async (req, res) => {
