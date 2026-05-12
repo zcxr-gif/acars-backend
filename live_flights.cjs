@@ -1598,42 +1598,57 @@ app.get('/api/users/:userId/stats', async (req, res) => {
   if (cached) return res.json({ ok: true, userId: cached.userId || userId, stats: cached.stats, fromCache: true });
   
   try {
-    const userStats = await getUserGrade(userId);
+    // Fetch Grade info AND Global Stats in parallel to save time
+    const [userGrade, userStatsArray] = await Promise.all([
+      getUserGrade(userId),
+      getUserStats({ userIds: [userId] }).catch(() => []) // Catch in case stats endpoint fails
+    ]);
     
-    if (!userStats) {
+    if (!userGrade) {
       return res.status(404).json(err(404, 'User not found or has no stats/grade information.'));
     }
     
+    // Extract the global stats object from the POST endpoint array
+    const globalStats = userStatsArray?.[0] || {};
+    
     const statsPayload = {
-      virtualOrganization: userStats.virtualOrganization,
-      discourseUsername: userStats.discourseUsername,
-      groups: userStats.groups,
-      roles: userStats.roles,
-      gradeDetails: userStats.gradeDetails,
-      violationCountByLevel: userStats.violationCountByLevel,
-      totalXP: userStats.totalXP,
-      atcOperations: userStats.atcOperations,
-      atcRank: userStats.atcRank,
-      total12MonthsViolations: userStats.total12MonthsViolations,
-      lastLevel1ViolationDate: userStats.lastLevel1ViolationDate,
-      lastLevel2ViolationDate: userStats.lastLevel2ViolationDate,
-      lastLevel3ViolationDate: userStats.lastLevel3ViolationDate,
-      lastReportViolationDate: userStats.lastReportViolationDate,
-      // ⬇️ EXTENDED GLOBAL STATS
-      flightTime: userStats.flightTime,
-      landingCount: userStats.landingCount,
-      onlineFlights: userStats.onlineFlights,
-      violations: userStats.violations
+      virtualOrganization: userGrade.virtualOrganization,
+      discourseUsername: userGrade.discourseUsername,
+      groups: userGrade.groups,
+      roles: userGrade.roles,
+      gradeDetails: userGrade.gradeDetails,
+      
+      // Included the calculated grade fix from earlier
+      calculatedGrade: userGrade.gradeDetails?.gradeIndex !== undefined 
+        ? userGrade.gradeDetails.gradeIndex + 1 
+        : (userGrade.gradeIndex !== undefined ? userGrade.gradeIndex + 1 : null),
+        
+      violationCountByLevel: userGrade.violationCountByLevel,
+      totalXP: userGrade.totalXP,
+      atcOperations: userGrade.atcOperations,
+      atcRank: userGrade.atcRank,
+      total12MonthsViolations: userGrade.total12MonthsViolations,
+      lastLevel1ViolationDate: userGrade.lastLevel1ViolationDate,
+      lastLevel2ViolationDate: userGrade.lastLevel2ViolationDate,
+      lastLevel3ViolationDate: userGrade.lastLevel3ViolationDate,
+      lastReportViolationDate: userGrade.lastReportViolationDate,
+      
+      // ⬇️ EXTENDED GLOBAL STATS (Now mapped correctly from the POST endpoint)
+      flightTime: globalStats.flightTime || 0,
+      landingCount: globalStats.landingCount || 0,
+      onlineFlights: globalStats.onlineFlights || 0,
+      violations: globalStats.violations || 0
     };
-    
+
     // 5min TTL cache
-    setOnDemandCached(cacheKey, { userId: userStats.userId || userId, stats: statsPayload }, 5 * 60 * 1000); 
-    
-    res.json({ ok: true, userId: userStats.userId || userId, stats: statsPayload });
+    setOnDemandCached(cacheKey, { userId: userGrade.userId || userId, stats: statsPayload }, 5 * 60 * 1000);
+
+    res.json({ ok: true, userId: userGrade.userId || userId, stats: statsPayload });
+
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
-    
+
     res.status(status).json(
       err(status, 'Failed to fetch user stats', {
         apiErrorCode: apiError?.errorCode,
