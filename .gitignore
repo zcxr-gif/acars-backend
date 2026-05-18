@@ -1,1 +1,10 @@
 .env
+push-tokens.json
+
+# iOS / Xcode
+IOS-App/**/xcuserdata/
+IOS-App/**/*.xcuserstate
+IOS-App/**/DerivedData/
+IOS-App/**/.build/
+IOS-App/**/.swiftpm/
+.DS_Store
