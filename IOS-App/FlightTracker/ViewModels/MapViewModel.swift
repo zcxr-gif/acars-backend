@@ -4,17 +4,26 @@ import Combine
 
 @MainActor
 final class MapViewModel: ObservableObject {
-    @Published var flights: [Flight] = []
+    @Published private(set) var allFlights: [Flight] = []
     @Published var selectedServer: AppConfig.Server = .expert
     @Published var lastUpdated: Date?
     @Published var errorMessage: String?
     @Published var isLoading: Bool = false
+    @Published var filters: FlightFilters = .default
+    @Published var coloringMode: PlaneColoringMode = .altitude
     @Published var cameraPosition: MapCameraPosition = .region(
         MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: 30.0, longitude: 0.0),
             span: MKCoordinateSpan(latitudeDelta: 90.0, longitudeDelta: 180.0)
         )
     )
+
+    var flights: [Flight] {
+        allFlights.filter(filters.matches)
+    }
+
+    var filteredCount: Int { flights.count }
+    var totalCount: Int { allFlights.count }
 
     private let liveService: LiveFlightsService
     private var streamTask: Task<Void, Never>?
@@ -34,7 +43,7 @@ final class MapViewModel: ObservableObject {
                 switch event {
                 case .success(let payload):
                     let airborne = payload.flights.filter { $0.coordinate != nil }
-                    self.flights = airborne
+                    self.allFlights = airborne
                     self.lastUpdated = Date()
                     self.errorMessage = nil
                     self.isLoading = false
@@ -54,7 +63,7 @@ final class MapViewModel: ObservableObject {
     func switchServer(_ server: AppConfig.Server) {
         guard server != selectedServer else { return }
         selectedServer = server
-        flights = []
+        allFlights = []
         start()
     }
 
@@ -64,5 +73,9 @@ final class MapViewModel: ObservableObject {
             center: coord,
             span: MKCoordinateSpan(latitudeDelta: 2.5, longitudeDelta: 2.5)
         ))
+    }
+
+    func resetFilters() {
+        filters = .default
     }
 }

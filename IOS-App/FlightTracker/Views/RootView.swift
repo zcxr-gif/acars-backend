@@ -5,7 +5,7 @@ struct RootView: View {
     @EnvironmentObject private var push: PushNotificationService
     @State private var selectedTab: Tab = .map
 
-    enum Tab: Hashable { case map, search, atc, settings }
+    enum Tab: Hashable { case map, search, atc, hotspots, more }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -26,20 +26,34 @@ struct RootView: View {
             .tag(Tab.atc)
 
             NavigationStack {
-                SettingsView()
+                HotspotsView(server: mapVM.selectedServer)
             }
-            .tabItem { Label("Settings", systemImage: "gearshape") }
-            .tag(Tab.settings)
+            .tabItem { Label("Hotspots", systemImage: "flame") }
+            .tag(Tab.hotspots)
+
+            NavigationStack {
+                MoreView()
+            }
+            .tabItem { Label("More", systemImage: "ellipsis.circle") }
+            .tag(Tab.more)
         }
     }
 }
 
-struct SettingsView: View {
+struct MoreView: View {
     @EnvironmentObject private var push: PushNotificationService
     @EnvironmentObject private var mapVM: MapViewModel
 
     var body: some View {
-        Form {
+        List {
+            Section("Browse") {
+                NavigationLink {
+                    NotamsView(server: mapVM.selectedServer)
+                } label: {
+                    Label("NOTAMs", systemImage: "exclamationmark.bubble")
+                }
+            }
+
             Section("Server") {
                 Picker("Active server", selection: Binding(
                     get: { mapVM.selectedServer },
@@ -48,6 +62,12 @@ struct SettingsView: View {
                     ForEach(AppConfig.Server.allCases) { server in
                         Text(server.shortName).tag(server)
                     }
+                }
+            }
+
+            Section("Map") {
+                Picker("Color planes by", selection: $mapVM.coloringMode) {
+                    ForEach(PlaneColoringMode.allCases) { Text($0.rawValue).tag($0) }
                 }
             }
 
@@ -76,7 +96,7 @@ struct SettingsView: View {
                 LabeledContent("App", value: appVersion)
             }
         }
-        .navigationTitle("Settings")
+        .navigationTitle("More")
     }
 
     private var authStatusLabel: String {

@@ -6,15 +6,18 @@ struct FlightTrackerApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var pushService = PushNotificationService.shared
     @StateObject private var mapViewModel = MapViewModel()
+    @StateObject private var metadataService = MetadataService.shared
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(pushService)
                 .environmentObject(mapViewModel)
+                .environmentObject(metadataService)
                 .task {
                     pushService.bootstrap()
                     mapViewModel.start()
+                    await metadataService.loadIfNeeded()
                 }
                 .preferredColorScheme(.dark)
         }

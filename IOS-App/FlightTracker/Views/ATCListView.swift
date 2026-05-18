@@ -13,9 +13,9 @@ struct ATCListView: View {
             if isLoading && facilities.isEmpty {
                 ProgressView().frame(maxWidth: .infinity)
             }
-            ForEach(grouped, id: \.0) { (kind, items) in
-                Section(kind.label) {
-                    ForEach(items) { facility in
+            ForEach(grouped) { group in
+                Section(group.kind.label) {
+                    ForEach(group.items) { facility in
                         ATCRow(facility: facility)
                     }
                 }
@@ -31,11 +31,20 @@ struct ATCListView: View {
         .onDisappear { streamTask?.cancel() }
     }
 
-    private var grouped: [(ATCFacility.Kind, [ATCFacility])] {
+    struct ATCGroup: Identifiable {
+        let kind: ATCFacility.Kind
+        let items: [ATCFacility]
+        var id: Int { kind.rawValue }
+    }
+
+    private var grouped: [ATCGroup] {
         let groups = Dictionary(grouping: facilities, by: { $0.facilityKind })
         return ATCFacility.Kind.allCases.compactMap { kind in
             guard let list = groups[kind], !list.isEmpty else { return nil }
-            return (kind, list.sorted(by: { ($0.airportName ?? "") < ($1.airportName ?? "") }))
+            return ATCGroup(
+                kind: kind,
+                items: list.sorted(by: { ($0.airportName ?? "") < ($1.airportName ?? "") })
+            )
         }
     }
 

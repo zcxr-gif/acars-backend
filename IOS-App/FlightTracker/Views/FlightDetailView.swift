@@ -7,6 +7,8 @@ struct FlightDetailView: View {
 
     @StateObject private var vm = FlightDetailViewModel()
     @State private var sessionId: String?
+    @State private var liveries: [Livery] = []
+    @State private var showLiveries: Bool = false
 
     var body: some View {
         ScrollView {
@@ -14,8 +16,10 @@ struct FlightDetailView: View {
                 header
                 miniMap
                 telemetry
+                pilotStateRow
                 routeSection
                 pilotSection
+                aircraftSection
             }
             .padding()
         }
@@ -29,33 +33,63 @@ struct FlightDetailView: View {
             } catch {
                 vm.errorMessage = error.localizedDescription
             }
+            if let acId = flight.aircraft?.aircraftId {
+                liveries = (try? await APIClient.shared.fetchLiveries(aircraftId: acId)) ?? []
+            }
         }
     }
 
+    @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Text(flight.callsign).font(.title.bold())
                 if flight.isStaff == true {
                     Label("Staff", systemImage: "star.fill")
-                        .font(.caption)
+                        .font(.caption.bold())
                         .padding(.horizontal, 8).padding(.vertical, 4)
                         .background(.yellow.opacity(0.2), in: Capsule())
+                        .foregroundStyle(.yellow)
                 } else if flight.isVAMember == true {
                     Label(flight.virtualOrganization ?? "VA", systemImage: "building.2")
-                        .font(.caption)
+                        .font(.caption.bold())
                         .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(.blue.opacity(0.2), in: Capsule())
+                        .background(.cyan.opacity(0.2), in: Capsule())
+                        .foregroundStyle(.cyan)
                 }
             }
-            Text(flight.username ?? "Unknown pilot")
-                .foregroundStyle(.secondary)
+            if let user = flight.username {
+                if let userId = flight.userId {
+                    NavigationLink {
+                        UserStatsView(userId: userId, username: user)
+                    } label: {
+                        HStack {
+                            Text(user).foregroundStyle(.secondary)
+                            Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                        }
+                    }
+                } else {
+                    Text(user).foregroundStyle(.secondary)
+                }
+            }
+            if let role = flight.vaRole {
+                Text(role).font(.caption).foregroundStyle(.secondary)
+            }
             if let dep = flight.departureIcao, let arr = flight.arrivalIcao {
                 HStack(spacing: 8) {
-                    Text(dep).font(.title3.monospaced().bold())
-                    Image(systemName: "arrow.right")
-                        .foregroundStyle(.secondary)
-                    Text(arr).font(.title3.monospaced().bold())
+                    NavigationLink {
+                        AirportDetailView(icao: dep, server: server)
+                    } label: {
+                        Text(dep).font(.title3.monospaced().bold())
+                    }
+                    .tint(.primary)
+                    Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                    NavigationLink {
+                        AirportDetailView(icao: arr, server: server)
+                    } label: {
+                        Text(arr).font(.title3.monospaced().bold())
+                    }
+                    .tint(.primary)
                 }
             }
         }
@@ -85,7 +119,10 @@ struct FlightDetailView: View {
                 Annotation(flight.callsign, coordinate: coord) {
                     PlaneAnnotation(
                         heading: flight.position.heading_deg ?? 0,
-                        isSelected: true
+                        isSelected: true,
+                        tint: .accentColor,
+                        staff: flight.isStaff ?? false,
+                        vaMember: flight.isVAMember ?? false
                     )
                 }
             }
@@ -108,6 +145,33 @@ struct FlightDetailView: View {
         }
     }
 
+    private var pilotStateRow: some View {
+        let phase = FlightPhase.from(flight: flight)
+        let kind = flight.pilotStateKind
+        let connected = flight.isConnected ?? true
+        return HStack(spacing: 8) {
+            Label(phase.label, systemImage: "airplane.circle")
+                .font(.caption.bold())
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(phase.color.opacity(0.2), in: Capsule())
+                .foregroundStyle(phase.color)
+
+            Label(kind.label, systemImage: kind.systemImage)
+                .font(.caption.bold())
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(.gray.opacity(0.2), in: Capsule())
+
+            if !connected {
+                Label("Disconnected", systemImage: "wifi.exclamationmark")
+                    .font(.caption.bold())
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(.red.opacity(0.2), in: Capsule())
+                    .foregroundStyle(.red)
+            }
+            Spacer()
+        }
+    }
+
     @ViewBuilder
     private var routeSection: some View {
         if let waypoints = vm.plan?.waypoints, !waypoints.isEmpty {
@@ -115,8 +179,7 @@ struct FlightDetailView: View {
                 Text("Flight Plan").font(.headline)
                 ForEach(waypoints) { wp in
                     HStack {
-                        Image(systemName: "mappin.circle")
-                            .foregroundStyle(.secondary)
+                        Image(systemName: "mappin.circle").foregroundStyle(.secondary)
                         Text(wp.name ?? "—").font(.body.monospaced())
                         Spacer()
                         if let alt = wp.altitude, alt > 0 {
@@ -132,14 +195,59 @@ struct FlightDetailView: View {
 
     @ViewBuilder
     private var pilotSection: some View {
+        if flight.virtualOrganization != nil || flight.vaRole != nil {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Pilot").font(.headline)
+                if let va = flight.virtualOrganization {
+                    LabeledContent("Virtual airline", value: va)
+                }
+                if let role = flight.vaRole {
+                    LabeledContent("Role", value: role)
+                }
+            }
+            .padding()
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    @ViewBuilder
+    private var aircraftSection: some View {
         if let aircraft = flight.aircraft {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Aircraft").font(.headline)
                 LabeledContent("Type", value: aircraft.aircraftName ?? "Unknown")
                 LabeledContent("Livery", value: aircraft.liveryName ?? "Unknown")
+                if !liveries.isEmpty {
+                    Button {
+                        showLiveries = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "paintbrush")
+                            Text("\(liveries.count) other liveries")
+                            Spacer()
+                            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                        }
+                    }
+                    .tint(.primary)
+                }
             }
             .padding()
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .sheet(isPresented: $showLiveries) {
+                NavigationStack {
+                    List(liveries) { livery in
+                        VStack(alignment: .leading) {
+                            Text(livery.name).font(.body)
+                            if let aircraft = livery.aircraftName {
+                                Text(aircraft).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .navigationTitle(aircraft.aircraftName ?? "Liveries")
+                    .navigationBarTitleDisplayMode(.inline)
+                }
+                .presentationDetents([.medium, .large])
+            }
         }
     }
 

@@ -139,4 +139,24 @@ extension APIClient {
         let res: AtisResponse = try await get("/api/live/airport/\(sessionId)/\(icao.uppercased())/atis")
         return res.atis
     }
+
+    func fetchMetadata() async throws -> MetadataResponse {
+        try await get("/api/metadata")
+    }
+
+    func fetchLiveries(aircraftId: String) async throws -> [Livery] {
+        let res: LiveriesResponse = try await get("/api/aircraft/\(aircraftId)/liveries")
+        return res.liveries
+    }
+
+    func fetchUserStats(userId: String) async throws -> UserStats {
+        let res: UserStatsResponse = try await get("/api/users/\(userId)/stats")
+        return res.stats
+    }
+
+    func fetchBulkUserStats(userIds: [String]) async throws -> [BulkUserStat] {
+        struct Body: Encodable { let userIds: [String] }
+        let res: BulkUserStatsResponse = try await post("/users", body: Body(userIds: userIds))
+        return res.users
+    }
 }
