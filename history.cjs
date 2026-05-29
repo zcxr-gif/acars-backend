@@ -113,10 +113,21 @@ function purgeOldData() {
 }
 
 /**
- * Logic to determine if we should skip recording a point to the array
+ * Logic to determine if we should skip recording a point to the array.
+ * `pointTime` is the timestamp we intend to stamp the new point with — the
+ * aircraft's actual position-report time, NOT the server poll time.
  */
-function shouldSkipPoint(flight, lastPoint, now) {
+function shouldSkipPoint(flight, lastPoint, pointTime) {
   if (!lastPoint) return false;
+
+  // 0. Stale / duplicate report guard.
+  // The point time is the aircraft's real report time. If it hasn't advanced
+  // past the last recorded point, the API just handed us the same (or an older)
+  // report again — recording it would push the trail's tip ahead of, or out of
+  // order with, the live position the socket is broadcasting.
+  if (pointTime <= lastPoint.time) {
+    return true;
+  }
 
   // 1. Stationary Bloat Prevention
   if (flight.position.gs_kt < 2 && lastPoint.gs < 2) {
@@ -125,7 +136,7 @@ function shouldSkipPoint(flight, lastPoint, now) {
 
   // 2. Cruising Altitude Throttling
   const isCruising = flight.position.alt_ft >= CRUISE_ALT_FT;
-  const timeSinceLast = now - lastPoint.time;
+  const timeSinceLast = pointTime - lastPoint.time;
   if (isCruising && timeSinceLast < CRUISE_THROTTLE_MS) {
     return true;
   }
@@ -273,7 +284,15 @@ function updateBatch(flights) {
 
       const lastPoint = flightPath[flightPath.length - 1];
 
-      if (shouldSkipPoint(flight, lastPoint, now)) {
+      // Stamp the point with the aircraft's actual report time, not the server
+      // poll time. This is the same value the live socket broadcasts
+      // (position.lastReportMs), so the recorded trail stays in the same time
+      // domain as the live marker and its tip can't drift ahead of the plane.
+      // Fall back to `now` only if the report time is missing/invalid.
+      const reportMs = flight.position.lastReportMs;
+      const pointTime = (typeof reportMs === 'number' && reportMs > 0) ? reportMs : now;
+
+      if (shouldSkipPoint(flight, lastPoint, pointTime)) {
         touchLastSeenStmt.run(now, flight.flightId);
         continue;
       }
@@ -283,7 +302,7 @@ function updateBatch(flights) {
         lon: flight.position.lon,
         alt: flight.position.alt_ft,
         gs: flight.position.gs_kt,
-        time: now,
+        time: pointTime,
         hdg: flight.position.heading_deg
       });
 
