@@ -425,5 +425,10 @@ function getReplay(key) {
 // Startup + periodic maintenance.
 setTimeout(closeDangling, 4000);
 setInterval(purgeOld, 60 * 60 * 1000);
+// Keep the WAL (and its memory mapping) bounded under the steady poll-write load.
+setInterval(() => {
+  try { db.pragma('wal_checkpoint(TRUNCATE)'); }
+  catch (e) { console.warn('[atc-history] WAL checkpoint failed:', e.message); }
+}, 10 * 60 * 1000);
 
 module.exports = { updateAtcBatch, getSessions, getReplay };

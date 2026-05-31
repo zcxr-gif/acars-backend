@@ -355,4 +355,12 @@ setTimeout(runDeepClean, 5000);
 setInterval(purgeOldData, 60 * 60 * 1000);
 setInterval(runDeepClean, 24 * 60 * 60 * 1000);
 
+// With synchronous=OFF and a steady write stream the WAL file (and the memory
+// mapping behind it) keeps growing until a checkpoint reclaims it. Force a
+// truncating checkpoint every 10 minutes to keep it bounded.
+setInterval(() => {
+  try { db.pragma('wal_checkpoint(TRUNCATE)'); }
+  catch (e) { console.warn('[history] WAL checkpoint failed:', e.message); }
+}, 10 * 60 * 1000);
+
 module.exports = { updateBatch, getFlightPath, getFlightsForReplay, runDeepClean };
