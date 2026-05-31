@@ -52,6 +52,8 @@ db.prepare(`
   )
 `).run();
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_user_time ON flight_history (userId, lastSeen)`).run();
+// Supports the ATC-replay candidate query, which filters purely on lastSeen.
+db.prepare(`CREATE INDEX IF NOT EXISTS idx_last_seen ON flight_history (lastSeen)`).run();
 
 /* =========================
  * Compact point format
@@ -326,6 +328,25 @@ async function getFlightPath(flightId) {
   return row ? readPath(row.path_json) : [];
 }
 
+/**
+ * Returns every recorded flight whose trail was still being updated at or after
+ * `sinceMs`, with its path already unpacked. This is the candidate set the ATC
+ * replay layer scans to find the flights that were inside a controller's
+ * airspace during a session window. Filtering on lastSeen alone is cheap thanks
+ * to idx_last_seen; the spatial/temporal narrowing happens in atc_history.cjs.
+ */
+function getFlightsForReplay(sinceMs) {
+  const rows = db
+    .prepare('SELECT userId, flightId, callsign, path_json FROM flight_history WHERE lastSeen >= ?')
+    .all(sinceMs);
+  return rows.map(r => ({
+    userId: r.userId,
+    flightId: r.flightId,
+    callsign: r.callsign,
+    path: readPath(r.path_json)
+  }));
+}
+
 // Startup: deep clean after 5s so it doesn't block boot
 setTimeout(runDeepClean, 5000);
 
@@ -334,4 +355,4 @@ setTimeout(runDeepClean, 5000);
 setInterval(purgeOldData, 60 * 60 * 1000);
 setInterval(runDeepClean, 24 * 60 * 60 * 1000);
 
-module.exports = { updateBatch, getFlightPath, runDeepClean };
+module.exports = { updateBatch, getFlightPath, getFlightsForReplay, runDeepClean };

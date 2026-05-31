@@ -9,6 +9,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs');
+const atcHistory = require('./atc_history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
 
@@ -1425,6 +1426,17 @@ async function pollAndBroadcastSecondary() {
         getNotams(sessionId).catch(() => []),
         getWorldStatus(sessionId).catch(() => [])
       ]);
+
+      // ⬇️ NEW: Persist this ATC snapshot into the controller-replay history.
+      // Non-blocking so it never delays the broadcast (same pattern as flights).
+      setImmediate(() => {
+        try {
+          atcHistory.updateAtcBatch(sessionId, atc);
+        } catch (atcDbErr) {
+          console.error('[secondary] ❌ ATC history update failed:', atcDbErr.message);
+        }
+      });
+
       // ⬇️ NEW: Process world data to map departures and arrivals into memory
       if (Array.isArray(world)) {
         for (const airport of world) {
@@ -1664,6 +1676,57 @@ app.get('/api/flights/:flightId/history', async (req, res) => {
     res.json({ ok: true, flightId: req.params.flightId, path });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/* =========================
+ * ATC / Controller Replay
+ * Search recorded controller sessions, then replay one to see the controller's
+ * frequency timeline and the flights that were inside their airspace.
+ * ========================= */
+
+// Search recorded controller sessions.
+// Query: ?user=<usernameSubstring>&userId=<id>&sessionId=<server guid>&since=<ms>&limit=<n>
+app.get('/api/atc/sessions', (req, res) => {
+  try {
+    const sessions = atcHistory.getSessions({
+      sessionId: req.query.sessionId,
+      user: req.query.user,
+      userId: req.query.userId,
+      sinceMs: req.query.since ? parseInt(req.query.since, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit, 10) : undefined
+    });
+    res.json({ ok: true, count: sessions.length, sessions });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to fetch ATC sessions', { detail: e.message }));
+  }
+});
+
+// Convenience: most recent recorded sessions (optionally scoped to a server).
+app.get('/api/atc/sessions/recent', (req, res) => {
+  try {
+    const sessions = atcHistory.getSessions({
+      sessionId: req.query.sessionId,
+      limit: req.query.limit ? parseInt(req.query.limit, 10) : 50
+    });
+    res.json({ ok: true, count: sessions.length, sessions });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to fetch recent ATC sessions', { detail: e.message }));
+  }
+});
+
+// Full replay payload for one session: ?key=<userId:startTime>
+app.get('/api/atc/replay', (req, res) => {
+  const { key } = req.query;
+  if (!key) return res.status(400).json(err(400, 'Missing session key'));
+  try {
+    const replay = atcHistory.getReplay(key);
+    if (!replay) {
+      return res.status(404).json(err(404, 'Session not found or outside the 48h replay window.'));
+    }
+    res.json({ ok: true, ...replay });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to build ATC replay', { detail: e.message }));
   }
 });
 // ⬇️ NEW ROUTE: Batch Route Fetcher (The Fix)
