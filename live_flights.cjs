@@ -214,40 +214,61 @@ const liveryNameMap = new Map();
 // NEW: Global storage to serve via API
 const globalMetadata = {
   aircraft: [],
-  liveries: []
+  liveries: [],
+  lastUpdated: null
 };
-(async function loadMetadata() {
-  try {
-    if (!IF_API_KEY) {
-      console.warn('⚠️ Skipping metadata load: API key is missing.');
-      return;
-    }
 
-    console.log('⏳ Loading aircraft and liveries...');
-
-    // 1. Load Aircraft from API
-    const aircraftList = await getAircraftList();
-    globalMetadata.aircraft = aircraftList;
-    for (const aircraft of aircraftList) {
-      aircraftNameMap.set(aircraft.id, aircraft.name);
-    }
-  
-    console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types.`);
-
-    
-    // 2. Load Liveries from API
-    const liveryList = await getAllLiveries();
-    globalMetadata.liveries = liveryList;
-    for (const livery of liveryList) {
-      liveryNameMap.set(livery.id, livery.name);
-    }
-    console.log(`✅ Loaded ${liveryNameMap.size} liveries.`);
-
-    // Note: Registration smart-matching logic has been removed.
-  } catch (e) {
-    console.error('❌ Could not load metadata.', e.message);
+/**
+ * Loads aircraft + liveries from the IF API into the in-memory maps. Safe to
+ * re-run at any time — used both at startup and by the manual refresh endpoint
+ * (e.g. after IF ships new planes/liveries) so the backend never needs a
+ * restart to pick them up. Fetches both lists first and only swaps the shared
+ * maps once both succeed, so a failed refresh can't leave them half-populated.
+ */
+async function loadMetadata(reason = 'startup') {
+  if (!IF_API_KEY) {
+    console.warn('⚠️ Skipping metadata load: API key is missing.');
+    throw new Error('IF API key is missing');
   }
-})();
+
+  console.log(`⏳ Loading aircraft and liveries (${reason})...`);
+
+  const [aircraftList, liveryList] = await Promise.all([
+    getAircraftList(),
+    getAllLiveries()
+  ]);
+
+  globalMetadata.aircraft = aircraftList;
+  aircraftNameMap.clear();
+  for (const aircraft of aircraftList) aircraftNameMap.set(aircraft.id, aircraft.name);
+
+  globalMetadata.liveries = liveryList;
+  liveryNameMap.clear();
+  for (const livery of liveryList) liveryNameMap.set(livery.id, livery.name);
+
+  globalMetadata.lastUpdated = Date.now();
+
+  console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types and ${liveryNameMap.size} liveries.`);
+  return {
+    aircraft: aircraftNameMap.size,
+    liveries: liveryNameMap.size,
+    lastUpdated: globalMetadata.lastUpdated
+  };
+}
+
+// Concurrency guard: collapse overlapping refreshes (e.g. impatient button
+// presses) onto a single in-flight fetch.
+let metadataRefreshInFlight = null;
+function refreshMetadata(reason = 'manual') {
+  if (metadataRefreshInFlight) return metadataRefreshInFlight;
+  metadataRefreshInFlight = loadMetadata(reason).finally(() => {
+    metadataRefreshInFlight = null;
+  });
+  return metadataRefreshInFlight;
+}
+
+// Initial load at startup. Non-fatal: the server still boots if IF is down.
+loadMetadata('startup').catch(e => console.error('❌ Could not load metadata.', e.message));
 /* =========================
  * NEW: VA Roster Loader
  * ========================= */
@@ -1814,8 +1835,35 @@ app.get('/api/metadata', (req, res) => {
   res.json({
     ok: true,
     aircraft: globalMetadata.aircraft,
-    liveries: globalMetadata.liveries
+    liveries: globalMetadata.liveries,
+    counts: { aircraft: aircraftNameMap.size, liveries: liveryNameMap.size },
+    lastUpdated: globalMetadata.lastUpdated
   });
+});
+
+// Manual refresh of aircraft & liveries — wire this to a "Refresh metadata"
+// button so new IF planes/liveries are picked up without a backend restart.
+// Optionally gated: if METADATA_REFRESH_SECRET is set, callers must pass it via
+// the x-admin-secret header or ?secret= query param. Left open if unset so the
+// button works out of the box.
+app.post('/api/admin/refresh-metadata', async (req, res) => {
+  const requiredSecret = process.env.METADATA_REFRESH_SECRET;
+  if (requiredSecret) {
+    const provided = req.get('x-admin-secret') || req.query.secret;
+    if (provided !== requiredSecret) {
+      return res.status(403).json(err(403, 'Forbidden: invalid or missing admin secret'));
+    }
+  }
+  try {
+    const result = await refreshMetadata('manual');
+    res.json({
+      ok: true,
+      message: `Refreshed ${result.aircraft} aircraft and ${result.liveries} liveries.`,
+      ...result
+    });
+  } catch (e) {
+    res.status(502).json(err(502, 'Failed to refresh metadata from the IF API', { detail: e.message }));
+  }
 });
 app.get('/health', (req, res) => {
   res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
