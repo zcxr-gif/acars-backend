@@ -9,6 +9,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs');
+const atcHistory = require('./atc_history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
 
@@ -169,6 +170,10 @@ const routeLimiter = createConcurrencyLimiter(3);
  * On-Demand TTL Cache (for per-request endpoints)
  * ========================= */
 const onDemandCache = new Map();
+// Hard ceiling so a burst of unique keys (userStats:<id>, airport:<icao>, …)
+// between prunes can't grow the cache without bound.
+const ON_DEMAND_MAX_ENTRIES = 5000;
+
 function getOnDemandCached(key) {
   const entry = onDemandCache.get(key);
   if (entry && Date.now() < entry.expiresAt) return entry.data;
@@ -177,7 +182,18 @@ function getOnDemandCached(key) {
 }
 
 function setOnDemandCached(key, data, ttlMs) {
+  // Re-inserting moves the key to the end, keeping Map iteration order = LRU-ish.
+  onDemandCache.delete(key);
   onDemandCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  // Evict the oldest entries if we blew past the ceiling.
+  if (onDemandCache.size > ON_DEMAND_MAX_ENTRIES) {
+    const overflow = onDemandCache.size - ON_DEMAND_MAX_ENTRIES;
+    let i = 0;
+    for (const k of onDemandCache.keys()) {
+      onDemandCache.delete(k);
+      if (++i >= overflow) break;
+    }
+  }
 }
 
 // Periodically prune expired on-demand cache entries (every 5 minutes)
@@ -198,40 +214,61 @@ const liveryNameMap = new Map();
 // NEW: Global storage to serve via API
 const globalMetadata = {
   aircraft: [],
-  liveries: []
+  liveries: [],
+  lastUpdated: null
 };
-(async function loadMetadata() {
-  try {
-    if (!IF_API_KEY) {
-      console.warn('⚠️ Skipping metadata load: API key is missing.');
-      return;
-    }
 
-    console.log('⏳ Loading aircraft and liveries...');
-
-    // 1. Load Aircraft from API
-    const aircraftList = await getAircraftList();
-    globalMetadata.aircraft = aircraftList;
-    for (const aircraft of aircraftList) {
-      aircraftNameMap.set(aircraft.id, aircraft.name);
-    }
-  
-    console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types.`);
-
-    
-    // 2. Load Liveries from API
-    const liveryList = await getAllLiveries();
-    globalMetadata.liveries = liveryList;
-    for (const livery of liveryList) {
-      liveryNameMap.set(livery.id, livery.name);
-    }
-    console.log(`✅ Loaded ${liveryNameMap.size} liveries.`);
-
-    // Note: Registration smart-matching logic has been removed.
-  } catch (e) {
-    console.error('❌ Could not load metadata.', e.message);
+/**
+ * Loads aircraft + liveries from the IF API into the in-memory maps. Safe to
+ * re-run at any time — used both at startup and by the manual refresh endpoint
+ * (e.g. after IF ships new planes/liveries) so the backend never needs a
+ * restart to pick them up. Fetches both lists first and only swaps the shared
+ * maps once both succeed, so a failed refresh can't leave them half-populated.
+ */
+async function loadMetadata(reason = 'startup') {
+  if (!IF_API_KEY) {
+    console.warn('⚠️ Skipping metadata load: API key is missing.');
+    throw new Error('IF API key is missing');
   }
-})();
+
+  console.log(`⏳ Loading aircraft and liveries (${reason})...`);
+
+  const [aircraftList, liveryList] = await Promise.all([
+    getAircraftList(),
+    getAllLiveries()
+  ]);
+
+  globalMetadata.aircraft = aircraftList;
+  aircraftNameMap.clear();
+  for (const aircraft of aircraftList) aircraftNameMap.set(aircraft.id, aircraft.name);
+
+  globalMetadata.liveries = liveryList;
+  liveryNameMap.clear();
+  for (const livery of liveryList) liveryNameMap.set(livery.id, livery.name);
+
+  globalMetadata.lastUpdated = Date.now();
+
+  console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types and ${liveryNameMap.size} liveries.`);
+  return {
+    aircraft: aircraftNameMap.size,
+    liveries: liveryNameMap.size,
+    lastUpdated: globalMetadata.lastUpdated
+  };
+}
+
+// Concurrency guard: collapse overlapping refreshes (e.g. impatient button
+// presses) onto a single in-flight fetch.
+let metadataRefreshInFlight = null;
+function refreshMetadata(reason = 'manual') {
+  if (metadataRefreshInFlight) return metadataRefreshInFlight;
+  metadataRefreshInFlight = loadMetadata(reason).finally(() => {
+    metadataRefreshInFlight = null;
+  });
+  return metadataRefreshInFlight;
+}
+
+// Initial load at startup. Non-fatal: the server still boots if IF is down.
+loadMetadata('startup').catch(e => console.error('❌ Could not load metadata.', e.message));
 /* =========================
  * NEW: VA Roster Loader
  * ========================= */
@@ -1240,8 +1277,29 @@ async function pollAndBroadcastFlights() {
     return;
   }
 
+  // ── Memory: evict cache entries for IF sessions that no longer exist.
+  // IF rotates session GUIDs (e.g. when their servers restart). Without this,
+  // apiCache.flights / secondary / flightRouting accumulate dead sessions for
+  // the lifetime of the process.
+  const liveSessionIds = new Set(
+    (Array.isArray(sessions) ? sessions : []).map(s => s.id).filter(Boolean)
+  );
+  if (liveSessionIds.size > 0) {
+    for (const cache of [apiCache.flights, apiCache.secondary, apiCache.flightRouting]) {
+      for (const id of cache.keys()) {
+        if (!liveSessionIds.has(id)) cache.delete(id);
+      }
+    }
+  }
+
+  // Active flight IDs across every server this cycle, so the save-throttle
+  // tracker can be pruned ONCE against the union — instead of once per session
+  // against a single session's flights, which wiped sibling sessions' entries
+  // and defeated the 15s save throttle (forcing a DB write every cycle).
+  const globalActiveFlightIds = new Set();
+
   const serverNames = ["Expert Server", "Training Server", "Casual Server"];
-  
+
   for (const serverName of serverNames) {
     const sessionId = pickSessionIdByName(sessions, serverName);
     if (!sessionId) continue;
@@ -1277,8 +1335,8 @@ async function pollAndBroadcastFlights() {
         }
       }
 
-      // ⬇️ OPTIMIZED: Unified Memory Leak Cleanup
-      // Clean up BOTH routing cache and the redisSave tracking map
+      // Routing cache is per-session, so prune it against this session's active
+      // flights right here.
       if (apiCache.flightRouting.has(sessionId)) {
           const sessionRouting = apiCache.flightRouting.get(sessionId);
           for (const cachedFlightId of sessionRouting.keys()) {
@@ -1287,13 +1345,10 @@ async function pollAndBroadcastFlights() {
               }
           }
       }
-      
-      // Prevent Out-Of-Memory (OOM) by deleting stale flights from the save tracker
-      for (const trackedFlightId of apiCache.lastRedisSave.keys()) {
-          if (!activeFlightIds.has(trackedFlightId)) {
-              apiCache.lastRedisSave.delete(trackedFlightId);
-          }
-      }
+
+      // Feed this session's active flights into the global union; the save
+      // tracker is pruned once, after every server has been processed.
+      for (const id of activeFlightIds) globalActiveFlightIds.add(id);
 
       // Map and simplify flights
       const finalFlights = rawFlights.map(f => simplifyFlight(f, sessionId));
@@ -1342,6 +1397,17 @@ async function pollAndBroadcastFlights() {
       console.warn(`[broadcast] Flights fetch failed for "${serverName}"`, e?.message);
       if (e?.message?.includes('429')) {
          nextBroadcastPollMs = 60000;
+      }
+    }
+  }
+
+  // ── Memory: prune the save-throttle tracker against the union of all active
+  // flights. Only runs when we saw at least one server's flights this cycle, so
+  // a total fetch failure can't wrongly wipe the whole tracker.
+  if (globalActiveFlightIds.size > 0) {
+    for (const trackedFlightId of apiCache.lastRedisSave.keys()) {
+      if (!globalActiveFlightIds.has(trackedFlightId)) {
+        apiCache.lastRedisSave.delete(trackedFlightId);
       }
     }
   }
@@ -1425,6 +1491,17 @@ async function pollAndBroadcastSecondary() {
         getNotams(sessionId).catch(() => []),
         getWorldStatus(sessionId).catch(() => [])
       ]);
+
+      // ⬇️ NEW: Persist this ATC snapshot into the controller-replay history.
+      // Non-blocking so it never delays the broadcast (same pattern as flights).
+      setImmediate(() => {
+        try {
+          atcHistory.updateAtcBatch(sessionId, atc);
+        } catch (atcDbErr) {
+          console.error('[secondary] ❌ ATC history update failed:', atcDbErr.message);
+        }
+      });
+
       // ⬇️ NEW: Process world data to map departures and arrivals into memory
       if (Array.isArray(world)) {
         for (const airport of world) {
@@ -1666,6 +1743,57 @@ app.get('/api/flights/:flightId/history', async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+/* =========================
+ * ATC / Controller Replay
+ * Search recorded controller sessions, then replay one to see the controller's
+ * frequency timeline and the flights that were inside their airspace.
+ * ========================= */
+
+// Search recorded controller sessions.
+// Query: ?user=<usernameSubstring>&userId=<id>&sessionId=<server guid>&since=<ms>&limit=<n>
+app.get('/api/atc/sessions', (req, res) => {
+  try {
+    const sessions = atcHistory.getSessions({
+      sessionId: req.query.sessionId,
+      user: req.query.user,
+      userId: req.query.userId,
+      sinceMs: req.query.since ? parseInt(req.query.since, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit, 10) : undefined
+    });
+    res.json({ ok: true, count: sessions.length, sessions });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to fetch ATC sessions', { detail: e.message }));
+  }
+});
+
+// Convenience: most recent recorded sessions (optionally scoped to a server).
+app.get('/api/atc/sessions/recent', (req, res) => {
+  try {
+    const sessions = atcHistory.getSessions({
+      sessionId: req.query.sessionId,
+      limit: req.query.limit ? parseInt(req.query.limit, 10) : 50
+    });
+    res.json({ ok: true, count: sessions.length, sessions });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to fetch recent ATC sessions', { detail: e.message }));
+  }
+});
+
+// Full replay payload for one session: ?key=<userId:startTime>
+app.get('/api/atc/replay', (req, res) => {
+  const { key } = req.query;
+  if (!key) return res.status(400).json(err(400, 'Missing session key'));
+  try {
+    const replay = atcHistory.getReplay(key);
+    if (!replay) {
+      return res.status(404).json(err(404, 'Session not found or outside the 48h replay window.'));
+    }
+    res.json({ ok: true, ...replay });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to build ATC replay', { detail: e.message }));
+  }
+});
 // ⬇️ NEW ROUTE: Batch Route Fetcher (The Fix)
 // Usage: POST /api/flights/routes/batch
 // Body: { "sessionId": "...", "flightIds": ["id1", "id2", "id3"] }
@@ -1707,8 +1835,35 @@ app.get('/api/metadata', (req, res) => {
   res.json({
     ok: true,
     aircraft: globalMetadata.aircraft,
-    liveries: globalMetadata.liveries
+    liveries: globalMetadata.liveries,
+    counts: { aircraft: aircraftNameMap.size, liveries: liveryNameMap.size },
+    lastUpdated: globalMetadata.lastUpdated
   });
+});
+
+// Manual refresh of aircraft & liveries — wire this to a "Refresh metadata"
+// button so new IF planes/liveries are picked up without a backend restart.
+// Optionally gated: if METADATA_REFRESH_SECRET is set, callers must pass it via
+// the x-admin-secret header or ?secret= query param. Left open if unset so the
+// button works out of the box.
+app.post('/api/admin/refresh-metadata', async (req, res) => {
+  const requiredSecret = process.env.METADATA_REFRESH_SECRET;
+  if (requiredSecret) {
+    const provided = req.get('x-admin-secret') || req.query.secret;
+    if (provided !== requiredSecret) {
+      return res.status(403).json(err(403, 'Forbidden: invalid or missing admin secret'));
+    }
+  }
+  try {
+    const result = await refreshMetadata('manual');
+    res.json({
+      ok: true,
+      message: `Refreshed ${result.aircraft} aircraft and ${result.liveries} liveries.`,
+      ...result
+    });
+  } catch (e) {
+    res.status(502).json(err(502, 'Failed to refresh metadata from the IF API', { detail: e.message }));
+  }
 });
 app.get('/health', (req, res) => {
   res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
@@ -2122,6 +2277,23 @@ httpServer.listen(PORT, () => {
   setInterval(() => {
       const activeSockets = io.engine.clientsCount;
       telemetry.saveSnapshot(activeSockets);
+  }, FIFTEEN_MINUTES);
+
+  // Lightweight memory monitor: surfaces RSS/heap and the size of every
+  // in-memory cache, so a leak shows up as steady growth in the logs rather
+  // than as a silent OOM. Cheap — runs every 15 minutes.
+  setInterval(() => {
+    const mu = process.memoryUsage();
+    const mb = (n) => Math.round(n / 1048576);
+    let routingEntries = 0;
+    for (const m of apiCache.flightRouting.values()) routingEntries += m.size;
+    console.log(
+      `[mem] rss=${mb(mu.rss)}MB heap=${mb(mu.heapUsed)}/${mb(mu.heapTotal)}MB ` +
+      `ext=${mb(mu.external)}MB | sessions:flights=${apiCache.flights.size} ` +
+      `secondary=${apiCache.secondary.size} routing=${apiCache.flightRouting.size}(${routingEntries}) ` +
+      `saveTracker=${apiCache.lastRedisSave.size} onDemand=${onDemandCache.size} ` +
+      `vaRoster=${apiCache.vaRosterCache.size} sockets=${io.engine.clientsCount}`
+    );
   }, FIFTEEN_MINUTES);
   
   if (!IF_API_KEY) {
