@@ -35,7 +35,7 @@
         body {
             transition: background-color 0.3s ease, color 0.3s ease;
         }
-        
+
         /* Premium custom scrollbar */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -48,7 +48,7 @@
 <body class="bg-slate-50 dark:bg-darkBg text-slate-900 dark:text-zinc-50 p-4 md:p-8 min-h-screen">
 
     <div class="max-w-6xl mx-auto space-y-6">
-        
+
         <header class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-10">
             <div class="flex items-center gap-4">
                 <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30 text-white">
@@ -59,7 +59,7 @@
                     <p class="text-sm text-slate-500 dark:text-zinc-400 font-medium">Real-time telemetry and infrastructure health</p>
                 </div>
             </div>
-            
+
             <div class="flex items-center gap-3">
                 <div id="status-indicator" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-200 dark:bg-zinc-800 border border-slate-300 dark:border-zinc-700 text-sm font-semibold transition-colors">
                     <span class="relative flex h-2.5 w-2.5">
@@ -68,13 +68,26 @@
                     </span>
                     <span id="status-text" class="text-slate-700 dark:text-zinc-300">Connecting...</span>
                 </div>
-                
+
                 <button onclick="toggleTheme()" class="p-2.5 rounded-full bg-white dark:bg-darkSurface border border-slate-200 dark:border-darkBorder shadow-sm hover:bg-slate-50 dark:hover:bg-zinc-800 transition-all focus:outline-none focus:ring-2 focus:ring-indigo-500">
                     <i data-lucide="sun" class="w-5 h-5 text-amber-500 hidden dark:block"></i>
                     <i data-lucide="moon" class="w-5 h-5 text-indigo-500 block dark:hidden"></i>
                 </button>
             </div>
         </header>
+
+        <!-- ===================== TAB NAV ===================== -->
+        <nav class="flex gap-1 p-1 bg-slate-100 dark:bg-zinc-900/60 rounded-xl border border-slate-200 dark:border-darkBorder w-fit">
+            <button id="tab-overview" onclick="switchTab('overview')" class="px-4 py-2 text-sm font-semibold rounded-lg transition-colors bg-white dark:bg-zinc-800 text-slate-900 dark:text-white shadow-sm flex items-center gap-2">
+                <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Overview
+            </button>
+            <button id="tab-diagnostics" onclick="switchTab('diagnostics')" class="px-4 py-2 text-sm font-semibold rounded-lg transition-colors text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-white flex items-center gap-2">
+                <i data-lucide="stethoscope" class="w-4 h-4"></i> Diagnostics
+            </button>
+        </nav>
+
+        <!-- ===================== OVERVIEW PANEL ===================== -->
+        <div id="panel-overview" class="space-y-6">
 
         <div class="grid grid-cols-1 md:grid-cols-4 gap-5">
             <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm transition-all duration-300 hover:shadow-md">
@@ -87,7 +100,7 @@
                 <h3 id="kpi-requests" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
                 <p class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">Last 7 Days</p>
             </div>
-            
+
             <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm transition-all duration-300 hover:shadow-md">
                 <div class="flex justify-between items-start mb-3">
                     <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Peak Sockets</p>
@@ -98,7 +111,7 @@
                 <h3 id="kpi-sockets" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
                 <p id="kpi-sockets-time" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">Awaiting Data</p>
             </div>
-            
+
             <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm transition-all duration-300 hover:shadow-md">
                 <div class="flex justify-between items-start mb-3">
                     <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Busiest Day</p>
@@ -124,7 +137,7 @@
 
         <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm relative overflow-hidden transition-all duration-300">
             <div class="absolute inset-0 bg-gradient-to-r from-indigo-500/5 via-purple-500/5 to-transparent pointer-events-none"></div>
-            
+
             <div class="p-6 relative z-10">
                 <div class="flex justify-between items-center mb-6">
                     <h2 class="text-lg font-bold text-slate-800 dark:text-white">Traffic & Socket Connections</h2>
@@ -141,11 +154,11 @@
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            
+
             <div class="lg:col-span-1 bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6 flex flex-col h-full transition-all duration-300">
                 <h2 class="text-lg font-bold text-slate-800 dark:text-white mb-2">Flight Data Verification</h2>
                 <p class="text-sm text-slate-500 dark:text-zinc-400 mb-6 font-medium">Retrieve breadcrumb history for flights active within the last 24h.</p>
-                
+
                 <div class="space-y-5 flex-grow">
                     <div>
                         <label class="text-xs font-bold text-slate-500 dark:text-zinc-500 uppercase tracking-wider mb-2 block">Flight ID</label>
@@ -167,7 +180,7 @@
                     </h2>
                     <span id="coord-count" class="text-xs font-bold bg-slate-200 dark:bg-zinc-800 text-slate-600 dark:text-zinc-300 px-3 py-1 rounded-full border border-slate-300 dark:border-zinc-700">0 Points</span>
                 </div>
-                
+
                 <div class="overflow-x-auto flex-grow max-h-[350px]">
                     <table class="w-full text-left text-sm whitespace-nowrap">
                         <thead class="bg-slate-100/80 dark:bg-zinc-900/80 sticky top-0 z-10 backdrop-blur-md">
@@ -193,6 +206,117 @@
             </div>
 
         </div>
+
+        </div><!-- /panel-overview -->
+
+        <!-- ===================== DIAGNOSTICS PANEL ===================== -->
+        <div id="panel-diagnostics" class="space-y-6 hidden">
+
+            <!-- Diagnostics KPI row -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-5">
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm">
+                    <div class="flex justify-between items-start mb-3">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Process Uptime</p>
+                        <i data-lucide="timer" class="w-4 h-4 text-sky-500 dark:text-sky-400"></i>
+                    </div>
+                    <h3 id="diag-uptime" class="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                    <p id="diag-node" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">node --</p>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm">
+                    <div class="flex justify-between items-start mb-3">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Memory (RSS)</p>
+                        <i data-lucide="cpu" class="w-4 h-4 text-purple-500 dark:text-purple-400"></i>
+                    </div>
+                    <h3 id="diag-rss" class="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                    <p id="diag-heap" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">heap --</p>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm">
+                    <div class="flex justify-between items-start mb-3">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Live Sockets</p>
+                        <i data-lucide="plug-zap" class="w-4 h-4 text-indigo-500 dark:text-indigo-400"></i>
+                    </div>
+                    <h3 id="diag-sockets" class="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                    <p id="diag-rooms" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">no rooms</p>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm">
+                    <div class="flex justify-between items-start mb-3">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">IF API Errors</p>
+                        <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-500 dark:text-amber-400"></i>
+                    </div>
+                    <h3 id="diag-errors" class="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                    <p id="diag-429" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">-- rate-limited (429)</p>
+                </div>
+            </div>
+
+            <!-- Last error banner -->
+            <div id="diag-lasterror" class="hidden rounded-2xl border border-red-200 dark:border-red-500/20 bg-red-50 dark:bg-red-500/10 px-5 py-4 text-sm">
+                <div class="flex items-start gap-3">
+                    <i data-lucide="alert-circle" class="w-5 h-5 text-red-500 mt-0.5 shrink-0"></i>
+                    <div class="min-w-0">
+                        <p class="font-bold text-red-700 dark:text-red-300">Most recent API error</p>
+                        <p id="diag-lasterror-text" class="text-red-600 dark:text-red-400 font-mono text-xs break-words mt-1"></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- IF API endpoint latency table -->
+            <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden">
+                <div class="p-5 border-b border-slate-200 dark:border-darkBorder flex justify-between items-center bg-slate-50/50 dark:bg-zinc-900/30">
+                    <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                        <i data-lucide="gauge" class="w-4 h-4 text-slate-400 dark:text-zinc-400"></i> Infinite Flight API &mdash; Endpoint Latency
+                    </h2>
+                    <span class="text-xs font-medium text-slate-400 dark:text-zinc-500">slowest first</span>
+                </div>
+                <div class="overflow-x-auto max-h-[420px]">
+                    <table class="w-full text-left text-sm whitespace-nowrap">
+                        <thead class="bg-slate-100/80 dark:bg-zinc-900/80 sticky top-0 z-10 backdrop-blur-md">
+                            <tr>
+                                <th class="py-3 px-5 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider">Endpoint</th>
+                                <th class="py-3 px-4 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right">Calls</th>
+                                <th class="py-3 px-4 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right">Errors</th>
+                                <th class="py-3 px-4 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right">Avg</th>
+                                <th class="py-3 px-4 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right">p95</th>
+                                <th class="py-3 px-4 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right">Max</th>
+                                <th class="py-3 px-4 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right">Last</th>
+                            </tr>
+                        </thead>
+                        <tbody id="diag-endpoints" class="divide-y divide-slate-100 dark:divide-zinc-800/50">
+                            <tr><td colspan="7" class="py-12 text-center text-slate-400 dark:text-zinc-500 font-medium">No API calls recorded yet.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Background pollers -->
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden">
+                    <div class="p-5 border-b border-slate-200 dark:border-darkBorder bg-slate-50/50 dark:bg-zinc-900/30">
+                        <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                            <i data-lucide="repeat" class="w-4 h-4 text-slate-400 dark:text-zinc-400"></i> Background Pollers
+                        </h2>
+                    </div>
+                    <div id="diag-pollers" class="p-5 space-y-3">
+                        <p class="text-sm text-slate-400 dark:text-zinc-500">No poll-cycle data reported yet.</p>
+                    </div>
+                </div>
+
+                <!-- Cache & sockets -->
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden">
+                    <div class="p-5 border-b border-slate-200 dark:border-darkBorder bg-slate-50/50 dark:bg-zinc-900/30">
+                        <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                            <i data-lucide="layers" class="w-4 h-4 text-slate-400 dark:text-zinc-400"></i> In-Memory Caches & Config
+                        </h2>
+                    </div>
+                    <div id="diag-cache" class="p-5 grid grid-cols-2 gap-3 text-sm">
+                        <p class="text-slate-400 dark:text-zinc-500 col-span-2">Awaiting data…</p>
+                    </div>
+                </div>
+            </div>
+
+            <p class="text-xs text-slate-400 dark:text-zinc-600 text-center">Diagnostics refresh every 5s while this tab is open &middot; <span id="diag-updated">never updated</span></p>
+
+        </div><!-- /panel-diagnostics -->
+
     </div>
 
     <script>
@@ -209,10 +333,37 @@
             htmlClasses.toggle('dark');
             const isDark = htmlClasses.contains('dark');
             localStorage.theme = isDark ? 'dark' : 'light';
-            
+
             // Re-render chart to update grid & text colors for the new theme
             if (currentChartData.length > 0) {
                 renderChart(currentChartData);
+            }
+        }
+
+        // --- TAB MANAGEMENT ---
+        let diagInterval = null;
+
+        function styleTab(name, active) {
+            const el = document.getElementById('tab-' + name);
+            const base = 'px-4 py-2 text-sm font-semibold rounded-lg transition-colors flex items-center gap-2';
+            el.className = active
+                ? base + ' bg-white dark:bg-zinc-800 text-slate-900 dark:text-white shadow-sm'
+                : base + ' text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-white';
+        }
+
+        function switchTab(tab) {
+            const isDiag = tab === 'diagnostics';
+            document.getElementById('panel-overview').classList.toggle('hidden', isDiag);
+            document.getElementById('panel-diagnostics').classList.toggle('hidden', !isDiag);
+            styleTab('overview', !isDiag);
+            styleTab('diagnostics', isDiag);
+
+            if (isDiag) {
+                fetchDiagnostics();
+                if (!diagInterval) diagInterval = setInterval(fetchDiagnostics, 5000);
+            } else if (diagInterval) {
+                clearInterval(diagInterval);
+                diagInterval = null;
             }
         }
 
@@ -227,14 +378,14 @@
             try {
                 const res = await fetch('/health');
                 const data = await res.json();
-                
+
                 if (data.ok) {
                     text.innerText = 'System Online';
                     text.className = 'text-emerald-700 dark:text-emerald-400';
                     dot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500';
                     ping.className = 'animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75';
                     indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 text-sm font-semibold';
-                    
+
                     const uptime = new Date(data.timestamp);
                     uptimeText.innerText = uptime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
                 }
@@ -242,7 +393,7 @@
                 text.innerText = 'System Offline';
                 text.className = 'text-red-700 dark:text-red-400';
                 dot.className = 'relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500';
-                ping.className = 'hidden'; 
+                ping.className = 'hidden';
                 indicator.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 text-sm font-semibold';
                 uptimeText.innerText = 'Connection Lost';
             }
@@ -254,14 +405,14 @@
             try {
                 const res = await fetch(`/api/admin/telemetry?days=${days}`);
                 const { ok, data } = await res.json();
-                
+
                 if (!ok) return;
 
                 // Update KPIs
                 document.getElementById('kpi-requests').innerText = data.totalRequestsWindow.toLocaleString();
                 document.getElementById('kpi-sockets').innerText = data.highestPeakUsers.toLocaleString();
                 document.getElementById('kpi-sockets-time').innerText = data.busiestHour || 'No Data';
-                
+
                 if (data.busiestDay) {
                     document.getElementById('kpi-busy-day').innerText = data.busiestDay.date;
                     document.getElementById('kpi-busy-reqs').innerText = `${data.busiestDay.requests.toLocaleString()} Reqs`;
@@ -282,7 +433,7 @@
         function renderChart(historicalData) {
             const ctx = document.getElementById('telemetryChart').getContext('2d');
             const isDark = document.documentElement.classList.contains('dark');
-            
+
             // Theme specific colors
             const textColor = isDark ? '#a1a1aa' : '#64748b';
             const gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
@@ -309,7 +460,7 @@
                             borderColor: '#6366f1', // Indigo 500
                             backgroundColor: 'rgba(99, 102, 241, 0.1)',
                             borderWidth: 2.5,
-                            tension: 0.4, 
+                            tension: 0.4,
                             fill: true,
                             yAxisID: 'y',
                             pointRadius: 0,
@@ -379,7 +530,7 @@
 
             const tbody = document.getElementById('history-body');
             const countLabel = document.getElementById('coord-count');
-            
+
             // Loading State
             tbody.innerHTML = '<tr><td colspan="4" class="py-12 text-center"><i data-lucide="loader-2" class="w-7 h-7 animate-spin mx-auto text-indigo-500"></i></td></tr>';
             lucide.createIcons();
@@ -408,6 +559,161 @@
                 tbody.innerHTML = `<tr><td colspan="4" class="py-12 text-center text-red-600 dark:text-red-400 font-medium flex justify-center items-center gap-2"><i data-lucide="alert-circle" class="w-5 h-5"></i> Error: ${e.message}</td></tr>`;
                 lucide.createIcons();
             }
+        }
+
+        // --- 5. DIAGNOSTICS LOGIC ---
+        function escapeHtml(str) {
+            if (str == null) return '';
+            return String(str)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function fmtMs(v) {
+            if (v == null) return '--';
+            if (v >= 1000) return (v / 1000).toFixed(2) + ' s';
+            return Math.round(v) + ' ms';
+        }
+
+        function fmtUptime(sec) {
+            if (sec == null) return '--';
+            const d = Math.floor(sec / 86400);
+            const h = Math.floor((sec % 86400) / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            const s = sec % 60;
+            if (d) return `${d}d ${h}h`;
+            if (h) return `${h}h ${m}m`;
+            if (m) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        function fmtAgo(ms) {
+            if (ms == null) return 'never';
+            if (ms < 1000) return 'just now';
+            if (ms < 60000) return Math.round(ms / 1000) + 's ago';
+            return Math.round(ms / 60000) + 'm ago';
+        }
+
+        // Latency colour thresholds (ms) for the avg column.
+        function latencyClass(ms) {
+            if (ms == null) return 'text-slate-500 dark:text-zinc-400';
+            if (ms > 2000) return 'text-red-600 dark:text-red-400 font-bold';
+            if (ms > 800) return 'text-amber-600 dark:text-amber-400 font-semibold';
+            return 'text-emerald-600 dark:text-emerald-400 font-semibold';
+        }
+
+        async function fetchDiagnostics() {
+            try {
+                const res = await fetch('/api/admin/diagnostics');
+                const { ok, data } = await res.json();
+                if (!ok) return;
+                renderDiagnostics(data);
+            } catch (e) {
+                console.error('Failed to load diagnostics', e);
+            }
+        }
+
+        function renderDiagnostics(d) {
+            // KPI cards
+            document.getElementById('diag-uptime').innerText = fmtUptime(d.uptimeSec);
+            document.getElementById('diag-node').innerText = 'node ' + (d.process.node || '--');
+            document.getElementById('diag-rss').innerText = d.process.rssMb + ' MB';
+            document.getElementById('diag-heap').innerText = `heap ${d.process.heapUsedMb} / ${d.process.heapTotalMb} MB`;
+
+            const sockets = d.sockets || { connected: 0, rooms: {} };
+            document.getElementById('diag-sockets').innerText = sockets.connected ?? 0;
+            const roomNames = Object.keys(sockets.rooms || {});
+            document.getElementById('diag-rooms').innerText = roomNames.length
+                ? roomNames.map(r => `${r} (${sockets.rooms[r]})`).join(', ')
+                : 'no active rooms';
+
+            const api = d.ifApi || { total: 0, errors: 0, rate429: 0, endpoints: [] };
+            const errEl = document.getElementById('diag-errors');
+            errEl.innerText = `${api.errors} / ${api.total}`;
+            errEl.className = 'text-2xl font-bold tracking-tight ' +
+                (api.errors > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-900 dark:text-white');
+            document.getElementById('diag-429').innerText = `${api.rate429} rate-limited (429)`;
+
+            // Last error banner
+            const banner = document.getElementById('diag-lasterror');
+            if (api.lastError) {
+                banner.classList.remove('hidden');
+                document.getElementById('diag-lasterror-text').innerText =
+                    `${api.lastError}  ·  ${fmtAgo(d.now - api.lastErrorAt)}`;
+            } else {
+                banner.classList.add('hidden');
+            }
+
+            // Endpoint latency table
+            const tbody = document.getElementById('diag-endpoints');
+            if (!api.endpoints.length) {
+                tbody.innerHTML = '<tr><td colspan="7" class="py-12 text-center text-slate-400 dark:text-zinc-500 font-medium">No API calls recorded yet.</td></tr>';
+            } else {
+                tbody.innerHTML = api.endpoints.map(e => {
+                    const errCell = e.errors > 0
+                        ? `<span class="text-red-600 dark:text-red-400 font-bold">${e.errors}</span>`
+                        : `<span class="text-slate-400 dark:text-zinc-600">0</span>`;
+                    const statusBad = e.lastStatus && (e.lastStatus >= 400 || e.lastStatus === 0);
+                    const lastCell = `${fmtMs(e.lastMs)}${e.lastStatus ? ` <span class="${statusBad ? 'text-red-500' : 'text-slate-400 dark:text-zinc-600'} text-xs">[${e.lastStatus}]</span>` : ''}`;
+                    return `
+                        <tr class="hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors">
+                            <td class="py-3 px-5 font-mono text-xs text-slate-700 dark:text-zinc-300">${escapeHtml(e.key)}</td>
+                            <td class="py-3 px-4 text-right font-medium text-slate-600 dark:text-zinc-400">${e.count.toLocaleString()}</td>
+                            <td class="py-3 px-4 text-right">${errCell}</td>
+                            <td class="py-3 px-4 text-right ${latencyClass(e.avgMs)}">${fmtMs(e.avgMs)}</td>
+                            <td class="py-3 px-4 text-right text-slate-600 dark:text-zinc-400">${fmtMs(e.p95Ms)}</td>
+                            <td class="py-3 px-4 text-right text-slate-500 dark:text-zinc-500">${fmtMs(e.maxMs)}</td>
+                            <td class="py-3 px-4 text-right text-slate-600 dark:text-zinc-400">${lastCell}</td>
+                        </tr>`;
+                }).join('');
+            }
+
+            // Background pollers
+            const pollEl = document.getElementById('diag-pollers');
+            if (!d.polls || !d.polls.length) {
+                pollEl.innerHTML = '<p class="text-sm text-slate-400 dark:text-zinc-500">No poll-cycle data reported yet. (Per-endpoint API timing above already shows where time is spent.)</p>';
+            } else {
+                pollEl.innerHTML = d.polls.map(p => {
+                    const bad = p.lastStatus === 'error';
+                    return `
+                        <div class="flex items-center justify-between gap-3 p-3 rounded-lg bg-slate-50 dark:bg-zinc-900/50 border border-slate-100 dark:border-zinc-800">
+                            <div class="min-w-0">
+                                <p class="font-semibold text-sm text-slate-800 dark:text-zinc-200 truncate">${escapeHtml(p.name)}</p>
+                                <p class="text-xs text-slate-400 dark:text-zinc-500">${p.runs} runs · ${p.fails} fails · ${fmtAgo(p.msSinceLast)}</p>
+                            </div>
+                            <div class="text-right shrink-0">
+                                <p class="text-sm font-bold ${bad ? 'text-red-500' : latencyClass(p.avgMs)}">${fmtMs(p.lastMs)}</p>
+                                <p class="text-xs text-slate-400 dark:text-zinc-500">avg ${fmtMs(p.avgMs)} · max ${fmtMs(p.maxMs)}</p>
+                            </div>
+                        </div>`;
+                }).join('');
+            }
+
+            // Cache & config
+            const cacheEl = document.getElementById('diag-cache');
+            const cache = d.cache || {};
+            const cfg = d.config || {};
+            const rows = [
+                ['Sessions cached', cache.sessions],
+                ['Flight sets', cache.flights],
+                ['Secondary sets', cache.secondary],
+                ['Flight routing', cache.flightRouting],
+                ['VA roster', cache.vaRoster],
+                ['Oceanic tracks', cache.tracks],
+                ['Pending DB saves', cache.lastRedisSave],
+                ['Sessions refreshed', cache.lastSessionsUpdateMsAgo != null ? fmtAgo(cache.lastSessionsUpdateMsAgo) : '--'],
+                ['Flights poll (active)', cfg.activePollMs != null ? fmtMs(cfg.activePollMs) : '--'],
+                ['Flights poll (idle)', cfg.idlePollMs != null ? fmtMs(cfg.idlePollMs) : '--'],
+                ['Secondary (active)', cfg.secondaryActiveMs != null ? fmtMs(cfg.secondaryActiveMs) : '--'],
+                ['Secondary (idle)', cfg.secondaryIdleMs != null ? fmtMs(cfg.secondaryIdleMs) : '--'],
+            ];
+            cacheEl.innerHTML = rows.map(([label, val]) => `
+                <div class="flex flex-col p-3 rounded-lg bg-slate-50 dark:bg-zinc-900/50 border border-slate-100 dark:border-zinc-800">
+                    <span class="text-xs font-semibold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">${label}</span>
+                    <span class="text-base font-bold text-slate-800 dark:text-zinc-200">${val ?? 0}</span>
+                </div>`).join('');
+
+            document.getElementById('diag-updated').innerText = 'updated ' + new Date(d.now).toLocaleTimeString();
         }
 
         // Initialize Data on Load

@@ -12,6 +12,7 @@ const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs'
 const atcHistory = require('./atc_history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
+const metrics = require('./metrics.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -51,6 +52,46 @@ app.use(cors(corsOptions));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Diagnostics snapshot for the dashboard: IF API timing/errors, poller health,
+// live cache sizes, socket counts and process memory. Read-only, cheap to call.
+app.get('/api/admin/diagnostics', (req, res) => {
+  const rooms = {};
+  try {
+    for (const [name, set] of io.sockets.adapter.rooms) {
+      // Skip the implicit per-socket rooms (named after the socket id).
+      if (!io.sockets.sockets.has(name)) rooms[name] = set.size;
+    }
+  } catch (_) { /* adapter not ready */ }
+
+  res.json({
+    ok: true,
+    data: metrics.snapshot({
+      sockets: {
+        connected: io.engine ? io.engine.clientsCount : 0,
+        rooms,
+      },
+      cache: {
+        sessions: apiCache.sessions.length,
+        flights: apiCache.flights.size,
+        secondary: apiCache.secondary.size,
+        flightRouting: apiCache.flightRouting.size,
+        vaRoster: apiCache.vaRosterCache.size,
+        tracks: apiCache.tracks.length,
+        lastRedisSave: apiCache.lastRedisSave.size,
+        lastSessionsUpdateMsAgo: apiCache.lastSessionsUpdate
+          ? Date.now() - apiCache.lastSessionsUpdate
+          : null,
+      },
+      config: {
+        activePollMs: ACTIVE_POLL_MS,
+        idlePollMs: IDLE_POLL_MS,
+        secondaryActiveMs: SECONDARY_ACTIVE_MS,
+        secondaryIdleMs: SECONDARY_IDLE_MS,
+      },
+    }),
+  });
+});
 
 // Telemetry Middleware: Track all incoming HTTP requests
 app.use((req, res, next) => {
@@ -115,6 +156,9 @@ const ifClient = axios.create({
     Accept: 'application/json',
   },
 });
+// Time every Infinite Flight API call (per-endpoint avg/p95/max + errors) so
+// the dashboard Diagnostics tab can surface what's slow / where it's choking.
+metrics.instrumentAxios(ifClient);
 /* =========================
  * Axios 429 Interceptor (Exponential Backoff)
  * ========================= */
