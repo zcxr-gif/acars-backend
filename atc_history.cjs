@@ -390,6 +390,7 @@ function getReplay(key) {
         flightId: f.flightId,
         userId: f.userId,
         callsign: f.callsign,
+        aircraft: f.aircraft || null,
         closestNm: Math.round(closestNm * 10) / 10,
         atAirport: closestNm <= AT_AIRPORT_NM,
         path: seg
