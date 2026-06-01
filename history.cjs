@@ -48,12 +48,32 @@ db.prepare(`
     flightId TEXT UNIQUE,
     callsign TEXT,
     lastSeen INTEGER,
-    path_json TEXT
+    path_json TEXT,
+    aircraftId TEXT,
+    liveryId TEXT,
+    aircraftName TEXT,
+    liveryName TEXT
   )
 `).run();
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_user_time ON flight_history (userId, lastSeen)`).run();
 // Supports the ATC-replay candidate query, which filters purely on lastSeen.
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_last_seen ON flight_history (lastSeen)`).run();
+
+// Migration: add the aircraft/livery columns to databases created before they
+// existed. CREATE TABLE IF NOT EXISTS won't touch an existing table, so we add
+// each missing column explicitly. Plane type + livery are constant for the life
+// of a flight, so they live as plain columns rather than inside the path.
+(() => {
+  const existing = new Set(
+    db.prepare(`PRAGMA table_info(flight_history)`).all().map(c => c.name)
+  );
+  for (const col of ['aircraftId', 'liveryId', 'aircraftName', 'liveryName']) {
+    if (!existing.has(col)) {
+      db.prepare(`ALTER TABLE flight_history ADD COLUMN ${col} TEXT`).run();
+      console.log(`[history] Migrated flight_history: added column ${col}`);
+    }
+  }
+})();
 
 /* =========================
  * Compact point format
@@ -265,11 +285,15 @@ function updateBatch(flights) {
   purgeOldData();
 
   const upsertStmt = db.prepare(`
-    INSERT INTO flight_history (userId, flightId, callsign, lastSeen, path_json)
-    VALUES (@userId, @flightId, @callsign, @lastSeen, @path_json)
+    INSERT INTO flight_history (userId, flightId, callsign, lastSeen, path_json, aircraftId, liveryId, aircraftName, liveryName)
+    VALUES (@userId, @flightId, @callsign, @lastSeen, @path_json, @aircraftId, @liveryId, @aircraftName, @liveryName)
     ON CONFLICT(flightId) DO UPDATE SET
       lastSeen = excluded.lastSeen,
-      path_json = excluded.path_json
+      path_json = excluded.path_json,
+      aircraftId = excluded.aircraftId,
+      liveryId = excluded.liveryId,
+      aircraftName = excluded.aircraftName,
+      liveryName = excluded.liveryName
   `);
 
   const selectPathStmt = db.prepare('SELECT path_json FROM flight_history WHERE flightId = ?');
@@ -310,12 +334,17 @@ function updateBatch(flights) {
 
       flightPath = trimFlightSessions(flightPath);
 
+      const ac = flight.aircraft || {};
       upsertStmt.run({
         userId: flight.userId,
         flightId: flight.flightId,
         callsign: flight.callsign,
         lastSeen: now,
-        path_json: writePath(flightPath)
+        path_json: writePath(flightPath),
+        aircraftId: ac.aircraftId || null,
+        liveryId: ac.liveryId || null,
+        aircraftName: ac.aircraftName || null,
+        liveryName: ac.liveryName || null
       });
     }
   });
@@ -337,12 +366,18 @@ async function getFlightPath(flightId) {
  */
 function getFlightsForReplay(sinceMs) {
   const rows = db
-    .prepare('SELECT userId, flightId, callsign, path_json FROM flight_history WHERE lastSeen >= ?')
+    .prepare('SELECT userId, flightId, callsign, path_json, aircraftId, liveryId, aircraftName, liveryName FROM flight_history WHERE lastSeen >= ?')
     .all(sinceMs);
   return rows.map(r => ({
     userId: r.userId,
     flightId: r.flightId,
     callsign: r.callsign,
+    aircraft: {
+      aircraftId: r.aircraftId || null,
+      liveryId: r.liveryId || null,
+      aircraftName: r.aircraftName || null,
+      liveryName: r.liveryName || null
+    },
     path: readPath(r.path_json)
   }));
 }
