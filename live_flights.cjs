@@ -269,35 +269,63 @@ const globalMetadata = {
  * restart to pick them up. Fetches both lists first and only swaps the shared
  * maps once both succeed, so a failed refresh can't leave them half-populated.
  */
+// Wrap an upstream-list fetch so a failure says *which* list broke and carries
+// the IF API HTTP status — turning a vague "refresh failed" into something
+// actionable on the dashboard.
+function tagListError(label) {
+  return (e) => {
+    const status = e?.response?.status;
+    const msg = status
+      ? `${label} fetch failed: IF API HTTP ${status}`
+      : `${label} fetch failed: ${e?.message || 'unknown error'}`;
+    const wrapped = new Error(msg);
+    wrapped.response = e?.response;
+    throw wrapped;
+  };
+}
+
 async function loadMetadata(reason = 'startup') {
+  metrics.recordTaskStart('metadata-refresh');
+
   if (!IF_API_KEY) {
     console.warn('⚠️ Skipping metadata load: API key is missing.');
-    throw new Error('IF API key is missing');
+    const e = new Error('IF API key is missing — set INFINITE_FLIGHT_API_KEY.');
+    metrics.recordTaskFailure('metadata-refresh', e);
+    throw e;
   }
 
   console.log(`⏳ Loading aircraft and liveries (${reason})...`);
 
-  const [aircraftList, liveryList] = await Promise.all([
-    getAircraftList(),
-    getAllLiveries()
-  ]);
+  try {
+    const [aircraftList, liveryList] = await Promise.all([
+      getAircraftList().catch(tagListError('Aircraft')),
+      getAllLiveries().catch(tagListError('Liveries')),
+    ]);
 
-  globalMetadata.aircraft = aircraftList;
-  aircraftNameMap.clear();
-  for (const aircraft of aircraftList) aircraftNameMap.set(aircraft.id, aircraft.name);
+    globalMetadata.aircraft = aircraftList;
+    aircraftNameMap.clear();
+    for (const aircraft of aircraftList) aircraftNameMap.set(aircraft.id, aircraft.name);
 
-  globalMetadata.liveries = liveryList;
-  liveryNameMap.clear();
-  for (const livery of liveryList) liveryNameMap.set(livery.id, livery.name);
+    globalMetadata.liveries = liveryList;
+    liveryNameMap.clear();
+    for (const livery of liveryList) liveryNameMap.set(livery.id, livery.name);
 
-  globalMetadata.lastUpdated = Date.now();
+    globalMetadata.lastUpdated = Date.now();
 
-  console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types and ${liveryNameMap.size} liveries.`);
-  return {
-    aircraft: aircraftNameMap.size,
-    liveries: liveryNameMap.size,
-    lastUpdated: globalMetadata.lastUpdated
-  };
+    console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types and ${liveryNameMap.size} liveries (${reason}).`);
+    const result = {
+      aircraft: aircraftNameMap.size,
+      liveries: liveryNameMap.size,
+      lastUpdated: globalMetadata.lastUpdated,
+      reason,
+    };
+    metrics.recordTaskSuccess('metadata-refresh', result);
+    return result;
+  } catch (e) {
+    console.error(`❌ Metadata load failed (${reason}): ${e.message}`);
+    metrics.recordTaskFailure('metadata-refresh', e);
+    throw e;
+  }
 }
 
 // Concurrency guard: collapse overlapping refreshes (e.g. impatient button
@@ -413,6 +441,25 @@ function unwrap(data) {
 
 function err(status, message, extra = {}) {
   return { ok: false, error: { status, message, ...extra } };
+}
+
+/**
+ * Race a promise against a wall-clock timeout. Used to bound slow upstream
+ * calls (e.g. the IF metadata refresh) so an HTTP handler always responds with
+ * clean JSON *before* a reverse proxy / platform gateway gives up and returns
+ * its own non-JSON error page — which is what made the dashboard surface the
+ * opaque "The string did not match the expected pattern" parse error.
+ */
+function withTimeout(promise, ms, label = 'operation') {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error(`${label} timed out after ${Math.round(ms / 1000)}s`);
+      e.code = 'ETIMEDOUT';
+      reject(e);
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 
@@ -1248,7 +1295,9 @@ async function getUserAtcSessionDetails(userId, atcSessionId) {
  * Socket.IO Connection Handling (FIXED)
  * ========================= */
 io.on('connection', (socket) => {
-  console.log(`[socket] ✅ User connected: ${socket.id}`);
+  const alive = metrics.recordSocketConnect();
+  const { peak, totalConnections } = metrics.socketStats();
+  console.log(`[socket] ✅ Connected: ${socket.id} | alive=${alive} peak=${peak} total=${totalConnections}`);
 
   // Listen for a client to request a specific server's flight data
   socket.on('join_server_room', async (serverName) => {
@@ -1303,8 +1352,9 @@ io.on('connection', (socket) => {
     }
     // --- [END FIX] ---
   });
-  socket.on('disconnect', () => {
-    console.log(`[socket] ❌ User disconnected: ${socket.id}`);
+  socket.on('disconnect', (reason) => {
+    const remaining = metrics.recordSocketDisconnect(reason);
+    console.log(`[socket] ❌ Disconnected: ${socket.id} | reason=${reason} alive=${remaining}`);
   });
 });
 
@@ -1876,12 +1926,15 @@ app.post('/api/flights/routes/batch', async (req, res) => {
   }
 });
 app.get('/api/metadata', (req, res) => {
+  const refreshStatus = metrics.taskStats().find(t => t.name === 'metadata-refresh') || null;
   res.json({
     ok: true,
     aircraft: globalMetadata.aircraft,
     liveries: globalMetadata.liveries,
     counts: { aircraft: aircraftNameMap.size, liveries: liveryNameMap.size },
-    lastUpdated: globalMetadata.lastUpdated
+    lastUpdated: globalMetadata.lastUpdated,
+    // So the dashboard can explain *why* counts look stale/empty.
+    refreshStatus,
   });
 });
 
@@ -1899,14 +1952,25 @@ app.post('/api/admin/refresh-metadata', async (req, res) => {
     }
   }
   try {
-    const result = await refreshMetadata('manual');
+    // Bound the refresh well under any platform gateway timeout so we always
+    // return JSON. Without this, a slow IF API lets the proxy answer with an
+    // HTML error page, and the dashboard's res.json() then throws the opaque
+    // WebKit "The string did not match the expected pattern" SyntaxError.
+    const result = await withTimeout(refreshMetadata('manual'), 25000, 'Metadata refresh');
     res.json({
       ok: true,
       message: `Refreshed ${result.aircraft} aircraft and ${result.liveries} liveries.`,
       ...result
     });
   } catch (e) {
-    res.status(502).json(err(502, 'Failed to refresh metadata from the IF API', { detail: e.message }));
+    const ifStatus = e?.response?.status || null;
+    const timedOut = e?.code === 'ETIMEDOUT';
+    const status = timedOut ? 504 : 502;
+    const message = timedOut
+      ? 'Metadata refresh timed out — the Infinite Flight API was too slow. Please try again.'
+      : 'Failed to refresh metadata from the IF API';
+    console.error(`❌ /api/admin/refresh-metadata → ${status}: ${e.message}`);
+    res.status(status).json(err(status, message, { detail: e.message, ifStatus }));
   }
 });
 app.get('/health', (req, res) => {
@@ -2331,12 +2395,14 @@ httpServer.listen(PORT, () => {
     const mb = (n) => Math.round(n / 1048576);
     let routingEntries = 0;
     for (const m of apiCache.flightRouting.values()) routingEntries += m.size;
+    const sock = metrics.socketStats();
     console.log(
       `[mem] rss=${mb(mu.rss)}MB heap=${mb(mu.heapUsed)}/${mb(mu.heapTotal)}MB ` +
       `ext=${mb(mu.external)}MB | sessions:flights=${apiCache.flights.size} ` +
       `secondary=${apiCache.secondary.size} routing=${apiCache.flightRouting.size}(${routingEntries}) ` +
       `saveTracker=${apiCache.lastRedisSave.size} onDemand=${onDemandCache.size} ` +
-      `vaRoster=${apiCache.vaRosterCache.size} sockets=${io.engine.clientsCount}`
+      `vaRoster=${apiCache.vaRosterCache.size} ` +
+      `sockets=${io.engine.clientsCount}(peak ${sock.peak}, ${sock.totalConnections} total)`
     );
   }, FIFTEEN_MINUTES);
   

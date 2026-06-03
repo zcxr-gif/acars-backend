@@ -300,6 +300,19 @@
                     </div>
                 </div>
 
+                <!-- Resource usage -->
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden">
+                    <div class="p-5 border-b border-slate-200 dark:border-darkBorder bg-slate-50/50 dark:bg-zinc-900/30">
+                        <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                            <i data-lucide="activity" class="w-4 h-4 text-slate-400 dark:text-zinc-400"></i> Resource Usage
+                        </h2>
+                        <p id="diag-host" class="text-xs text-slate-500 dark:text-zinc-500 mt-1">--</p>
+                    </div>
+                    <div id="diag-resources" class="p-5 grid grid-cols-2 gap-3 text-sm">
+                        <p class="text-slate-400 dark:text-zinc-500 col-span-2">Awaiting data…</p>
+                    </div>
+                </div>
+
                 <!-- Cache & sockets -->
                 <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden">
                     <div class="p-5 border-b border-slate-200 dark:border-darkBorder bg-slate-50/50 dark:bg-zinc-900/30">
@@ -336,7 +349,8 @@
                         <span class="text-xs font-semibold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">Liveries</span>
                         <span id="meta-livery-count" class="text-2xl font-bold text-slate-800 dark:text-zinc-200">--</span>
                     </div>
-                    <p id="meta-status" class="col-span-2 text-xs font-medium text-slate-400 dark:text-zinc-500">Metadata last updated: <span id="meta-updated">never</span></p>
+                    <p class="col-span-2 text-xs font-medium text-slate-400 dark:text-zinc-500">Metadata last updated: <span id="meta-updated">never</span></p>
+                    <p id="meta-status" class="col-span-2 text-xs font-medium text-slate-400 dark:text-zinc-500"></p>
                 </div>
             </div>
 
@@ -597,6 +611,42 @@
                 .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
 
+        // Fetch + parse defensively. A bare `res.json()` throws an opaque
+        // SyntaxError ("The string did not match the expected pattern" on
+        // WebKit/Safari) whenever the body isn't valid JSON — e.g. a gateway
+        // timeout HTML page. This reads the body as text first and only then
+        // attempts JSON.parse, so a non-JSON response surfaces the real HTTP
+        // status + a readable snippet instead of a cryptic browser error.
+        // An AbortController also bounds the wait so a hung request fails clearly.
+        async function safeFetchJson(url, opts = {}, timeoutMs = 30000) {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+            let res;
+            try {
+                res = await fetch(url, { ...opts, signal: ctrl.signal });
+            } catch (e) {
+                if (e.name === 'AbortError') {
+                    throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+                }
+                throw new Error(e.message || 'Network request failed');
+            } finally {
+                clearTimeout(timer);
+            }
+
+            const text = await res.text();
+            let data = null;
+            if (text) {
+                try {
+                    data = JSON.parse(text);
+                } catch (_) {
+                    // Strip any HTML tags to leave a human-readable hint.
+                    const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+                    throw new Error(`HTTP ${res.status}${res.statusText ? ' ' + res.statusText : ''}${snippet ? ' — ' + snippet : ' — non-JSON response'}`);
+                }
+            }
+            return { res, data };
+        }
+
         function fmtMs(v) {
             if (v == null) return '--';
             if (v >= 1000) return (v / 1000).toFixed(2) + ' s';
@@ -632,10 +682,9 @@
 
         async function fetchDiagnostics() {
             try {
-                const res = await fetch('/api/admin/diagnostics');
-                const { ok, data } = await res.json();
-                if (!ok) return;
-                renderDiagnostics(data);
+                const { data: body } = await safeFetchJson('/api/admin/diagnostics', {}, 15000);
+                if (!body || !body.ok) return;
+                renderDiagnostics(body.data);
             } catch (e) {
                 console.error('Failed to load diagnostics', e);
             }
@@ -651,9 +700,19 @@
             const sockets = d.sockets || { connected: 0, rooms: {} };
             document.getElementById('diag-sockets').innerText = sockets.connected ?? 0;
             const roomNames = Object.keys(sockets.rooms || {});
-            document.getElementById('diag-rooms').innerText = roomNames.length
+            const roomsText = roomNames.length
                 ? roomNames.map(r => `${r} (${sockets.rooms[r]})`).join(', ')
                 : 'no active rooms';
+            // Surround the live count with context: peak concurrency + lifetime
+            // connect/disconnect totals, so churn is visible at a glance.
+            const lifecycle = [];
+            if (sockets.peak != null) lifecycle.push(`peak ${sockets.peak}`);
+            if (sockets.totalConnections != null) lifecycle.push(`${sockets.totalConnections} total`);
+            if (sockets.totalDisconnections != null) lifecycle.push(`${sockets.totalDisconnections} dropped`);
+            document.getElementById('diag-rooms').innerHTML =
+                escapeHtml(roomsText) + (lifecycle.length
+                    ? `<br><span class="text-slate-400 dark:text-zinc-600">${escapeHtml(lifecycle.join(' · '))}</span>`
+                    : '');
 
             const api = d.ifApi || { total: 0, errors: 0, rate429: 0, endpoints: [] };
             const errEl = document.getElementById('diag-errors');
@@ -721,7 +780,16 @@
             const cacheEl = document.getElementById('diag-cache');
             const cache = d.cache || {};
             const cfg = d.config || {};
+            const metaTask = (d.tasks || []).find(t => t.name === 'metadata-refresh');
+            const metaStatusText = metaTask
+                ? (metaTask.lastStatus === 'error'
+                    ? `failed ${fmtAgo(d.now - (metaTask.lastErrorAt || metaTask.lastEnd))}`
+                    : metaTask.lastStatus === 'ok'
+                        ? `ok ${fmtAgo(d.now - metaTask.lastEnd)}`
+                        : (metaTask.lastStatus || '--'))
+                : '--';
             const rows = [
+                ['Metadata refresh', metaStatusText],
                 ['Sessions cached', cache.sessions],
                 ['Flight sets', cache.flights],
                 ['Secondary sets', cache.secondary],
@@ -741,7 +809,56 @@
                     <span class="text-base font-bold text-slate-800 dark:text-zinc-200">${val ?? 0}</span>
                 </div>`).join('');
 
+            // Resource usage (memory, CPU, system load, event-loop health)
+            renderResources(d);
+
             document.getElementById('diag-updated').innerText = 'updated ' + new Date(d.now).toLocaleTimeString();
+        }
+
+        // Render in GB once a megabyte figure gets large enough to be unwieldy.
+        function fmtMb(mb) {
+            if (mb == null) return '--';
+            return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : Math.round(mb) + ' MB';
+        }
+
+        function renderResources(d) {
+            const p = d.process || {};
+            const sys = d.system || {};
+            const el = d.eventLoop || null;
+
+            const host = document.getElementById('diag-host');
+            if (host) {
+                const bits = [];
+                if (sys.platform) bits.push(escapeHtml(sys.platform));
+                if (sys.cpuCores) bits.push(`${sys.cpuCores} cores`);
+                if (p.node) bits.push('node ' + escapeHtml(p.node));
+                host.innerText = bits.join('  ·  ') || '--';
+            }
+
+            const memTotal = sys.totalMemMb;
+            const memUsed = sys.usedMemMb;
+            const memPct = (memTotal && memUsed != null) ? Math.round((memUsed / memTotal) * 100) : null;
+            const elText = el ? `${el.meanMs} ms avg · ${el.p99Ms} p99 · ${el.maxMs} max` : '--';
+
+            const rows = [
+                ['CPU', p.cpuPercent != null ? `${p.cpuPercent}% of 1 core` : '--'],
+                ['Memory (RSS)', fmtMb(p.rssMb)],
+                ['Heap', `${fmtMb(p.heapUsedMb)} / ${fmtMb(p.heapTotalMb)}`],
+                ['External', fmtMb(p.externalMb)],
+                ['ArrayBuffers', fmtMb(p.arrayBuffersMb)],
+                ['System memory', memTotal ? `${fmtMb(memUsed)} / ${fmtMb(memTotal)}${memPct != null ? ` (${memPct}%)` : ''}` : '--'],
+                ['Load avg (1·5·15m)', sys.loadAvg1 != null ? `${sys.loadAvg1} · ${sys.loadAvg5} · ${sys.loadAvg15}` : '--'],
+                ['Event-loop lag', elText],
+            ];
+
+            const resEl = document.getElementById('diag-resources');
+            if (resEl) {
+                resEl.innerHTML = rows.map(([label, val]) => `
+                <div class="flex flex-col p-3 rounded-lg bg-slate-50 dark:bg-zinc-900/50 border border-slate-100 dark:border-zinc-800">
+                    <span class="text-xs font-semibold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">${label}</span>
+                    <span class="text-base font-bold text-slate-800 dark:text-zinc-200">${escapeHtml(val)}</span>
+                </div>`).join('');
+            }
         }
 
         // --- 3. AIRCRAFT & LIVERY METADATA ---
@@ -758,9 +875,19 @@
 
         async function loadMetadata() {
             try {
-                const res = await fetch('/api/metadata');
-                const data = await res.json();
-                if (data.ok) renderMetadata(data);
+                const { data } = await safeFetchJson('/api/metadata', {}, 15000);
+                if (data && data.ok) {
+                    renderMetadata(data);
+                    // If the last server-side refresh failed, say so up front
+                    // instead of silently showing stale/empty counts.
+                    const rs = data.refreshStatus;
+                    if (rs && rs.lastStatus === 'error' && rs.lastError) {
+                        const status = document.getElementById('meta-status');
+                        if (status) {
+                            status.innerHTML = `<span class="text-amber-600 dark:text-amber-400 font-semibold">Last refresh failed: ${escapeHtml(rs.lastError)}</span>`;
+                        }
+                    }
+                }
             } catch (e) {
                 // Silent: counts simply stay as-is if the fetch fails.
             }
@@ -778,9 +905,10 @@
             label.innerText = 'Requesting…';
 
             try {
-                const res = await fetch('/api/admin/refresh-metadata', { method: 'POST' });
-                const data = await res.json();
-                if (res.ok && data.ok) {
+                // 40s client budget — longer than the server's 25s refresh cap
+                // so the server's clean JSON error wins the race over a client abort.
+                const { res, data } = await safeFetchJson('/api/admin/refresh-metadata', { method: 'POST' }, 40000);
+                if (res.ok && data && data.ok) {
                     document.getElementById('meta-aircraft-count').innerText = data.aircraft ?? '--';
                     document.getElementById('meta-livery-count').innerText = data.liveries ?? '--';
                     document.getElementById('meta-updated').innerText = data.lastUpdated
@@ -788,7 +916,8 @@
                         : new Date().toLocaleString();
                     status.innerHTML = `<span class="text-emerald-600 dark:text-emerald-400 font-semibold">${escapeHtml(data.message || 'Metadata refreshed.')}</span>`;
                 } else {
-                    const detail = data?.error?.message || data?.message || `HTTP ${res.status}`;
+                    // Prefer the server's specific detail (which list failed, IF status).
+                    const detail = data?.error?.detail || data?.error?.message || data?.message || `HTTP ${res.status}`;
                     status.innerHTML = `<span class="text-red-600 dark:text-red-400 font-semibold">Refresh failed: ${escapeHtml(detail)}</span>`;
                 }
             } catch (e) {

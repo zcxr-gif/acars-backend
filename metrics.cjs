@@ -13,7 +13,70 @@
  * Zero dependencies, no I/O. Safe to require from anywhere.
  * ========================= */
 
+const os = require('os');
+
 const RECENT_SAMPLES = 60; // rolling window for p95 / sparkline-style trends
+
+/* ---- Host resource usage (CPU, system memory, event-loop lag) ----
+ * CPU% is derived from the delta of process.cpuUsage() between snapshot reads,
+ * normalised by elapsed wall-clock time. It's expressed as a percentage of a
+ * single core, so it can exceed 100% on a busy multi-core process — `cpuCores`
+ * is reported alongside so the number is interpretable.
+ */
+let lastCpu = process.cpuUsage();
+let lastCpuAt = Date.now();
+
+function cpuPercent() {
+  const now = Date.now();
+  const elapsedMs = now - lastCpuAt;
+  const delta = process.cpuUsage(lastCpu); // micros since lastCpu
+  lastCpu = process.cpuUsage();
+  lastCpuAt = now;
+  if (elapsedMs <= 0) return 0;
+  const usedMs = (delta.user + delta.system) / 1000;
+  return +((usedMs / elapsedMs) * 100).toFixed(1);
+}
+
+// Event-loop lag: how long the loop is blocked beyond its scheduled tick. A
+// rising mean/p99 is the clearest single signal that the process is starved
+// (heavy sync work, GC pressure) even while memory looks fine.
+let eldHistogram = null;
+try {
+  const { monitorEventLoopDelay } = require('perf_hooks');
+  eldHistogram = monitorEventLoopDelay({ resolution: 20 });
+  eldHistogram.enable();
+} catch (_) {
+  eldHistogram = null; // older runtime — degrade gracefully
+}
+
+function eventLoopLag() {
+  if (!eldHistogram) return null;
+  // mean/max are NaN until the histogram has collected its first samples.
+  const ns2ms = (n) => (Number.isFinite(n) ? +(n / 1e6).toFixed(2) : 0);
+  const out = {
+    meanMs: ns2ms(eldHistogram.mean),
+    p99Ms: ns2ms(eldHistogram.percentile(99)),
+    maxMs: ns2ms(eldHistogram.max),
+  };
+  eldHistogram.reset(); // window the stats to the gap between dashboard polls
+  return out;
+}
+
+function systemStats() {
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const mb = (n) => +(n / 1048576).toFixed(1);
+  return {
+    platform: `${os.type()} ${os.release()}`,
+    cpuCores: os.cpus()?.length || 0,
+    loadAvg1: +os.loadavg()[0].toFixed(2),
+    loadAvg5: +os.loadavg()[1].toFixed(2),
+    loadAvg15: +os.loadavg()[2].toFixed(2),
+    totalMemMb: mb(totalMem),
+    freeMemMb: mb(freeMem),
+    usedMemMb: mb(totalMem - freeMem),
+  };
+}
 
 /* ---- Infinite Flight API call stats, bucketed per endpoint template ---- */
 const endpoints = new Map();
@@ -116,6 +179,106 @@ function recordApiCall(config, status, errMsg) {
   }
 }
 
+/* ---- Socket.IO lifecycle tracking ----
+ * "How many sockets are alive right now" plus the surrounding context you need
+ * to reason about churn: the all-time peak, cumulative connects/disconnects,
+ * and a tally of *why* clients dropped (transport close, ping timeout, etc.).
+ */
+const sockets = {
+  connected: 0,            // alive right now
+  peak: 0,                 // max concurrent observed since boot
+  totalConnections: 0,     // cumulative connects
+  totalDisconnections: 0,  // cumulative disconnects
+  lastConnectAt: null,
+  lastDisconnectAt: null,
+  disconnectReasons: {},   // reason -> count
+};
+
+function recordSocketConnect() {
+  sockets.connected += 1;
+  sockets.totalConnections += 1;
+  if (sockets.connected > sockets.peak) sockets.peak = sockets.connected;
+  sockets.lastConnectAt = Date.now();
+  return sockets.connected;
+}
+
+function recordSocketDisconnect(reason) {
+  sockets.connected = Math.max(0, sockets.connected - 1);
+  sockets.totalDisconnections += 1;
+  sockets.lastDisconnectAt = Date.now();
+  if (reason) {
+    const key = String(reason).slice(0, 60);
+    sockets.disconnectReasons[key] = (sockets.disconnectReasons[key] || 0) + 1;
+  }
+  return sockets.connected;
+}
+
+function socketStats() {
+  return { ...sockets, disconnectReasons: { ...sockets.disconnectReasons } };
+}
+
+/* ---- Named task status (e.g. metadata refresh) ----
+ * A tiny state machine per named job so the dashboard can answer "did the last
+ * 'Request New Planes & Liveries' actually work, and if not, why?" — instead of
+ * the failure vanishing into the server logs.
+ */
+const tasks = new Map();
+
+function taskBucket(name) {
+  let t = tasks.get(name);
+  if (!t) {
+    t = {
+      name,
+      runs: 0,
+      ok: 0,
+      fails: 0,
+      lastStart: null,
+      lastEnd: null,
+      lastDurationMs: null,
+      lastStatus: null,   // 'running' | 'ok' | 'error'
+      lastError: null,
+      lastErrorAt: null,
+      lastResult: null,
+    };
+    tasks.set(name, t);
+  }
+  return t;
+}
+
+function recordTaskStart(name) {
+  const t = taskBucket(name);
+  t.runs += 1;
+  t.lastStart = Date.now();
+  t.lastStatus = 'running';
+  return t;
+}
+
+function recordTaskSuccess(name, result = null) {
+  const t = taskBucket(name);
+  t.ok += 1;
+  t.lastEnd = Date.now();
+  t.lastDurationMs = t.lastStart ? t.lastEnd - t.lastStart : null;
+  t.lastStatus = 'ok';
+  t.lastResult = result;
+  t.lastError = null;
+  return t;
+}
+
+function recordTaskFailure(name, error) {
+  const t = taskBucket(name);
+  t.fails += 1;
+  t.lastEnd = Date.now();
+  t.lastDurationMs = t.lastStart ? t.lastEnd - t.lastStart : null;
+  t.lastStatus = 'error';
+  t.lastError = String(error?.message || error || 'unknown error').slice(0, 300);
+  t.lastErrorAt = Date.now();
+  return t;
+}
+
+function taskStats() {
+  return Array.from(tasks.values()).map((t) => ({ ...t }));
+}
+
 /* ---- Background poller health ---- */
 const polls = new Map();
 
@@ -200,20 +363,32 @@ function snapshot(extra = {}) {
   }
   pollRows.sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
 
+  // Caller (the diagnostics endpoint) supplies the authoritative live socket
+  // count + per-room breakdown; we layer our lifecycle stats (peak, totals,
+  // disconnect reasons) on top so neither view is lost.
+  const { sockets: extraSockets, ...restExtra } = extra;
+  const mergedSockets = { ...socketStats(), ...(extraSockets || {}) };
+
   return {
     now: Date.now(),
     uptimeSec: Math.round(process.uptime()),
     process: {
       pid: process.pid,
       node: process.version,
+      cpuPercent: cpuPercent(),
       rssMb: +(mem.rss / 1048576).toFixed(1),
       heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1),
       heapTotalMb: +(mem.heapTotal / 1048576).toFixed(1),
       externalMb: +(mem.external / 1048576).toFixed(1),
+      arrayBuffersMb: +((mem.arrayBuffers || 0) / 1048576).toFixed(1),
     },
+    system: systemStats(),
+    eventLoop: eventLoopLag(),
     ifApi: { ...ifApi, endpoints: endpointRows },
     polls: pollRows,
-    ...extra,
+    sockets: mergedSockets,
+    tasks: taskStats(),
+    ...restExtra,
   };
 }
 
@@ -221,5 +396,12 @@ module.exports = {
   instrumentAxios,
   recordApiCall,
   recordPoll,
+  recordSocketConnect,
+  recordSocketDisconnect,
+  socketStats,
+  recordTaskStart,
+  recordTaskSuccess,
+  recordTaskFailure,
+  taskStats,
   snapshot,
 };
