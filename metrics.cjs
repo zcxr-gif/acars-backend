@@ -116,6 +116,106 @@ function recordApiCall(config, status, errMsg) {
   }
 }
 
+/* ---- Socket.IO lifecycle tracking ----
+ * "How many sockets are alive right now" plus the surrounding context you need
+ * to reason about churn: the all-time peak, cumulative connects/disconnects,
+ * and a tally of *why* clients dropped (transport close, ping timeout, etc.).
+ */
+const sockets = {
+  connected: 0,            // alive right now
+  peak: 0,                 // max concurrent observed since boot
+  totalConnections: 0,     // cumulative connects
+  totalDisconnections: 0,  // cumulative disconnects
+  lastConnectAt: null,
+  lastDisconnectAt: null,
+  disconnectReasons: {},   // reason -> count
+};
+
+function recordSocketConnect() {
+  sockets.connected += 1;
+  sockets.totalConnections += 1;
+  if (sockets.connected > sockets.peak) sockets.peak = sockets.connected;
+  sockets.lastConnectAt = Date.now();
+  return sockets.connected;
+}
+
+function recordSocketDisconnect(reason) {
+  sockets.connected = Math.max(0, sockets.connected - 1);
+  sockets.totalDisconnections += 1;
+  sockets.lastDisconnectAt = Date.now();
+  if (reason) {
+    const key = String(reason).slice(0, 60);
+    sockets.disconnectReasons[key] = (sockets.disconnectReasons[key] || 0) + 1;
+  }
+  return sockets.connected;
+}
+
+function socketStats() {
+  return { ...sockets, disconnectReasons: { ...sockets.disconnectReasons } };
+}
+
+/* ---- Named task status (e.g. metadata refresh) ----
+ * A tiny state machine per named job so the dashboard can answer "did the last
+ * 'Request New Planes & Liveries' actually work, and if not, why?" — instead of
+ * the failure vanishing into the server logs.
+ */
+const tasks = new Map();
+
+function taskBucket(name) {
+  let t = tasks.get(name);
+  if (!t) {
+    t = {
+      name,
+      runs: 0,
+      ok: 0,
+      fails: 0,
+      lastStart: null,
+      lastEnd: null,
+      lastDurationMs: null,
+      lastStatus: null,   // 'running' | 'ok' | 'error'
+      lastError: null,
+      lastErrorAt: null,
+      lastResult: null,
+    };
+    tasks.set(name, t);
+  }
+  return t;
+}
+
+function recordTaskStart(name) {
+  const t = taskBucket(name);
+  t.runs += 1;
+  t.lastStart = Date.now();
+  t.lastStatus = 'running';
+  return t;
+}
+
+function recordTaskSuccess(name, result = null) {
+  const t = taskBucket(name);
+  t.ok += 1;
+  t.lastEnd = Date.now();
+  t.lastDurationMs = t.lastStart ? t.lastEnd - t.lastStart : null;
+  t.lastStatus = 'ok';
+  t.lastResult = result;
+  t.lastError = null;
+  return t;
+}
+
+function recordTaskFailure(name, error) {
+  const t = taskBucket(name);
+  t.fails += 1;
+  t.lastEnd = Date.now();
+  t.lastDurationMs = t.lastStart ? t.lastEnd - t.lastStart : null;
+  t.lastStatus = 'error';
+  t.lastError = String(error?.message || error || 'unknown error').slice(0, 300);
+  t.lastErrorAt = Date.now();
+  return t;
+}
+
+function taskStats() {
+  return Array.from(tasks.values()).map((t) => ({ ...t }));
+}
+
 /* ---- Background poller health ---- */
 const polls = new Map();
 
@@ -200,6 +300,12 @@ function snapshot(extra = {}) {
   }
   pollRows.sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
 
+  // Caller (the diagnostics endpoint) supplies the authoritative live socket
+  // count + per-room breakdown; we layer our lifecycle stats (peak, totals,
+  // disconnect reasons) on top so neither view is lost.
+  const { sockets: extraSockets, ...restExtra } = extra;
+  const mergedSockets = { ...socketStats(), ...(extraSockets || {}) };
+
   return {
     now: Date.now(),
     uptimeSec: Math.round(process.uptime()),
@@ -213,7 +319,9 @@ function snapshot(extra = {}) {
     },
     ifApi: { ...ifApi, endpoints: endpointRows },
     polls: pollRows,
-    ...extra,
+    sockets: mergedSockets,
+    tasks: taskStats(),
+    ...restExtra,
   };
 }
 
@@ -221,5 +329,12 @@ module.exports = {
   instrumentAxios,
   recordApiCall,
   recordPoll,
+  recordSocketConnect,
+  recordSocketDisconnect,
+  socketStats,
+  recordTaskStart,
+  recordTaskSuccess,
+  recordTaskFailure,
+  taskStats,
   snapshot,
 };
