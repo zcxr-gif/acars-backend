@@ -25,6 +25,7 @@ const whitelist = [
     'https://inflight.info',        
     'https://deploy-preview-6--indgo-va.netlify.app',
     'https://site--indgo-backend--6dmjph8ltlhv.code.run',
+    'https://site--acars-backend--6dmjph8ltlhv.code.run',
     "capacitor://inflight-secure",
     "https://discoverva.netlify.app",
     "http://localhost:8888"
