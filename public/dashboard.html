@@ -81,6 +81,9 @@
             <button id="tab-overview" onclick="switchTab('overview')" class="px-4 py-2 text-sm font-semibold rounded-lg transition-colors bg-white dark:bg-zinc-800 text-slate-900 dark:text-white shadow-sm flex items-center gap-2">
                 <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Overview
             </button>
+            <button id="tab-analytics" onclick="switchTab('analytics')" class="px-4 py-2 text-sm font-semibold rounded-lg transition-colors text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-white flex items-center gap-2">
+                <i data-lucide="globe" class="w-4 h-4"></i> Fleet Analytics
+            </button>
             <button id="tab-diagnostics" onclick="switchTab('diagnostics')" class="px-4 py-2 text-sm font-semibold rounded-lg transition-colors text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-white flex items-center gap-2">
                 <i data-lucide="stethoscope" class="w-4 h-4"></i> Diagnostics
             </button>
@@ -208,6 +211,108 @@
         </div>
 
         </div><!-- /panel-overview -->
+
+        <!-- ===================== FLEET ANALYTICS PANEL ===================== -->
+        <div id="panel-analytics" class="space-y-6 hidden">
+
+            <!-- Live KPI row -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-5">
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm">
+                    <div class="flex justify-between items-start mb-3">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Live Flights</p>
+                        <i data-lucide="plane" class="w-4 h-4 text-indigo-500 dark:text-indigo-400"></i>
+                    </div>
+                    <h3 id="an-total" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                    <p id="an-ground-sub" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">across all servers</p>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm">
+                    <div class="flex justify-between items-start mb-3">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Airborne</p>
+                        <i data-lucide="plane-takeoff" class="w-4 h-4 text-sky-500 dark:text-sky-400"></i>
+                    </div>
+                    <h3 id="an-airborne" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                    <p class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">climb / cruise / descent</p>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm">
+                    <div class="flex justify-between items-start mb-3">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Unique Pilots</p>
+                        <i data-lucide="users" class="w-4 h-4 text-emerald-600 dark:text-emerald-400"></i>
+                    </div>
+                    <h3 id="an-pilots" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                    <p id="an-va-sub" class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">--</p>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl p-6 border border-slate-200 dark:border-darkBorder shadow-sm">
+                    <div class="flex justify-between items-start mb-3">
+                        <p class="text-sm font-semibold text-slate-500 dark:text-zinc-400 uppercase tracking-wider">Peak <span id="an-peak-range">7d</span></p>
+                        <i data-lucide="trending-up" class="w-4 h-4 text-purple-500 dark:text-purple-400"></i>
+                    </div>
+                    <h3 id="an-peak" class="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">--</h3>
+                    <p class="text-xs font-medium text-slate-500 dark:text-zinc-500 mt-2">most concurrent flights</p>
+                </div>
+            </div>
+
+            <!-- Global traffic trend -->
+            <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-lg font-bold text-slate-800 dark:text-white">Global Traffic Trend</h2>
+                    <select id="an-range" onchange="fetchFleetTrends()" class="bg-slate-50 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-700 text-slate-700 dark:text-zinc-300 text-sm rounded-lg px-4 py-2 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-medium cursor-pointer">
+                        <option value="1">Last 24 Hours</option>
+                        <option value="3">Last 3 Days</option>
+                        <option value="7" selected>Last 7 Days</option>
+                        <option value="14">Last 14 Days</option>
+                    </select>
+                </div>
+                <div class="h-[300px] w-full">
+                    <canvas id="fleetTrendChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Leaderboards -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6">
+                    <h2 class="text-base font-bold text-slate-800 dark:text-white flex items-center gap-2 mb-4">
+                        <i data-lucide="plane" class="w-4 h-4 text-indigo-500 dark:text-indigo-400"></i> Most Flown Aircraft
+                    </h2>
+                    <ul id="an-aircraft" class="space-y-1"></ul>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6">
+                    <h2 class="text-base font-bold text-slate-800 dark:text-white flex items-center gap-2 mb-4">
+                        <i data-lucide="palette" class="w-4 h-4 text-pink-500 dark:text-pink-400"></i> Top Airlines / Liveries
+                    </h2>
+                    <ul id="an-liveries" class="space-y-1"></ul>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6">
+                    <h2 class="text-base font-bold text-slate-800 dark:text-white flex items-center gap-2 mb-4">
+                        <i data-lucide="tower-control" class="w-4 h-4 text-amber-500 dark:text-amber-400"></i> Busiest Airports
+                    </h2>
+                    <ul id="an-airports" class="space-y-1"></ul>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6">
+                    <h2 class="text-base font-bold text-slate-800 dark:text-white flex items-center gap-2 mb-4">
+                        <i data-lucide="activity" class="w-4 h-4 text-sky-500 dark:text-sky-400"></i> Flight Phases
+                    </h2>
+                    <ul id="an-phases" class="space-y-1"></ul>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6">
+                    <h2 class="text-base font-bold text-slate-800 dark:text-white flex items-center gap-2 mb-4">
+                        <i data-lucide="server" class="w-4 h-4 text-emerald-600 dark:text-emerald-400"></i> Flights by Server
+                    </h2>
+                    <ul id="an-servers-list" class="space-y-1"></ul>
+                </div>
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm p-6">
+                    <h2 class="text-base font-bold text-slate-800 dark:text-white flex items-center gap-2 mb-4">
+                        <i data-lucide="building-2" class="w-4 h-4 text-purple-500 dark:text-purple-400"></i> Top Virtual Orgs
+                    </h2>
+                    <ul id="an-vas" class="space-y-1"></ul>
+                </div>
+            </div>
+
+            <p class="text-xs text-slate-400 dark:text-zinc-600 text-center">Live analytics refresh every 15s while this tab is open &middot; <span id="an-updated">never updated</span></p>
+
+        </div><!-- /panel-analytics -->
 
         <!-- ===================== DIAGNOSTICS PANEL ===================== -->
         <div id="panel-diagnostics" class="space-y-6 hidden">
@@ -375,9 +480,12 @@
             const isDark = htmlClasses.contains('dark');
             localStorage.theme = isDark ? 'dark' : 'light';
 
-            // Re-render chart to update grid & text colors for the new theme
+            // Re-render charts to update grid & text colors for the new theme
             if (currentChartData.length > 0) {
                 renderChart(currentChartData);
+            }
+            if (fleetTrendData.length > 0) {
+                renderFleetTrendChart(fleetTrendData);
             }
         }
 
@@ -392,20 +500,33 @@
                 : base + ' text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-white';
         }
 
-        function switchTab(tab) {
-            const isDiag = tab === 'diagnostics';
-            document.getElementById('panel-overview').classList.toggle('hidden', isDiag);
-            document.getElementById('panel-diagnostics').classList.toggle('hidden', !isDiag);
-            styleTab('overview', !isDiag);
-            styleTab('diagnostics', isDiag);
+        let anInterval = null;
 
-            if (isDiag) {
+        function switchTab(tab) {
+            const panels = ['overview', 'analytics', 'diagnostics'];
+            panels.forEach((p) => {
+                document.getElementById('panel-' + p).classList.toggle('hidden', p !== tab);
+                styleTab(p, p === tab);
+            });
+
+            // Diagnostics: poll every 5s while visible.
+            if (tab === 'diagnostics') {
                 fetchDiagnostics();
                 loadMetadata();
                 if (!diagInterval) diagInterval = setInterval(fetchDiagnostics, 5000);
             } else if (diagInterval) {
                 clearInterval(diagInterval);
                 diagInterval = null;
+            }
+
+            // Fleet Analytics: live aggregate every 15s while visible; trends on open.
+            if (tab === 'analytics') {
+                fetchAnalytics();
+                fetchFleetTrends();
+                if (!anInterval) anInterval = setInterval(fetchAnalytics, 15000);
+            } else if (anInterval) {
+                clearInterval(anInterval);
+                anInterval = null;
             }
         }
 
@@ -927,6 +1048,133 @@
                 icon.classList.remove('animate-spin');
                 label.innerText = originalLabel;
             }
+        }
+
+        // --- 7. FLEET ANALYTICS LOGIC ---
+        let fleetTrendChart = null;
+        let fleetTrendData = [];
+
+        function setText(id, val) {
+            const el = document.getElementById(id);
+            if (el) el.innerText = val;
+        }
+
+        // Horizontal "bar in a row" leaderboard. Bar width is proportional to the
+        // top item so the busiest entry fills the row.
+        function renderLeaderboard(elId, items) {
+            const el = document.getElementById(elId);
+            if (!el) return;
+            if (!items || !items.length) {
+                el.innerHTML = '<li class="text-sm text-slate-400 dark:text-zinc-600 py-4 text-center font-medium">No data yet</li>';
+                return;
+            }
+            const max = Math.max(...items.map((i) => i.count)) || 1;
+            el.innerHTML = items.map((it, idx) => {
+                const pct = Math.max(4, Math.round((it.count / max) * 100));
+                return `<li class="relative flex items-center justify-between py-2 px-3 rounded-lg overflow-hidden">
+                    <div class="absolute inset-y-0 left-0 bg-indigo-500/10 dark:bg-indigo-400/15 rounded-lg" style="width:${pct}%"></div>
+                    <span class="relative z-10 flex items-center gap-2.5 text-sm font-medium text-slate-700 dark:text-zinc-200 truncate pr-2">
+                        <span class="text-xs font-bold text-slate-400 dark:text-zinc-600 w-4 shrink-0">${idx + 1}</span>
+                        <span class="truncate">${escapeHtml(it.key)}</span>
+                    </span>
+                    <span class="relative z-10 text-sm font-bold text-indigo-600 dark:text-indigo-400 tabular-nums shrink-0">${it.count.toLocaleString()}</span>
+                </li>`;
+            }).join('');
+        }
+
+        async function fetchAnalytics() {
+            try {
+                const { data } = await safeFetchJson('/api/analytics/live', {}, 15000);
+                if (!data || !data.ok) return;
+                const d = data.data;
+
+                setText('an-total', (d.totalFlights || 0).toLocaleString());
+                setText('an-airborne', (d.airborne || 0).toLocaleString());
+                setText('an-pilots', (d.uniquePilots || 0).toLocaleString());
+                setText('an-ground-sub', `${(d.onGround || 0).toLocaleString()} on the ground`);
+                setText('an-va-sub', `${(d.vaMembers || 0).toLocaleString()} VA · ${(d.staffOnline || 0).toLocaleString()} staff online`);
+
+                renderLeaderboard('an-aircraft', d.topAircraft);
+                renderLeaderboard('an-liveries', d.topLiveries);
+                renderLeaderboard('an-airports', d.busiestAirports);
+                renderLeaderboard('an-phases', d.byPhase);
+                renderLeaderboard('an-servers-list', d.byServer);
+                renderLeaderboard('an-vas', d.topVAs);
+
+                setText('an-updated', 'Updated ' + new Date().toLocaleTimeString());
+            } catch (e) {
+                console.error('Failed to load analytics', e);
+                setText('an-updated', 'Update failed: ' + e.message);
+            }
+        }
+
+        async function fetchFleetTrends() {
+            const days = document.getElementById('an-range').value;
+            setText('an-peak-range', days === '1' ? '24h' : days + 'd');
+            try {
+                const { data } = await safeFetchJson(`/api/analytics/trends?days=${days}`, {}, 15000);
+                if (!data || !data.ok) return;
+                setText('an-peak', data.data.peakFlights ? data.data.peakFlights.toLocaleString() : '--');
+                fleetTrendData = data.data.series || [];
+                renderFleetTrendChart(fleetTrendData);
+            } catch (e) {
+                console.error('Failed to load fleet trends', e);
+            }
+        }
+
+        function renderFleetTrendChart(series) {
+            const canvas = document.getElementById('fleetTrendChart');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const isDark = document.documentElement.classList.contains('dark');
+            const textColor = isDark ? '#a1a1aa' : '#64748b';
+            const gridColor = isDark ? 'rgba(63,63,70,0.4)' : 'rgba(226,232,240,0.8)';
+
+            const labels = series.map((p) => new Date(p.t + 'Z').toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+
+            if (fleetTrendChart) fleetTrendChart.destroy();
+            fleetTrendChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'Total Flights',
+                            data: series.map((p) => p.totalFlights),
+                            borderColor: '#6366f1',
+                            backgroundColor: 'rgba(99,102,241,0.12)',
+                            fill: true,
+                            tension: 0.35,
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                        },
+                        {
+                            label: 'Airborne',
+                            data: series.map((p) => p.airborne),
+                            borderColor: '#0ea5e9',
+                            backgroundColor: 'transparent',
+                            fill: false,
+                            tension: 0.35,
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { labels: { color: textColor, font: { family: 'Inter' }, usePointStyle: true, boxWidth: 8 } },
+                    },
+                    scales: {
+                        x: { grid: { color: gridColor }, ticks: { color: textColor, font: { family: 'Inter' }, maxTicksLimit: 8, maxRotation: 0 } },
+                        y: { beginAtZero: true, grid: { color: gridColor }, ticks: { color: textColor, font: { family: 'Inter' }, precision: 0 } },
+                    },
+                },
+            });
         }
 
         // Initialize Data on Load

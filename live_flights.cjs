@@ -13,6 +13,7 @@ const atcHistory = require('./atc_history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
 const metrics = require('./metrics.cjs');
+const fleetAnalytics = require('./fleet_analytics.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -1687,6 +1688,36 @@ app.get('/api/admin/telemetry', (req, res) => {
     }
 });
 
+/* =========================
+ * Live Fleet Analytics
+ * Aggregate the live flight cache (every server) into world-wide insight:
+ * most-flown aircraft & liveries, busiest airports, server split, flight
+ * phases and VA presence — plus historical trends from periodic snapshots.
+ * ========================= */
+
+// Current aggregate of everything in the air right now, computed on demand
+// from the live cache. Cheap (a single pass over the cached flights).
+function currentFleetSnapshot() {
+  return fleetAnalytics.computeLiveSnapshot(Array.from(apiCache.flights.values()));
+}
+
+app.get('/api/analytics/live', (req, res) => {
+  try {
+    res.json({ ok: true, data: currentFleetSnapshot() });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to compute live analytics', { detail: e.message }));
+  }
+});
+
+app.get('/api/analytics/trends', (req, res) => {
+  try {
+    const days = parseInt(req.query.days || '7', 10);
+    res.json({ ok: true, data: fleetAnalytics.getTrends(days) });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to load analytics trends', { detail: e.message }));
+  }
+});
+
 // ⬇️ REPLACED ROUTE: Get User Flights (Logbook)
 app.get('/api/users/:userId/flights', async (req, res) => {
   const { userId } = req.params;
@@ -2387,6 +2418,18 @@ httpServer.listen(PORT, () => {
       const activeSockets = io.engine.clientsCount;
       telemetry.saveSnapshot(activeSockets);
   }, FIFTEEN_MINUTES);
+
+  // Fleet analytics snapshotter: persist an aggregate of the live world every
+  // 5 minutes so the dashboard can chart trends (popular aircraft/airports,
+  // global traffic) over days. Empty snapshots are skipped inside saveSnapshot.
+  const FIVE_MINUTES = 5 * 60 * 1000;
+  setInterval(() => {
+    try {
+      fleetAnalytics.saveSnapshot(currentFleetSnapshot());
+    } catch (e) {
+      console.warn('[fleet] snapshot failed:', e.message);
+    }
+  }, FIVE_MINUTES);
 
   // Lightweight memory monitor: surfaces RSS/heap and the size of every
   // in-memory cache, so a leak shows up as steady growth in the logs rather
