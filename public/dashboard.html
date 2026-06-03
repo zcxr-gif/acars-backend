@@ -300,6 +300,19 @@
                     </div>
                 </div>
 
+                <!-- Resource usage -->
+                <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden">
+                    <div class="p-5 border-b border-slate-200 dark:border-darkBorder bg-slate-50/50 dark:bg-zinc-900/30">
+                        <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                            <i data-lucide="activity" class="w-4 h-4 text-slate-400 dark:text-zinc-400"></i> Resource Usage
+                        </h2>
+                        <p id="diag-host" class="text-xs text-slate-500 dark:text-zinc-500 mt-1">--</p>
+                    </div>
+                    <div id="diag-resources" class="p-5 grid grid-cols-2 gap-3 text-sm">
+                        <p class="text-slate-400 dark:text-zinc-500 col-span-2">Awaiting data…</p>
+                    </div>
+                </div>
+
                 <!-- Cache & sockets -->
                 <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden">
                     <div class="p-5 border-b border-slate-200 dark:border-darkBorder bg-slate-50/50 dark:bg-zinc-900/30">
@@ -796,7 +809,56 @@
                     <span class="text-base font-bold text-slate-800 dark:text-zinc-200">${val ?? 0}</span>
                 </div>`).join('');
 
+            // Resource usage (memory, CPU, system load, event-loop health)
+            renderResources(d);
+
             document.getElementById('diag-updated').innerText = 'updated ' + new Date(d.now).toLocaleTimeString();
+        }
+
+        // Render in GB once a megabyte figure gets large enough to be unwieldy.
+        function fmtMb(mb) {
+            if (mb == null) return '--';
+            return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : Math.round(mb) + ' MB';
+        }
+
+        function renderResources(d) {
+            const p = d.process || {};
+            const sys = d.system || {};
+            const el = d.eventLoop || null;
+
+            const host = document.getElementById('diag-host');
+            if (host) {
+                const bits = [];
+                if (sys.platform) bits.push(escapeHtml(sys.platform));
+                if (sys.cpuCores) bits.push(`${sys.cpuCores} cores`);
+                if (p.node) bits.push('node ' + escapeHtml(p.node));
+                host.innerText = bits.join('  ·  ') || '--';
+            }
+
+            const memTotal = sys.totalMemMb;
+            const memUsed = sys.usedMemMb;
+            const memPct = (memTotal && memUsed != null) ? Math.round((memUsed / memTotal) * 100) : null;
+            const elText = el ? `${el.meanMs} ms avg · ${el.p99Ms} p99 · ${el.maxMs} max` : '--';
+
+            const rows = [
+                ['CPU', p.cpuPercent != null ? `${p.cpuPercent}% of 1 core` : '--'],
+                ['Memory (RSS)', fmtMb(p.rssMb)],
+                ['Heap', `${fmtMb(p.heapUsedMb)} / ${fmtMb(p.heapTotalMb)}`],
+                ['External', fmtMb(p.externalMb)],
+                ['ArrayBuffers', fmtMb(p.arrayBuffersMb)],
+                ['System memory', memTotal ? `${fmtMb(memUsed)} / ${fmtMb(memTotal)}${memPct != null ? ` (${memPct}%)` : ''}` : '--'],
+                ['Load avg (1·5·15m)', sys.loadAvg1 != null ? `${sys.loadAvg1} · ${sys.loadAvg5} · ${sys.loadAvg15}` : '--'],
+                ['Event-loop lag', elText],
+            ];
+
+            const resEl = document.getElementById('diag-resources');
+            if (resEl) {
+                resEl.innerHTML = rows.map(([label, val]) => `
+                <div class="flex flex-col p-3 rounded-lg bg-slate-50 dark:bg-zinc-900/50 border border-slate-100 dark:border-zinc-800">
+                    <span class="text-xs font-semibold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">${label}</span>
+                    <span class="text-base font-bold text-slate-800 dark:text-zinc-200">${escapeHtml(val)}</span>
+                </div>`).join('');
+            }
         }
 
         // --- 3. AIRCRAFT & LIVERY METADATA ---

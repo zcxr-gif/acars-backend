@@ -13,7 +13,70 @@
  * Zero dependencies, no I/O. Safe to require from anywhere.
  * ========================= */
 
+const os = require('os');
+
 const RECENT_SAMPLES = 60; // rolling window for p95 / sparkline-style trends
+
+/* ---- Host resource usage (CPU, system memory, event-loop lag) ----
+ * CPU% is derived from the delta of process.cpuUsage() between snapshot reads,
+ * normalised by elapsed wall-clock time. It's expressed as a percentage of a
+ * single core, so it can exceed 100% on a busy multi-core process — `cpuCores`
+ * is reported alongside so the number is interpretable.
+ */
+let lastCpu = process.cpuUsage();
+let lastCpuAt = Date.now();
+
+function cpuPercent() {
+  const now = Date.now();
+  const elapsedMs = now - lastCpuAt;
+  const delta = process.cpuUsage(lastCpu); // micros since lastCpu
+  lastCpu = process.cpuUsage();
+  lastCpuAt = now;
+  if (elapsedMs <= 0) return 0;
+  const usedMs = (delta.user + delta.system) / 1000;
+  return +((usedMs / elapsedMs) * 100).toFixed(1);
+}
+
+// Event-loop lag: how long the loop is blocked beyond its scheduled tick. A
+// rising mean/p99 is the clearest single signal that the process is starved
+// (heavy sync work, GC pressure) even while memory looks fine.
+let eldHistogram = null;
+try {
+  const { monitorEventLoopDelay } = require('perf_hooks');
+  eldHistogram = monitorEventLoopDelay({ resolution: 20 });
+  eldHistogram.enable();
+} catch (_) {
+  eldHistogram = null; // older runtime — degrade gracefully
+}
+
+function eventLoopLag() {
+  if (!eldHistogram) return null;
+  // mean/max are NaN until the histogram has collected its first samples.
+  const ns2ms = (n) => (Number.isFinite(n) ? +(n / 1e6).toFixed(2) : 0);
+  const out = {
+    meanMs: ns2ms(eldHistogram.mean),
+    p99Ms: ns2ms(eldHistogram.percentile(99)),
+    maxMs: ns2ms(eldHistogram.max),
+  };
+  eldHistogram.reset(); // window the stats to the gap between dashboard polls
+  return out;
+}
+
+function systemStats() {
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const mb = (n) => +(n / 1048576).toFixed(1);
+  return {
+    platform: `${os.type()} ${os.release()}`,
+    cpuCores: os.cpus()?.length || 0,
+    loadAvg1: +os.loadavg()[0].toFixed(2),
+    loadAvg5: +os.loadavg()[1].toFixed(2),
+    loadAvg15: +os.loadavg()[2].toFixed(2),
+    totalMemMb: mb(totalMem),
+    freeMemMb: mb(freeMem),
+    usedMemMb: mb(totalMem - freeMem),
+  };
+}
 
 /* ---- Infinite Flight API call stats, bucketed per endpoint template ---- */
 const endpoints = new Map();
@@ -312,11 +375,15 @@ function snapshot(extra = {}) {
     process: {
       pid: process.pid,
       node: process.version,
+      cpuPercent: cpuPercent(),
       rssMb: +(mem.rss / 1048576).toFixed(1),
       heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1),
       heapTotalMb: +(mem.heapTotal / 1048576).toFixed(1),
       externalMb: +(mem.external / 1048576).toFixed(1),
+      arrayBuffersMb: +((mem.arrayBuffers || 0) / 1048576).toFixed(1),
     },
+    system: systemStats(),
+    eventLoop: eventLoopLag(),
     ifApi: { ...ifApi, endpoints: endpointRows },
     polls: pollRows,
     sockets: mergedSockets,
