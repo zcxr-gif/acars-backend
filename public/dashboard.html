@@ -313,6 +313,33 @@
                 </div>
             </div>
 
+            <!-- Aircraft & Liveries metadata -->
+            <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden">
+                <div class="p-5 border-b border-slate-200 dark:border-darkBorder flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 bg-slate-50/50 dark:bg-zinc-900/30">
+                    <div>
+                        <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                            <i data-lucide="plane" class="w-4 h-4 text-slate-400 dark:text-zinc-400"></i> Aircraft &amp; Liveries
+                        </h2>
+                        <p class="text-xs text-slate-500 dark:text-zinc-500 mt-1">Pull the latest planes &amp; liveries from the Infinite Flight API &mdash; no backend restart needed.</p>
+                    </div>
+                    <button id="btn-refresh-metadata" onclick="refreshMetadata()" class="shrink-0 inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white shadow-sm shadow-indigo-500/30 transition-all focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-darkSurface disabled:opacity-60 disabled:cursor-not-allowed">
+                        <i data-lucide="refresh-cw" class="w-4 h-4" id="btn-refresh-metadata-icon"></i>
+                        <span id="btn-refresh-metadata-label">Request New Planes &amp; Liveries</span>
+                    </button>
+                </div>
+                <div class="p-5 grid grid-cols-2 gap-3 text-sm">
+                    <div class="flex flex-col p-3 rounded-lg bg-slate-50 dark:bg-zinc-900/50 border border-slate-100 dark:border-zinc-800">
+                        <span class="text-xs font-semibold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">Aircraft Types</span>
+                        <span id="meta-aircraft-count" class="text-2xl font-bold text-slate-800 dark:text-zinc-200">--</span>
+                    </div>
+                    <div class="flex flex-col p-3 rounded-lg bg-slate-50 dark:bg-zinc-900/50 border border-slate-100 dark:border-zinc-800">
+                        <span class="text-xs font-semibold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">Liveries</span>
+                        <span id="meta-livery-count" class="text-2xl font-bold text-slate-800 dark:text-zinc-200">--</span>
+                    </div>
+                    <p id="meta-status" class="col-span-2 text-xs font-medium text-slate-400 dark:text-zinc-500">Metadata last updated: <span id="meta-updated">never</span></p>
+                </div>
+            </div>
+
             <p class="text-xs text-slate-400 dark:text-zinc-600 text-center">Diagnostics refresh every 5s while this tab is open &middot; <span id="diag-updated">never updated</span></p>
 
         </div><!-- /panel-diagnostics -->
@@ -360,6 +387,7 @@
 
             if (isDiag) {
                 fetchDiagnostics();
+                loadMetadata();
                 if (!diagInterval) diagInterval = setInterval(fetchDiagnostics, 5000);
             } else if (diagInterval) {
                 clearInterval(diagInterval);
@@ -716,9 +744,66 @@
             document.getElementById('diag-updated').innerText = 'updated ' + new Date(d.now).toLocaleTimeString();
         }
 
+        // --- 3. AIRCRAFT & LIVERY METADATA ---
+        function renderMetadata(data) {
+            const counts = data.counts || {};
+            const aircraft = counts.aircraft ?? (Array.isArray(data.aircraft) ? data.aircraft.length : '--');
+            const liveries = counts.liveries ?? (Array.isArray(data.liveries) ? data.liveries.length : '--');
+            document.getElementById('meta-aircraft-count').innerText = aircraft;
+            document.getElementById('meta-livery-count').innerText = liveries;
+            document.getElementById('meta-updated').innerText = data.lastUpdated
+                ? new Date(data.lastUpdated).toLocaleString()
+                : 'never';
+        }
+
+        async function loadMetadata() {
+            try {
+                const res = await fetch('/api/metadata');
+                const data = await res.json();
+                if (data.ok) renderMetadata(data);
+            } catch (e) {
+                // Silent: counts simply stay as-is if the fetch fails.
+            }
+        }
+
+        async function refreshMetadata() {
+            const btn = document.getElementById('btn-refresh-metadata');
+            const icon = document.getElementById('btn-refresh-metadata-icon');
+            const label = document.getElementById('btn-refresh-metadata-label');
+            const status = document.getElementById('meta-status');
+            const originalLabel = label.innerText;
+
+            btn.disabled = true;
+            icon.classList.add('animate-spin');
+            label.innerText = 'Requesting…';
+
+            try {
+                const res = await fetch('/api/admin/refresh-metadata', { method: 'POST' });
+                const data = await res.json();
+                if (res.ok && data.ok) {
+                    document.getElementById('meta-aircraft-count').innerText = data.aircraft ?? '--';
+                    document.getElementById('meta-livery-count').innerText = data.liveries ?? '--';
+                    document.getElementById('meta-updated').innerText = data.lastUpdated
+                        ? new Date(data.lastUpdated).toLocaleString()
+                        : new Date().toLocaleString();
+                    status.innerHTML = `<span class="text-emerald-600 dark:text-emerald-400 font-semibold">${escapeHtml(data.message || 'Metadata refreshed.')}</span>`;
+                } else {
+                    const detail = data?.error?.message || data?.message || `HTTP ${res.status}`;
+                    status.innerHTML = `<span class="text-red-600 dark:text-red-400 font-semibold">Refresh failed: ${escapeHtml(detail)}</span>`;
+                }
+            } catch (e) {
+                status.innerHTML = `<span class="text-red-600 dark:text-red-400 font-semibold">Refresh failed: ${escapeHtml(e.message)}</span>`;
+            } finally {
+                btn.disabled = false;
+                icon.classList.remove('animate-spin');
+                label.innerText = originalLabel;
+            }
+        }
+
         // Initialize Data on Load
         checkHealth();
         fetchTelemetry();
+        loadMetadata();
 
         // Setup Polling Intervals
         setInterval(checkHealth, 30000); // 30s Health check
