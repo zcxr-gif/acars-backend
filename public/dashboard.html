@@ -87,6 +87,9 @@
             <button id="tab-diagnostics" onclick="switchTab('diagnostics')" class="px-4 py-2 text-sm font-semibold rounded-lg transition-colors text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-white flex items-center gap-2">
                 <i data-lucide="stethoscope" class="w-4 h-4"></i> Diagnostics
             </button>
+            <button id="tab-blocklist" onclick="switchTab('blocklist')" class="px-4 py-2 text-sm font-semibold rounded-lg transition-colors text-slate-500 dark:text-zinc-400 hover:text-slate-900 dark:hover:text-white flex items-center gap-2">
+                <i data-lucide="ban" class="w-4 h-4"></i> Logo Blocklist
+            </button>
         </nav>
 
         <!-- ===================== OVERVIEW PANEL ===================== -->
@@ -463,6 +466,48 @@
 
         </div><!-- /panel-diagnostics -->
 
+        <!-- ===================== LOGO BLOCKLIST PANEL ===================== -->
+        <div id="panel-blocklist" class="hidden space-y-6">
+
+            <div class="bg-white/80 dark:bg-darkSurface/80 backdrop-blur-xl rounded-2xl border border-slate-200 dark:border-darkBorder shadow-sm overflow-hidden transition-all duration-300">
+                <div class="p-5 border-b border-slate-200 dark:border-darkBorder bg-slate-50/50 dark:bg-zinc-900/30">
+                    <h2 class="text-lg font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                        <i data-lucide="ban" class="w-4 h-4 text-red-500 dark:text-red-400"></i> Banned Airline Logos
+                    </h2>
+                    <p class="text-xs text-slate-500 dark:text-zinc-500 mt-1">Takedown blocklist for airline logos in the Inflight app. Add a 3-letter ICAO airline code (e.g. AAL, DLH, SIA) to immediately suppress that airline's logo on all installs &mdash; apps pick it up on their next launch, no App Store update needed.</p>
+                </div>
+
+                <div class="p-5 space-y-5">
+                    <div class="flex flex-wrap items-center gap-3">
+                        <input type="text" id="blocklist-code-input" maxlength="3" placeholder="ICAO code, e.g. AAL"
+                            onkeydown="if (event.key === 'Enter') addBlocklistCode()"
+                            class="w-48 bg-slate-50 dark:bg-[#09090b] border border-slate-200 dark:border-zinc-800 rounded-xl px-4 py-3 text-sm text-slate-900 dark:text-white outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-medium placeholder:text-slate-400 dark:placeholder:text-zinc-600 uppercase tracking-widest">
+                        <button onclick="addBlocklistCode()" id="btn-blocklist-add" class="inline-flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold rounded-xl bg-red-600 hover:bg-red-700 active:bg-red-800 text-white shadow-sm shadow-red-500/30 transition-all focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 dark:focus:ring-offset-darkSurface disabled:opacity-60 disabled:cursor-not-allowed">
+                            <i data-lucide="ban" class="w-4 h-4"></i> Block Logo
+                        </button>
+                        <span id="blocklist-status" class="text-xs font-medium text-slate-500 dark:text-zinc-500"></span>
+                    </div>
+
+                    <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-zinc-800">
+                        <table class="w-full text-left text-sm whitespace-nowrap">
+                            <thead class="bg-slate-100/80 dark:bg-zinc-900/80">
+                                <tr>
+                                    <th class="py-3.5 px-6 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider border-b border-slate-200 dark:border-zinc-800">Airline Code</th>
+                                    <th class="py-3.5 px-6 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider border-b border-slate-200 dark:border-zinc-800">Blocked Since</th>
+                                    <th class="py-3.5 px-6 text-slate-500 dark:text-zinc-400 font-bold text-xs uppercase tracking-wider text-right border-b border-slate-200 dark:border-zinc-800">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="blocklist-body" class="divide-y divide-slate-100 dark:divide-zinc-800/50">
+                                <tr><td colspan="3" class="py-12 text-center text-slate-400 dark:text-zinc-500">Loading&hellip;</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="text-xs text-slate-400 dark:text-zinc-600 text-center">Served publicly at <code class="font-mono">/api/airline-logos/blocklist</code> &middot; clients cache for 5 minutes</p>
+                </div>
+            </div>
+
+        </div><!-- /panel-blocklist -->
+
     </div>
 
     <script>
@@ -503,7 +548,7 @@
         let anInterval = null;
 
         function switchTab(tab) {
-            const panels = ['overview', 'analytics', 'diagnostics'];
+            const panels = ['overview', 'analytics', 'diagnostics', 'blocklist'];
             panels.forEach((p) => {
                 document.getElementById('panel-' + p).classList.toggle('hidden', p !== tab);
                 styleTab(p, p === tab);
@@ -527,6 +572,11 @@
             } else if (anInterval) {
                 clearInterval(anInterval);
                 anInterval = null;
+            }
+
+            // Logo Blocklist: load once on open (changes are admin-driven, no polling needed).
+            if (tab === 'blocklist') {
+                fetchBlocklist();
             }
         }
 
@@ -1175,6 +1225,88 @@
                     },
                 },
             });
+        }
+
+        // --- LOGO BLOCKLIST LOGIC ---
+        function setBlocklistStatus(msg, isError = false) {
+            const el = document.getElementById('blocklist-status');
+            el.innerText = msg;
+            el.className = 'text-xs font-medium ' + (isError
+                ? 'text-red-600 dark:text-red-400'
+                : 'text-slate-500 dark:text-zinc-500');
+        }
+
+        function renderBlocklist(entries) {
+            const body = document.getElementById('blocklist-body');
+            if (!entries || entries.length === 0) {
+                body.innerHTML = '<tr><td colspan="3" class="py-12 text-center text-slate-400 dark:text-zinc-500">No logos are blocked &mdash; all airline logos are showing normally.</td></tr>';
+                return;
+            }
+            body.innerHTML = entries.map((e) => `
+                <tr>
+                    <td class="py-3.5 px-6 font-mono font-bold text-slate-900 dark:text-white tracking-widest">${e.code}</td>
+                    <td class="py-3.5 px-6 text-slate-500 dark:text-zinc-400">${e.addedAt ? new Date(e.addedAt).toLocaleString() : '--'}</td>
+                    <td class="py-3.5 px-6 text-right">
+                        <button onclick="removeBlocklistCode('${e.code}')" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-slate-700 dark:text-zinc-300 border border-slate-200 dark:border-zinc-700 transition-colors">Unblock</button>
+                    </td>
+                </tr>`).join('');
+        }
+
+        async function fetchBlocklist() {
+            try {
+                const { res, data } = await safeFetchJson('/api/admin/airline-logo-blocklist');
+                if (res.ok && data && data.ok) {
+                    renderBlocklist(data.entries);
+                    setBlocklistStatus('');
+                } else {
+                    setBlocklistStatus((data && data.error && data.error.message) || 'Failed to load blocklist', true);
+                }
+            } catch (e) {
+                setBlocklistStatus(e.message, true);
+            }
+        }
+
+        async function addBlocklistCode() {
+            const input = document.getElementById('blocklist-code-input');
+            const btn = document.getElementById('btn-blocklist-add');
+            const code = input.value.trim().toUpperCase();
+            if (!/^[A-Z]{3}$/.test(code)) {
+                setBlocklistStatus('Enter a 3-letter ICAO airline code (e.g. AAL, DLH, SIA)', true);
+                return;
+            }
+            btn.disabled = true;
+            try {
+                const { res, data } = await safeFetchJson('/api/admin/airline-logo-blocklist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code }),
+                });
+                if (res.ok && data && data.ok) {
+                    input.value = '';
+                    renderBlocklist(data.entries);
+                    setBlocklistStatus(`${data.added} blocked — apps stop showing it on their next launch.`);
+                } else {
+                    setBlocklistStatus((data && data.error && data.error.message) || 'Failed to block code', true);
+                }
+            } catch (e) {
+                setBlocklistStatus(e.message, true);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function removeBlocklistCode(code) {
+            try {
+                const { res, data } = await safeFetchJson(`/api/admin/airline-logo-blocklist/${encodeURIComponent(code)}`, { method: 'DELETE' });
+                if (res.ok && data && data.ok) {
+                    renderBlocklist(data.entries);
+                    setBlocklistStatus(`${data.removed} unblocked — its logo will show again.`);
+                } else {
+                    setBlocklistStatus((data && data.error && data.error.message) || 'Failed to unblock code', true);
+                }
+            } catch (e) {
+                setBlocklistStatus(e.message, true);
+            }
         }
 
         // Initialize Data on Load

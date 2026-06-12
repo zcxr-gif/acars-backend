@@ -14,6 +14,7 @@ require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
 const metrics = require('./metrics.cjs');
 const fleetAnalytics = require('./fleet_analytics.cjs');
+const logoBlocklist = require('./airline_logo_blocklist.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -49,6 +50,24 @@ const corsOptions = {
 const io = new Server(httpServer, {
   cors: corsOptions
 });
+// Airline-logo takedown blocklist for the Inflight app (see
+// airline_logo_blocklist.cjs). Managed from the dashboard's "Logo Blocklist"
+// tab. Registered BEFORE the whitelist CORS middleware on purpose:
+// this endpoint is fully public and must answer every origin (capacitor://,
+// curl, anything) with Access-Control-Allow-Origin: *.
+app.options('/api/airline-logos/blocklist', cors({ origin: '*' }));
+app.get('/api/airline-logos/blocklist', cors({ origin: '*' }), (req, res) => {
+  let codes = [];
+  try {
+    codes = logoBlocklist.codes();
+  } catch (e) {
+    // A storage hiccup must never break the response — serve an empty list.
+    console.error(`⚠️ Could not read airline logo blocklist: ${e.message}`);
+  }
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json(codes);
+});
+
 // 2. Apply CORS to Express (for API requests like /if-sessions)
 app.use(cors(corsOptions));
 
@@ -2005,6 +2024,51 @@ app.post('/api/admin/refresh-metadata', async (req, res) => {
     res.status(status).json(err(status, message, { detail: e.message, ifStatus }));
   }
 });
+// Manage the airline-logo takedown blocklist from the dashboard's
+// "Logo Blocklist" tab. Optionally gated like /api/admin/refresh-metadata:
+// if BLOCKLIST_ADMIN_SECRET is set, write calls must pass it via the
+// x-admin-secret header or ?secret= query param. Left open if unset so the
+// dashboard tab works out of the box.
+function blocklistAdminAllowed(req, res) {
+  const requiredSecret = process.env.BLOCKLIST_ADMIN_SECRET;
+  if (!requiredSecret) return true;
+  const provided = req.get('x-admin-secret') || req.query.secret;
+  if (provided === requiredSecret) return true;
+  res.status(403).json(err(403, 'Forbidden: invalid or missing admin secret'));
+  return false;
+}
+
+app.get('/api/admin/airline-logo-blocklist', (req, res) => {
+  try {
+    const entries = logoBlocklist.entries();
+    res.json({ ok: true, count: entries.length, entries });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to read blocklist', { detail: e.message }));
+  }
+});
+
+app.post('/api/admin/airline-logo-blocklist', (req, res) => {
+  if (!blocklistAdminAllowed(req, res)) return;
+  const code = logoBlocklist.add(req.body?.code);
+  if (!code) {
+    return res.status(400).json(err(400, 'Invalid code — must be a 3-letter ICAO airline code (e.g. AAL, DLH, SIA)'));
+  }
+  console.log(`🚫 Airline logo blocklisted: ${code}`);
+  const entries = logoBlocklist.entries();
+  res.json({ ok: true, added: code, count: entries.length, entries });
+});
+
+app.delete('/api/admin/airline-logo-blocklist/:code', (req, res) => {
+  if (!blocklistAdminAllowed(req, res)) return;
+  const removed = logoBlocklist.remove(req.params.code);
+  if (!removed) {
+    return res.status(404).json(err(404, `Code not on the blocklist: ${req.params.code}`));
+  }
+  console.log(`✅ Airline logo unblocked: ${req.params.code.toUpperCase()}`);
+  const entries = logoBlocklist.entries();
+  res.json({ ok: true, removed: req.params.code.toUpperCase(), count: entries.length, entries });
+});
+
 app.get('/health', (req, res) => {
   res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
 });
