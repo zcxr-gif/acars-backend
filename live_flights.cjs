@@ -49,6 +49,35 @@ const corsOptions = {
 const io = new Server(httpServer, {
   cors: corsOptions
 });
+// Airline-logo takedown blocklist for the Inflight app. The list itself lives
+// in airline_logo_blocklist.json so a maintainer can edit it without touching
+// route code. Registered BEFORE the whitelist CORS middleware on purpose:
+// this endpoint is fully public and must answer every origin (capacitor://,
+// curl, anything) with Access-Control-Allow-Origin: *.
+const AIRLINE_LOGO_BLOCKLIST_FILE = path.join(__dirname, 'airline_logo_blocklist.json');
+app.options('/api/airline-logos/blocklist', cors({ origin: '*' }));
+app.get('/api/airline-logos/blocklist', cors({ origin: '*' }), (req, res) => {
+  let codes = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(AIRLINE_LOGO_BLOCKLIST_FILE, 'utf8'));
+    const list = Array.isArray(raw) ? raw : raw?.blocked;
+    if (Array.isArray(list)) {
+      // Normalize to clean, unique 3-letter ICAO codes; drop anything else.
+      codes = [...new Set(
+        list
+          .filter((c) => typeof c === 'string')
+          .map((c) => c.trim().toUpperCase())
+          .filter((c) => /^[A-Z]{3}$/.test(c))
+      )];
+    }
+  } catch (e) {
+    // A missing/corrupt file must never break the response — serve an empty list.
+    console.error(`⚠️ Could not read airline logo blocklist: ${e.message}`);
+  }
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json(codes);
+});
+
 // 2. Apply CORS to Express (for API requests like /if-sessions)
 app.use(cors(corsOptions));
 
