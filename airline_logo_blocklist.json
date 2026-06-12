@@ -1,4 +1,0 @@
-{
-  "_comment": "Takedown blocklist for airline logos in the Inflight app. Add a 3-letter ICAO airline code (e.g. AAL, DLH, SIA) to the 'blocked' array to immediately suppress that airline's logo on all installs.",
-  "blocked": []
-}
