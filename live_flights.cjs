@@ -15,6 +15,9 @@ const telemetry = require('./telemetry.cjs');
 const metrics = require('./metrics.cjs');
 const fleetAnalytics = require('./fleet_analytics.cjs');
 const logoBlocklist = require('./airline_logo_blocklist.cjs');
+const supabaseAuth = require('./supabase.cjs');
+const watchlist = require('./watchlist.cjs');
+const pushNotifications = require('./push.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -68,11 +71,20 @@ app.get('/api/airline-logos/blocklist', cors({ origin: '*' }), (req, res) => {
   res.json(codes);
 });
 
+// Watchlist capabilities probe — public for the same reason as the blocklist
+// endpoint above: the client probes it on boot from any origin, no auth.
+watchlist.registerCapabilitiesRoute(app);
+
 // 2. Apply CORS to Express (for API requests like /if-sessions)
 app.use(cors(corsOptions));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Friends watchlist CRUD (Supabase-token authed) + APNs token registries.
+// See watchlist.cjs / push.cjs / supabase.cjs.
+watchlist.registerRoutes(app);
+pushNotifications.registerRoutes(app, supabaseAuth.requireAuth);
 
 // Diagnostics snapshot for the dashboard: IF API timing/errors, poller health,
 // live cache sizes, socket counts and process memory. Read-only, cheap to call.
@@ -1320,6 +1332,9 @@ io.on('connection', (socket) => {
   const { peak, totalConnections } = metrics.socketStats();
   console.log(`[socket] ✅ Connected: ${socket.id} | alive=${alive} peak=${peak} total=${totalConnections}`);
 
+  // watchlist_subscribe / watchlist_event handling (cleans up on disconnect).
+  watchlist.attachSocket(socket);
+
   // Listen for a client to request a specific server's flight data
   socket.on('join_server_room', async (serverName) => {
     if (!serverName) return;
@@ -1525,6 +1540,15 @@ async function pollAndBroadcastFlights() {
         apiCache.lastRedisSave.delete(trackedFlightId);
       }
     }
+  }
+
+  // Watchlist presence: diff this cycle's combined snapshot (every server, so
+  // a friend going online on Casual still notifies a client watching Expert)
+  // and emit watchlist_event / APNs pushes + Live Activity updates.
+  try {
+    watchlist.processSnapshot(apiCache.flights);
+  } catch (e) {
+    console.warn('[watchlist] ⚠️ Snapshot processing failed:', e?.message);
   }
 }
 
