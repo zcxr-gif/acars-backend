@@ -352,9 +352,23 @@ function updateBatch(flights) {
   runBatch(flights);
 }
 
-async function getFlightPath(flightId) {
+/**
+ * Returns the recorded trail for a flight, time-sorted ascending.
+ *
+ * Pass `untilMs` to clamp the trail to a socket frame the caller already holds:
+ * only points with time <= untilMs are returned. The recorded `time` is the
+ * aircraft's lastReportMs (see updateBatch), the same value the live socket
+ * broadcasts, so clamping to the marker's lastReportMs guarantees the trail's
+ * tip can never lead the live position the client is currently drawing.
+ */
+async function getFlightPath(flightId, untilMs) {
   const row = db.prepare('SELECT path_json FROM flight_history WHERE flightId = ?').get(flightId);
-  return row ? readPath(row.path_json) : [];
+  if (!row) return [];
+  const path = readPath(row.path_json);
+  if (typeof untilMs === 'number' && Number.isFinite(untilMs)) {
+    return path.filter(p => p.time <= untilMs);
+  }
+  return path;
 }
 
 /**

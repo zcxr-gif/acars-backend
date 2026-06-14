@@ -1906,7 +1906,15 @@ app.get('/api/users/:userId/stats', async (req, res) => {
 
 app.get('/api/flights/:flightId/history', async (req, res) => {
   try {
-    const path = await getFlightPath(req.params.flightId);
+    // Optional watermark: clients pass the lastReportMs of their most recent
+    // socket frame so the returned trail can't lead the live marker they're
+    // drawing. Omitting it returns the full recorded path (backward compatible).
+    const rawUntil = req.query.until;
+    const untilMs = rawUntil !== undefined ? Number(rawUntil) : undefined;
+    if (rawUntil !== undefined && !Number.isFinite(untilMs)) {
+      return res.status(400).json({ ok: false, error: 'until must be a numeric millisecond timestamp' });
+    }
+    const path = await getFlightPath(req.params.flightId, untilMs);
     res.json({ ok: true, flightId: req.params.flightId, path });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
