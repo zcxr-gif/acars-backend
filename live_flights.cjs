@@ -27,19 +27,26 @@ const app = express();
 // ⬇️ 2. CREATE HTTP SERVER & ATTACH SOCKET.IO
 const httpServer = createServer(app);
 const whitelist = [
-    'https://inflight.info',        
-    'https://deploy-preview-6--indgo-va.netlify.app',
+    'https://inflight.info',
     'https://site--indgo-backend--6dmjph8ltlhv.code.run',
     'https://site--acars-backend--6dmjph8ltlhv.code.run',
     "capacitor://inflight-secure",
     "https://discoverva.netlify.app",
     "http://localhost:8888"
 ];
+// Pattern-matched origins. Netlify names every deploy preview
+// https://deploy-preview-<N>--indgo-va.netlify.app where <N> is the PR number,
+// so it changes on every PR. Matching the pattern lets all previews through
+// without editing the whitelist each time.
+const whitelistPatterns = [
+    /^https:\/\/deploy-preview-\d+--indgo-va\.netlify\.app$/
+];
 const corsOptions = {
     origin: function (origin, callback) {
         // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
-        if (whitelist.indexOf(origin) !== -1) {
+        if (whitelist.indexOf(origin) !== -1 ||
+            whitelistPatterns.some((re) => re.test(origin))) {
             callback(null, true);
         // Origin is in the whitelist, allow it
         } else {
