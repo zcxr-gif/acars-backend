@@ -2502,6 +2502,53 @@ app.get('/api/live/airport/:sessionId/:icao/atis', async (req, res) => {
     );
   }
 });
+
+/* =========================
+ * Push notification registration (iOS / APNs)
+ * =========================
+ * Persists APNs device tokens to a flat JSON file. Wire this up to an actual
+ * APNs sender (e.g. `node-apn`) when you're ready to push events. The iOS
+ * client calls POST /api/push/register on launch.
+ */
+const PUSH_TOKENS_FILE = path.join(__dirname, 'push-tokens.json');
+function readPushTokens() {
+  try {
+    return JSON.parse(fs.readFileSync(PUSH_TOKENS_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+function writePushTokens(map) {
+  try {
+    fs.writeFileSync(PUSH_TOKENS_FILE, JSON.stringify(map, null, 2));
+  } catch (e) {
+    console.warn('[push] Failed to persist tokens:', e.message);
+  }
+}
+app.post('/api/push/register', (req, res) => {
+  const { deviceToken, platform, appVersion, userId } = req.body || {};
+  if (!deviceToken || typeof deviceToken !== 'string') {
+    return res.status(400).json({ ok: false, error: 'deviceToken is required' });
+  }
+  const tokens = readPushTokens();
+  tokens[deviceToken] = {
+    platform: platform || 'ios',
+    appVersion: appVersion || null,
+    userId: userId || null,
+    updatedAt: new Date().toISOString()
+  };
+  writePushTokens(tokens);
+  res.json({ ok: true });
+});
+app.post('/api/push/unregister', (req, res) => {
+  const { deviceToken } = req.body || {};
+  if (!deviceToken) return res.status(400).json({ ok: false, error: 'deviceToken is required' });
+  const tokens = readPushTokens();
+  delete tokens[deviceToken];
+  writePushTokens(tokens);
+  res.json({ ok: true });
+});
+
 /* =========================
  * Startup
  * ========================= */
