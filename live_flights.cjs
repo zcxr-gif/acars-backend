@@ -302,6 +302,67 @@ const globalMetadata = {
   lastUpdated: null
 };
 
+/* =========================
+ * Metadata persistence (survives restarts when the IF API is down/bugged)
+ *
+ * The aircraft/livery name maps used to live only in memory, so a restart had
+ * to re-fetch them from the IF API. When that API errors — or, worse, returns
+ * an empty list without erroring — the maps stayed wiped until the next good
+ * fetch, breaking name lookups. We now snapshot every successful load to disk
+ * (in the same DATA_DIR volume the flight-history DB uses) and restore it on
+ * boot, so a bad IF API at startup no longer loses the data.
+ * ========================= */
+const METADATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const METADATA_CACHE_PATH = path.join(METADATA_DIR, 'metadata_cache.json');
+
+// Snapshot the current in-memory metadata to disk. Atomic (tmp + rename) so a
+// crash mid-write can never leave a half-written, unparseable cache file.
+function persistMetadataCache() {
+  try {
+    if (!fs.existsSync(METADATA_DIR)) fs.mkdirSync(METADATA_DIR, { recursive: true });
+    const payload = JSON.stringify({
+      aircraft: globalMetadata.aircraft,
+      liveries: globalMetadata.liveries,
+      lastUpdated: globalMetadata.lastUpdated,
+      savedAt: Date.now(),
+    });
+    const tmp = `${METADATA_CACHE_PATH}.tmp`;
+    fs.writeFileSync(tmp, payload);
+    fs.renameSync(tmp, METADATA_CACHE_PATH);
+  } catch (e) {
+    console.error(`[metadata] ⚠️ Failed to persist metadata cache: ${e.message}`);
+  }
+}
+
+// Restore the maps from the on-disk snapshot. Returns true if anything usable
+// was loaded. Tolerant of a missing/corrupt file — it just reports failure so
+// the caller falls back to the network fetch.
+function loadMetadataFromCache() {
+  try {
+    if (!fs.existsSync(METADATA_CACHE_PATH)) return false;
+    const cached = JSON.parse(fs.readFileSync(METADATA_CACHE_PATH, 'utf8'));
+    const aircraft = Array.isArray(cached?.aircraft) ? cached.aircraft : [];
+    const liveries = Array.isArray(cached?.liveries) ? cached.liveries : [];
+    if (aircraft.length === 0 && liveries.length === 0) return false;
+
+    globalMetadata.aircraft = aircraft;
+    aircraftNameMap.clear();
+    for (const a of aircraft) if (a?.id) aircraftNameMap.set(a.id, a.name);
+
+    globalMetadata.liveries = liveries;
+    liveryNameMap.clear();
+    for (const l of liveries) if (l?.id) liveryNameMap.set(l.id, l.name);
+
+    globalMetadata.lastUpdated = cached.lastUpdated || null;
+    const savedAt = cached.savedAt ? new Date(cached.savedAt).toISOString() : 'unknown time';
+    console.log(`♻️ Restored ${aircraftNameMap.size} aircraft and ${liveryNameMap.size} liveries from cache (saved ${savedAt}).`);
+    return true;
+  } catch (e) {
+    console.error(`[metadata] ⚠️ Failed to read metadata cache: ${e.message}`);
+    return false;
+  }
+}
+
 /**
  * Loads aircraft + liveries from the IF API into the in-memory maps. Safe to
  * re-run at any time — used both at startup and by the manual refresh endpoint
@@ -309,19 +370,17 @@ const globalMetadata = {
  * restart to pick them up. Fetches both lists first and only swaps the shared
  * maps once both succeed, so a failed refresh can't leave them half-populated.
  */
-// Wrap an upstream-list fetch so a failure says *which* list broke and carries
-// the IF API HTTP status — turning a vague "refresh failed" into something
-// actionable on the dashboard.
-function tagListError(label) {
-  return (e) => {
-    const status = e?.response?.status;
-    const msg = status
+// Turn a per-list outcome into a human-readable reason that says *which* list
+// broke and *why* — a hard failure (with IF API HTTP status) or the sneaky
+// "succeeded but came back empty" case the bugged IF API sometimes produces.
+function describeListFailure(label, outcome) {
+  if (outcome.status === 'rejected') {
+    const status = outcome.reason?.response?.status;
+    return status
       ? `${label} fetch failed: IF API HTTP ${status}`
-      : `${label} fetch failed: ${e?.message || 'unknown error'}`;
-    const wrapped = new Error(msg);
-    wrapped.response = e?.response;
-    throw wrapped;
-  };
+      : `${label} fetch failed: ${outcome.reason?.message || 'unknown error'}`;
+  }
+  return `${label} fetch returned an empty list (IF API may be bugged) — kept previous data.`;
 }
 
 async function loadMetadata(reason = 'startup') {
@@ -337,20 +396,56 @@ async function loadMetadata(reason = 'startup') {
   console.log(`⏳ Loading aircraft and liveries (${reason})...`);
 
   try {
-    const [aircraftList, liveryList] = await Promise.all([
-      getAircraftList().catch(tagListError('Aircraft')),
-      getAllLiveries().catch(tagListError('Liveries')),
+    // Fetch the two lists independently so one failing (or coming back empty)
+    // can't discard the other — the IF API sometimes 5xxs or returns [] for
+    // just one of them.
+    const [aircraftOutcome, liveryOutcome] = await Promise.allSettled([
+      getAircraftList(),
+      getAllLiveries(),
     ]);
 
-    globalMetadata.aircraft = aircraftList;
-    aircraftNameMap.clear();
-    for (const aircraft of aircraftList) aircraftNameMap.set(aircraft.id, aircraft.name);
+    const errors = [];
+    let updated = false;
 
-    globalMetadata.liveries = liveryList;
-    liveryNameMap.clear();
-    for (const livery of liveryList) liveryNameMap.set(livery.id, livery.name);
+    // Only swap a map when the fresh list actually has entries. A call that
+    // "succeeds" but returns [] is treated as a failure so a bugged IF API
+    // can't wipe names we already have (in memory or restored from cache).
+    if (aircraftOutcome.status === 'fulfilled' && aircraftOutcome.value.length > 0) {
+      const list = aircraftOutcome.value;
+      globalMetadata.aircraft = list;
+      aircraftNameMap.clear();
+      for (const aircraft of list) aircraftNameMap.set(aircraft.id, aircraft.name);
+      updated = true;
+    } else {
+      errors.push(describeListFailure('Aircraft', aircraftOutcome));
+    }
 
-    globalMetadata.lastUpdated = Date.now();
+    if (liveryOutcome.status === 'fulfilled' && liveryOutcome.value.length > 0) {
+      const list = liveryOutcome.value;
+      globalMetadata.liveries = list;
+      liveryNameMap.clear();
+      for (const livery of list) liveryNameMap.set(livery.id, livery.name);
+      updated = true;
+    } else {
+      errors.push(describeListFailure('Liveries', liveryOutcome));
+    }
+
+    // Nothing usable came back AND we have nothing to fall back on → real
+    // failure. Bubble up so startup restores from the on-disk cache and the
+    // dashboard can explain why counts are empty.
+    if (aircraftNameMap.size === 0 && liveryNameMap.size === 0) {
+      throw new Error(errors.join('; ') || 'IF API returned no aircraft or liveries.');
+    }
+
+    if (updated) {
+      globalMetadata.lastUpdated = Date.now();
+      // Snapshot to disk so the next restart survives a bugged/offline IF API.
+      persistMetadataCache();
+    }
+
+    if (errors.length) {
+      console.warn(`⚠️ Metadata partially loaded (${reason}): ${errors.join('; ')}`);
+    }
 
     console.log(`✅ Loaded ${aircraftNameMap.size} aircraft types and ${liveryNameMap.size} liveries (${reason}).`);
     const result = {
@@ -358,6 +453,8 @@ async function loadMetadata(reason = 'startup') {
       liveries: liveryNameMap.size,
       lastUpdated: globalMetadata.lastUpdated,
       reason,
+      partial: errors.length > 0,
+      errors,
     };
     metrics.recordTaskSuccess('metadata-refresh', result);
     return result;
@@ -379,7 +476,13 @@ function refreshMetadata(reason = 'manual') {
   return metadataRefreshInFlight;
 }
 
-// Initial load at startup. Non-fatal: the server still boots if IF is down.
+// Restore from the on-disk snapshot first so the maps are populated instantly
+// — before the network call returns, and crucially if IF is down or bugged at
+// boot. A successful refresh below overwrites this with fresh data.
+loadMetadataFromCache();
+
+// Initial load at startup. Non-fatal: the server still boots (and keeps any
+// cache-restored names) if IF is down.
 loadMetadata('startup').catch(e => console.error('❌ Could not load metadata.', e.message));
 /* =========================
  * NEW: VA Roster Loader
