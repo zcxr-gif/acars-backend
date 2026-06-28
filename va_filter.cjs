@@ -57,17 +57,39 @@ function csv(v) {
     .filter(Boolean);
 }
 
+// Split a VA callsign mask like "OCEAN ##VA" into the fixed prefix ("OCEAN")
+// and suffix ("VA") around the variable flight-number run ("#"). "BAW ###" ->
+// { prefix: "BAW", suffix: "" } (prefix-only). No "#" => the whole thing is the
+// prefix. Compaction drops spaces/separators but keeps the "#" placeholders.
+function patternParts(pattern) {
+  const c = compact(pattern); // "OCEAN##VA"
+  const first = c.indexOf('#');
+  if (first === -1) return { prefix: c, suffix: '' };
+  const last = c.lastIndexOf('#');
+  return { prefix: c.slice(0, first), suffix: c.slice(last + 1) };
+}
+
 // Turn raw input (query param or VA-list item) into the normalised matching
-// config. Accepts the various field names the backends use.
+// config. Accepts the various field names the backends use, including the
+// va-ads `callsign` mask ("OCEAN ##VA").
 function normalizeConfig(q = {}) {
   const code = firstToken(q.va || q.code || q.callsign || q.callsignCode);
 
   // prefixes: compacted (spaces/separators removed), uppercased; default [code].
   let prefixes = csv(q.prefixes || q.callsignPrefixes).map(compact).filter(Boolean);
-  if (!prefixes.length && code) prefixes = [code];
 
   // suffixes: uppercased, whitespace stripped; [] => prefix-only match.
-  const suffixes = csv(q.suffixes || q.callsignSuffixes).map(compact).filter(Boolean);
+  let suffixes = csv(q.suffixes || q.callsignSuffixes).map(compact).filter(Boolean);
+
+  // No explicit prefix/suffix lists? Derive them from a callsign mask such as
+  // the va-ads "OCEAN ##VA". Explicit lists, if given, always win.
+  const mask = q.callsignPattern || q.callsignTemplate || q.callsign;
+  if ((!prefixes.length || !suffixes.length) && mask && String(mask).includes('#')) {
+    const { prefix, suffix } = patternParts(mask);
+    if (!prefixes.length && prefix) prefixes = [prefix];
+    if (!suffixes.length && suffix) suffixes = [suffix];
+  }
+  if (!prefixes.length && code) prefixes = [code];
 
   // hubs: ICAO list (accepts hubs / icao / hub), uppercased. Branding only.
   const hubs = csv(q.hubs || q.icao || q.hub).map((h) => h.toUpperCase());
@@ -149,17 +171,32 @@ function matchVa(callsign, serverName) {
   return null;
 }
 
-// Pull the VA list from the other backend and refresh the registry.
+// Unwrap whatever envelope the VA list arrives in into a plain array.
+function vaListItems(data) {
+  return Array.isArray(data) ? data : data?.data || data?.vas || data?.ads || data?.results || [];
+}
+
+// Pull the VA list from the other backend and refresh the registry. Follows
+// pagination (va-ads returns { data, pagination: { page, totalPages } }).
 async function refreshVaConfigs() {
   const base = (process.env.VA_BACKEND_URL || DEFAULT_VA_BACKEND).replace(/\/$/, '');
   const url = process.env.VA_LIST_URL || `${base}/api/va-ads`;
+  const limit = Number(process.env.VA_LIST_PAGE_LIMIT) || 100;
+  const headers = process.env.VA_LIST_SECRET ? { 'x-acars-signature': process.env.VA_LIST_SECRET } : undefined;
   try {
-    const { data } = await axios.get(url, {
-      timeout: 10000,
-      headers: process.env.VA_LIST_SECRET ? { 'x-acars-signature': process.env.VA_LIST_SECRET } : undefined,
-    });
-    const list = Array.isArray(data) ? data : data?.vas || data?.ads || data?.data || data?.results || [];
-    const n = setVaConfigs(list);
+    const all = [];
+    let page = 1;
+    let totalPages = 1;
+    do {
+      const u = new URL(url);
+      if (!u.searchParams.has('limit')) u.searchParams.set('limit', String(limit));
+      u.searchParams.set('page', String(page));
+      const { data } = await axios.get(u.toString(), { timeout: 10000, headers });
+      all.push(...vaListItems(data));
+      totalPages = Number(data?.pagination?.totalPages) || 1;
+      page += 1;
+    } while (page <= totalPages && page <= 50); // hard cap so a bad total can't loop forever
+    const n = setVaConfigs(all);
     console.log(`[va-filter] Loaded ${n} VA callsign config(s) from ${url}.`);
   } catch (e) {
     console.warn(`[va-filter] ⚠️ VA config refresh failed (${url}): ${e.message}`);
@@ -172,6 +209,10 @@ async function refreshVaConfigs() {
 
 const GROUND_SPEED_KT = Number(process.env.VA_GROUND_SPEED_KT) || 40;
 const CONFIRM_SNAPSHOTS = Math.max(1, Number(process.env.VA_CONFIRM_SNAPSHOTS) || 2);
+// Optional global server allow-list for events, e.g. VA_EVENT_SERVERS="Expert".
+// Empty = every server. va-ads has no per-VA server field, so this is the knob
+// that keeps Casual/Training traffic from generating events.
+const EVENT_SERVERS = csv(process.env.VA_EVENT_SERVERS);
 
 // true = airborne, false = on ground, null = unknown (no usable reading).
 // Mirrors fleet_analytics.classifyPhase: only MSL altitude is available, so the
@@ -222,6 +263,8 @@ function processSnapshot(flightsCache, claimEvent) {
   const present = new Set();
 
   for (const payload of flightsCache.values()) {
+    // Global server gate (Casual/Training noise control), if configured.
+    if (EVENT_SERVERS.length && !serverWanted({ servers: EVENT_SERVERS }, payload?.server)) continue;
     for (const f of payload?.flights || []) {
       if (!f?.flightId) continue;
       const cfg = matchVa(f.callsign, payload?.server);
