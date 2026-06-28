@@ -18,6 +18,7 @@ const logoBlocklist = require('./airline_logo_blocklist.cjs');
 const supabaseAuth = require('./supabase.cjs');
 const watchlist = require('./watchlist.cjs');
 const pushNotifications = require('./push.cjs');
+const vaFilter = require('./va_filter.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -92,6 +93,15 @@ app.use(express.static(path.join(__dirname, 'public')));
 // See watchlist.cjs / push.cjs / supabase.cjs.
 watchlist.registerRoutes(app);
 pushNotifications.registerRoutes(app, supabaseAuth.requireAuth);
+
+// VA embed filter — stateless. Filters the live flight cache down to a VA's
+// roster (by callsign prefixes/suffixes/servers) for the indgo-backend bot to
+// relay onward. Reads the existing in-memory snapshot; stores nothing of its
+// own. getSessions is hoisted; apiCache is read lazily at request time.
+vaFilter.registerRoutes(app, {
+  getSessions,
+  getFlightsCache: () => apiCache.flights,
+});
 
 // Diagnostics snapshot for the dashboard: IF API timing/errors, poller health,
 // live cache sizes, socket counts and process memory. Read-only, cheap to call.
