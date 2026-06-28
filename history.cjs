@@ -59,6 +59,40 @@ db.prepare(`CREATE INDEX IF NOT EXISTS idx_user_time ON flight_history (userId, 
 // Supports the ATC-replay candidate query, which filters purely on lastSeen.
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_last_seen ON flight_history (lastSeen)`).run();
 
+// Dedupe ledger for VA takeoff/landing events already pushed to the other
+// backend. One row per (flightId, event) so we never announce the same state
+// twice — even across a restart, which clears the in-memory phase tracker.
+// Rows are tiny and purged on the same 48h schedule as flight_history.
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS va_sent_events (
+    flightId TEXT,
+    event TEXT,
+    sentAt INTEGER,
+    PRIMARY KEY (flightId, event)
+  )
+`).run();
+db.prepare(`CREATE INDEX IF NOT EXISTS idx_va_sent_at ON va_sent_events (sentAt)`).run();
+const claimEventStmt = db.prepare(
+  `INSERT OR IGNORE INTO va_sent_events (flightId, event, sentAt) VALUES (?, ?, ?)`
+);
+
+/**
+ * Atomically claim a (flightId, event) pair before sending it onward.
+ * Returns true only the first time it's seen — i.e. when it was newly inserted
+ * — so the caller sends exactly once. Returns false if we've already sent it.
+ * Fails open (returns true) on a storage error: a rare duplicate beats dropping
+ * a real takeoff/landing.
+ */
+function claimFlightState(flightId, event) {
+  if (!flightId || !event) return false;
+  try {
+    return claimEventStmt.run(String(flightId), String(event), Date.now()).changes > 0;
+  } catch (e) {
+    console.warn('[history] claimFlightState failed:', e.message);
+    return true;
+  }
+}
+
 // Migration: add the aircraft/livery columns to databases created before they
 // existed. CREATE TABLE IF NOT EXISTS won't touch an existing table, so we add
 // each missing column explicitly. Plane type + livery are constant for the life
@@ -132,6 +166,7 @@ function writePath(pointsArr) {
 function purgeOldData() {
   const twoDaysAgo = Date.now() - (48 * 60 * 60 * 1000);
   db.prepare('DELETE FROM flight_history WHERE lastSeen < ?').run(twoDaysAgo);
+  db.prepare('DELETE FROM va_sent_events WHERE sentAt < ?').run(twoDaysAgo);
 }
 
 /**
@@ -412,4 +447,4 @@ setInterval(() => {
   catch (e) { console.warn('[history] WAL checkpoint failed:', e.message); }
 }, 10 * 60 * 1000);
 
-module.exports = { updateBatch, getFlightPath, getFlightsForReplay, runDeepClean };
+module.exports = { updateBatch, getFlightPath, getFlightsForReplay, runDeepClean, claimFlightState };

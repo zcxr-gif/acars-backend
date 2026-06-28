@@ -1,30 +1,31 @@
 /* =========================
- * VA embed filter + takeoff/landing event push
+ * VA embed filter + takeoff/landing event push (all VAs)
  * =========================
- * Two jobs, both built on the VA-callsign matching from the "VA Embed — Data
- * Sourcing" contract:
+ * This backend only watches every VA we have and matches live flights to them
+ * by callsign (the "VA Embed — Data Sourcing" rules). When a matched pilot
+ * leaves the ground (`takeoff`) or returns to it (`landing`) it POSTs that one
+ * event to the other backend, which does everything else (mapping the callsign
+ * to the right VA presentation, posting, etc). There is no 24/7 stream.
  *
- *   1. GET /api/va/roster  — stateless pull. Filters the live flight cache down
- *      to a VA's roster (callsign code / prefixes / suffixes / servers) so the
- *      bot can backfill a current snapshot on demand. Stores nothing.
+ * Two jobs:
+ *   1. GET /api/va/roster — stateless pull for a single VA (query-param config),
+ *      handy for on-demand backfill. Stores nothing.
+ *   2. Event engine (processSnapshot) — fed each broadcast poll. Matches flights
+ *      against ALL VA configs (fetched from VA_BACKEND_URL) and pushes only
+ *      ground↔air transitions. A persistent dedupe (history.claimFlightState,
+ *      injected) guarantees each (flightId, event) is sent at most once, even
+ *      across restarts. Only a tiny per-flight ground/air flag is held in
+ *      memory between polls; no roster or stream is stored.
  *
- *   2. Event engine (processSnapshot) — fed each broadcast poll. It watches the
- *      VA configured via env and pushes ONLY two kinds of event to the bot:
- *      `takeoff` (a matched pilot leaves the ground) and `landing` (a matched
- *      pilot returns to the ground). The bot relays each event to the
- *      destination server and posts it. No 24/7 stream, no stored roster — we
- *      keep only a tiny per-flight ground/air flag for the watched VA so we can
- *      detect the transitions, and we prune it as flights disappear.
- *
- * Config is comma-separated. Matching config can be supplied per request (the
- * doc's "B) Query params" shape) for the roster endpoint, or via env for the
- * event engine, since token→VA resolution lives on the indgo backend:
- *   VA_BOT_FORWARD_URL    — webhook the takeoff/landing events are POSTed to.
- *   VA_BOT_FORWARD_TOKEN  — optional bearer token for that webhook.
- *   VA_WATCH_CODE         — VA callsign code (e.g. OCEAN).
- *   VA_WATCH_PREFIXES     — comma list, e.g. "Air Canada" (defaults to [code]).
- *   VA_WATCH_SUFFIXES     — comma list, e.g. "VA,EX" ([] = prefix-only).
- *   VA_WATCH_SERVERS      — comma list of server-name substrings (optional).
+ * Env:
+ *   VA_BACKEND_URL        — base of the indgo backend (VA configs are fetched
+ *                           from `${VA_BACKEND_URL}/api/va-ads` unless overridden).
+ *   VA_LIST_URL           — explicit URL to fetch the VA list from (overrides
+ *                           the default above).
+ *   VA_LIST_SECRET        — optional; sent as `x-acars-signature` on that fetch.
+ *   VA_LIST_REFRESH_MS    — VA-list refresh interval, default 5 min.
+ *   VA_BOT_FORWARD_URL    — where takeoff/landing events are POSTed.
+ *   VA_BOT_FORWARD_TOKEN  — optional bearer token for that POST.
  *   VA_GROUND_SPEED_KT    — ground/air threshold, default 40 kt.
  *   VA_CONFIRM_SNAPSHOTS  — consecutive readings to confirm a flip, default 2.
  */
@@ -44,8 +45,8 @@ function compact(s) {
   return String(s || '').toUpperCase().replace(/[\s\-_/]+/g, '');
 }
 
-// Split a comma-separated query value into trimmed tokens. Splitting on commas
-// only (not whitespace) keeps multi-word prefixes intact, e.g. "Air Canada"
+// Split a comma-separated value (or array of them) into trimmed tokens.
+// Splitting on commas only keeps multi-word prefixes intact, e.g. "Air Canada"
 // stays one token so it compacts to "AIRCANADA".
 function csv(v) {
   if (Array.isArray(v)) return v.flatMap(csv);
@@ -55,16 +56,17 @@ function csv(v) {
     .filter(Boolean);
 }
 
-// Turn raw input (query or env) into the normalised config used for matching.
+// Turn raw input (query param or VA-list item) into the normalised matching
+// config. Accepts the various field names the backends use.
 function normalizeConfig(q = {}) {
-  const code = firstToken(q.va || q.code || q.callsign);
+  const code = firstToken(q.va || q.code || q.callsign || q.callsignCode);
 
   // prefixes: compacted (spaces/separators removed), uppercased; default [code].
-  let prefixes = csv(q.prefixes).map(compact).filter(Boolean);
+  let prefixes = csv(q.prefixes || q.callsignPrefixes).map(compact).filter(Boolean);
   if (!prefixes.length && code) prefixes = [code];
 
   // suffixes: uppercased, whitespace stripped; [] => prefix-only match.
-  const suffixes = csv(q.suffixes).map(compact).filter(Boolean);
+  const suffixes = csv(q.suffixes || q.callsignSuffixes).map(compact).filter(Boolean);
 
   // hubs: ICAO list (accepts hubs / icao / hub), uppercased. Branding only.
   const hubs = csv(q.hubs || q.icao || q.hub).map((h) => h.toUpperCase());
@@ -102,7 +104,7 @@ function serverWanted(cfg, serverName) {
   return cfg.servers.some((w) => name.includes(w.toLowerCase()));
 }
 
-// Build the VA's live roster from the in-memory flights cache. Pure read.
+// Build one VA's live roster from the in-memory flights cache. Pure read.
 //   sessions     : [{ id, name }, ...] (from getSessions)
 //   flightsCache : Map sessionId -> { server, sessionId, flights: [...] }
 function filterLiveRoster(cfg, sessions, flightsCache) {
@@ -110,14 +112,55 @@ function filterLiveRoster(cfg, sessions, flightsCache) {
   for (const s of sessions || []) {
     if (!serverWanted(cfg, s?.name)) continue;
     const payload = flightsCache.get(s?.id);
-    const flights = payload?.flights || [];
-    for (const f of flights) {
+    for (const f of payload?.flights || []) {
       if (f && callsignMatches(f.callsign, cfg)) {
         out.push({ ...f, server: s?.name || payload?.server || null });
       }
     }
   }
   return out;
+}
+
+/* =========================
+ * All-VA registry (fetched from VA_BACKEND_URL)
+ * ========================= */
+
+let vaConfigs = []; // normalised configs for every VA we watch
+
+// Replace the watched VA set from a raw list. Drops entries we can't match on.
+function setVaConfigs(rawList) {
+  const list = Array.isArray(rawList) ? rawList : [];
+  vaConfigs = list
+    .map((ad) => normalizeConfig(ad || {}))
+    .filter((cfg) => cfg.prefixes.length); // need at least one prefix to match
+  return vaConfigs.length;
+}
+
+// First VA whose callsign rules (and server filter) match this flight, or null.
+function matchVa(callsign, serverName) {
+  for (const cfg of vaConfigs) {
+    if (callsignMatches(callsign, cfg) && serverWanted(cfg, serverName)) return cfg;
+  }
+  return null;
+}
+
+// Pull the VA list from the other backend and refresh the registry.
+async function refreshVaConfigs() {
+  const url =
+    process.env.VA_LIST_URL ||
+    (process.env.VA_BACKEND_URL ? `${process.env.VA_BACKEND_URL.replace(/\/$/, '')}/api/va-ads` : null);
+  if (!url) return;
+  try {
+    const { data } = await axios.get(url, {
+      timeout: 10000,
+      headers: process.env.VA_LIST_SECRET ? { 'x-acars-signature': process.env.VA_LIST_SECRET } : undefined,
+    });
+    const list = Array.isArray(data) ? data : data?.vas || data?.ads || data?.data || data?.results || [];
+    const n = setVaConfigs(list);
+    console.log(`[va-filter] Loaded ${n} VA callsign config(s) from ${url}.`);
+  } catch (e) {
+    console.warn(`[va-filter] ⚠️ VA config refresh failed (${url}): ${e.message}`);
+  }
 }
 
 /* =========================
@@ -135,27 +178,12 @@ function airborneState(pos) {
   return pos.gs_kt >= GROUND_SPEED_KT;
 }
 
-// Resolve the watched VA from env once. Returns null if matching can't run.
-let watchCfgMemo;
-function watchConfig() {
-  if (watchCfgMemo !== undefined) return watchCfgMemo;
-  const cfg = normalizeConfig({
-    va: process.env.VA_WATCH_CODE,
-    prefixes: process.env.VA_WATCH_PREFIXES,
-    suffixes: process.env.VA_WATCH_SUFFIXES,
-    servers: process.env.VA_WATCH_SERVERS,
-  });
-  // Need a forward target and at least one prefix to match against.
-  watchCfgMemo = process.env.VA_BOT_FORWARD_URL && cfg.prefixes.length ? cfg : null;
-  return watchCfgMemo;
-}
-
-// Tiny per-flight state for the watched VA only — never the whole server.
+// Tiny per-flight state for matched VA flights only — never the whole server.
 const committed = new Map(); // flightId -> bool airborne (last confirmed)
 const pending = new Map(); // flightId -> { air: bool, n: int } (flip being confirmed)
 
-// POST a single takeoff/landing event to the bot. Fire-and-forget: never
-// awaited on the poll path, never cached — a slow bot can't back up memory.
+// POST a single takeoff/landing event to the other backend. Fire-and-forget:
+// never awaited on the poll path, never cached.
 function pushEvent(type, flight, serverName, cfg) {
   const url = process.env.VA_BOT_FORWARD_URL;
   if (!url) return;
@@ -181,18 +209,20 @@ function pushEvent(type, flight, serverName, cfg) {
 }
 
 // Fed the combined flights cache after each broadcast poll. Detects ground↔air
-// transitions for the watched VA and pushes takeoff/landing events.
+// transitions for any matched VA flight and pushes takeoff/landing events.
 //   flightsCache : Map sessionId -> { server, sessionId, flights: [...] }
-function processSnapshot(flightsCache) {
-  const cfg = watchConfig();
-  if (!cfg) return; // engine disabled (no bot URL / no VA configured)
-
+//   claimEvent   : (flightId, event) -> bool — true the first time only, so each
+//                  state is sent at most once (persistent dedupe). Optional.
+function processSnapshot(flightsCache, claimEvent) {
+  if (!vaConfigs.length) return; // no VAs loaded yet — nothing to watch
+  const claim = typeof claimEvent === 'function' ? claimEvent : () => true;
   const present = new Set();
 
   for (const payload of flightsCache.values()) {
-    if (!serverWanted(cfg, payload?.server)) continue;
     for (const f of payload?.flights || []) {
-      if (!f?.flightId || !callsignMatches(f.callsign, cfg)) continue;
+      if (!f?.flightId) continue;
+      const cfg = matchVa(f.callsign, payload?.server);
+      if (!cfg) continue;
       present.add(f.flightId);
 
       const cur = airborneState(f.position);
@@ -200,13 +230,13 @@ function processSnapshot(flightsCache) {
 
       const prev = committed.get(f.flightId);
       if (prev === undefined) {
-        // First time we see this flight: seed its state, fire nothing. A pilot
-        // who connects already airborne must not generate a spurious takeoff.
+        // First sighting: seed state, fire nothing. A pilot who connects already
+        // airborne must not generate a spurious takeoff.
         committed.set(f.flightId, cur);
         continue;
       }
       if (cur === prev) {
-        pending.delete(f.flightId); // back to stable — cancel any pending flip
+        pending.delete(f.flightId); // stable again — cancel any pending flip
         continue;
       }
 
@@ -222,22 +252,34 @@ function processSnapshot(flightsCache) {
       if (p.n >= CONFIRM_SNAPSHOTS) {
         committed.set(f.flightId, cur);
         pending.delete(f.flightId);
-        pushEvent(cur ? 'takeoff' : 'landing', f, payload?.server, cfg);
+        const type = cur ? 'takeoff' : 'landing';
+        // Only send if we haven't already sent this exact state for this flight.
+        if (claim(f.flightId, type)) pushEvent(type, f, payload?.server, cfg);
       }
     }
   }
 
-  // Prune flights that are no longer live (disconnected / left the VA). A pilot
-  // who disconnects mid-air produces no landing event — we only fire on an
-  // observed air→ground transition.
+  // Prune flights that are no longer live. A pilot who disconnects mid-air
+  // produces no landing event — we only fire on an observed air→ground change.
   for (const id of committed.keys()) if (!present.has(id)) committed.delete(id);
   for (const id of pending.keys()) if (!present.has(id)) pending.delete(id);
 }
 
-/* ---- roster route (pull / backfill) ---- */
+// Start the VA-list refresh loop. Inert (logs once) if no source is configured.
+let started = false;
+function initEventEngine() {
+  if (started) return;
+  started = true;
+  refreshVaConfigs();
+  const ms = Number(process.env.VA_LIST_REFRESH_MS) || 5 * 60 * 1000;
+  const t = setInterval(refreshVaConfigs, ms);
+  if (typeof t.unref === 'function') t.unref();
+}
+
+/* ---- roster route (single-VA pull / backfill) ---- */
 
 function registerRoutes(app, { getSessions, getFlightsCache }) {
-  // GET /api/va/roster — stateless. Returns the VA's live roster filtered from
+  // GET /api/va/roster — stateless. Returns one VA's live roster filtered from
   // the existing live cache. Nothing is stored on this path.
   app.get('/api/va/roster', async (req, res) => {
     try {
@@ -271,7 +313,10 @@ module.exports = {
   callsignMatches,
   filterLiveRoster,
   airborneState,
-  watchConfig,
+  setVaConfigs,
+  matchVa,
+  refreshVaConfigs,
   processSnapshot,
+  initEventEngine,
   registerRoutes,
 };

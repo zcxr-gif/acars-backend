@@ -8,7 +8,7 @@ const path = require('path');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const { updateFlightPath, getFlightPath, updateBatch } = require('./history.cjs');
+const { updateFlightPath, getFlightPath, updateBatch, claimFlightState } = require('./history.cjs');
 const atcHistory = require('./atc_history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
@@ -552,6 +552,10 @@ async function fetchVaRoster() {
       setTimeout(runRosterPoller, VA_ROSTER_POLL_MS);
     });
 })();
+
+// Start fetching the all-VA callsign configs used by the takeoff/landing event
+// engine. Inert unless VA_BACKEND_URL / VA_LIST_URL is set. See va_filter.cjs.
+vaFilter.initEventEngine();
 /* =========================
  * Helpers
  * ========================= */
@@ -1671,11 +1675,12 @@ async function pollAndBroadcastFlights() {
     console.warn('[watchlist] ⚠️ Snapshot processing failed:', e?.message);
   }
 
-  // VA takeoff/landing events: diff this cycle's snapshot for the watched VA
-  // and push only ground↔air transitions to the bot (no 24/7 stream). Inert
-  // unless VA_BOT_FORWARD_URL + a watched VA are configured. See va_filter.cjs.
+  // VA takeoff/landing events: diff this cycle's snapshot against every VA we
+  // watch and push only ground↔air transitions to the other backend (no 24/7
+  // stream). claimFlightState dedupes so each state is sent at most once. Inert
+  // unless VA configs (VA_BACKEND_URL) and VA_BOT_FORWARD_URL are configured.
   try {
-    vaFilter.processSnapshot(apiCache.flights);
+    vaFilter.processSnapshot(apiCache.flights, claimFlightState);
   } catch (e) {
     console.warn('[va-filter] ⚠️ Snapshot processing failed:', e?.message);
   }
