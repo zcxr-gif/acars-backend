@@ -1670,6 +1670,15 @@ async function pollAndBroadcastFlights() {
   } catch (e) {
     console.warn('[watchlist] ⚠️ Snapshot processing failed:', e?.message);
   }
+
+  // VA takeoff/landing events: diff this cycle's snapshot for the watched VA
+  // and push only ground↔air transitions to the bot (no 24/7 stream). Inert
+  // unless VA_BOT_FORWARD_URL + a watched VA are configured. See va_filter.cjs.
+  try {
+    vaFilter.processSnapshot(apiCache.flights);
+  } catch (e) {
+    console.warn('[va-filter] ⚠️ Snapshot processing failed:', e?.message);
+  }
 }
 
 (function runBroadcastPoller() {
