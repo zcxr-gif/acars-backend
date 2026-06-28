@@ -19,7 +19,8 @@
  *
  * Env:
  *   VA_BACKEND_URL        — base of the indgo backend (VA configs are fetched
- *                           from `${VA_BACKEND_URL}/api/va-ads` unless overridden).
+ *                           from `${VA_BACKEND_URL}/api/va-ads`). Defaults to the
+ *                           known indgo host if unset.
  *   VA_LIST_URL           — explicit URL to fetch the VA list from (overrides
  *                           the default above).
  *   VA_LIST_SECRET        — optional; sent as `x-acars-signature` on that fetch.
@@ -125,6 +126,10 @@ function filterLiveRoster(cfg, sessions, flightsCache) {
  * All-VA registry (fetched from VA_BACKEND_URL)
  * ========================= */
 
+// Default base for the indgo backend (same host already in the CORS whitelist).
+// Overridden by VA_BACKEND_URL, or bypassed entirely by VA_LIST_URL.
+const DEFAULT_VA_BACKEND = 'https://site--indgo-backend--6dmjph8ltlhv.code.run';
+
 let vaConfigs = []; // normalised configs for every VA we watch
 
 // Replace the watched VA set from a raw list. Drops entries we can't match on.
@@ -146,10 +151,8 @@ function matchVa(callsign, serverName) {
 
 // Pull the VA list from the other backend and refresh the registry.
 async function refreshVaConfigs() {
-  const url =
-    process.env.VA_LIST_URL ||
-    (process.env.VA_BACKEND_URL ? `${process.env.VA_BACKEND_URL.replace(/\/$/, '')}/api/va-ads` : null);
-  if (!url) return;
+  const base = (process.env.VA_BACKEND_URL || DEFAULT_VA_BACKEND).replace(/\/$/, '');
+  const url = process.env.VA_LIST_URL || `${base}/api/va-ads`;
   try {
     const { data } = await axios.get(url, {
       timeout: 10000,
