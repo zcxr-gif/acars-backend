@@ -46,6 +46,17 @@ function compact(s) {
   return String(s || '').toUpperCase().replace(/[\s\-_/]+/g, '');
 }
 
+// Tokenise a callsign the way embed.js does: trim, uppercase, split on any run
+// of space / hyphen / underscore / slash, drop empties.
+// "Air Canada 001VA" -> ["AIR","CANADA","001VA"].
+function callsignTokens(s) {
+  return String(s || '').trim().toUpperCase().split(/[\s\-_/]+/).filter(Boolean);
+}
+
+// Spoken wake-turbulence words tacked onto the end of a callsign — stripped
+// before matching so "United 2UA Heavy" is treated as "United 2UA".
+const WEIGHT_WORDS = new Set(['HEAVY', 'SUPER']);
+
 // Split a comma-separated value (or array of them) into trimmed tokens.
 // Splitting on commas only keeps multi-word prefixes intact, e.g. "Air Canada"
 // stays one token so it compacts to "AIRCANADA".
@@ -82,10 +93,9 @@ function normalizeConfig(q = {}) {
   // No explicit prefix/suffix lists? Derive them from the VA's callsign mask
   // ("Air Canada ##VA", or just "Air Canada"). The WHOLE fixed part becomes the
   // prefix — "AIRCANADA", not just "AIR" — so it can't collide with "Air Force".
-  // requireDigit records that the mask expects a flight number after the prefix.
-  // Explicit lists, if given, always win.
+  // The trailing literal (if any) becomes the suffix tag ("VA"). Explicit lists,
+  // if given, always win.
   const mask = q.callsignPattern || q.callsignTemplate || q.callsign;
-  const requireDigit = !!mask && String(mask).includes('#');
   if ((!prefixes.length || !suffixes.length) && mask) {
     const { prefix, suffix } = patternParts(mask);
     if (!prefixes.length && prefix) prefixes = [prefix];
@@ -109,39 +119,41 @@ function normalizeConfig(q = {}) {
     suffixes,
     hubs,
     servers,
-    requireDigit,
   };
 }
 
-/* ---- matching (Step 4 of the doc) ---- */
+/* ---- matching (mirrors embed.js callsignMatches) ---- */
 
-// A callsign belongs to the VA when its compacted form starts with one of the
-// VA prefixes and ends with one of the suffixes. Real VA callsigns are
-// PREFIX + flight-number + SUFFIX (e.g. mask "STARLUX ###EX"), but the
-// flight-number run in the middle is optional and variable-length: "STARLUXEX",
-// "STARLUX42EX" and "STARLUX1234EX" all match. The suffix is the trailing
-// boundary that stops a shorter airline from swallowing a longer one and keeps
-// generic airline traffic ("Air Canada 1234", no VA suffix) from matching.
-//
-// When suffixes ARE configured we require both ends and skip the digit check
-// (numbers are optional). When they're NOT — only possible on the stateless
-// roster route, since the event engine drops suffix-less VAs — we fall back to
-// the old prefix + digit-boundary behaviour so "OCEAN" can't match "OCEANIC".
+// A suffix tag only counts when it's a real tag, not coincidental trailing
+// letters: the token must end with the tag, and either BE the tag exactly
+// ("VA") or have a DIGIT immediately before it (the tag glued to a flight
+// number, "001VA"). So "MOSKVA"/"NOVA" never match the tag "VA".
+function tokenHasSuffixTag(token, tag) {
+  if (!tag || !token.endsWith(tag)) return false;
+  if (token === tag) return true;
+  const before = token.charAt(token.length - tag.length - 1);
+  return before >= '0' && before <= '9';
+}
+
+// A callsign belongs to the VA when (after uppercasing, stripping separators
+// and trailing weight-class words) its compacted form STARTS WITH a declared
+// prefix and — if the VA uses suffix tags — its LAST token CARRIES one of those
+// tags. Prefix-only VAs (no suffixes configured) match on the prefix alone.
+// The whole leading name is compacted into the prefix ("AIRCANADA"), so "Air
+// Canada" matches only Air Canada, never "Air France".
 function callsignMatches(callsign, cfg) {
-  const c = compact(callsign);
-  if (!c) return false;
-  const p = cfg.prefixes.find((x) => x && c.startsWith(x));
-  if (!p) return false;
-  if (cfg.suffixes.length) {
-    // Require the trailing literal, and ensure the prefix and suffix don't
-    // overlap on a too-short callsign (length must cover both ends).
-    return cfg.suffixes.some((suf) => suf && c.endsWith(suf) && c.length >= p.length + suf.length);
-  }
-  if (cfg.requireDigit) {
-    const next = c.charAt(p.length);
-    if (next < '0' || next > '9') return false;
-  }
-  return true; // prefix-only VA (roster pulls only)
+  let tokens = callsignTokens(callsign);
+  // Strip spoken weight-class words off the end ("... Heavy" / "... Super").
+  while (tokens.length > 1 && WEIGHT_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
+  if (!tokens.length) return false;
+
+  const c = tokens.join('');          // "AIRCANADA001VA"
+  const last = tokens[tokens.length - 1]; // "001VA"
+
+  const prefixHit = cfg.prefixes.some((p) => p && c.startsWith(p));
+  if (!cfg.suffixes.length) return prefixHit; // prefix-only VA
+  if (!prefixHit) return false;               // tag mode: BOTH must hold
+  return cfg.suffixes.some((tag) => tokenHasSuffixTag(last, tag));
 }
 
 // Server-name substring filter shared by the roster and the event engine.
@@ -179,17 +191,14 @@ const DEFAULT_VA_BACKEND = 'https://site--indgo-backend--6dmjph8ltlhv.code.run';
 let vaConfigs = []; // normalised configs for every VA we watch
 
 // Replace the watched VA set from a raw list. Drops entries we can't match on.
-// A VA needs BOTH a prefix and a suffix to be watched for events: a suffix-less
-// mask (e.g. "Air Canada ##") can't tell a VA member from a regular airline
-// pilot, so we skip it rather than fire on every "Air Canada 1234".
+// Like embed.js, a VA matches on its prefix(es); suffix tags are optional. To
+// keep generic airline traffic out, a VA should declare a tag (e.g. "VA") so a
+// bare "Air Canada 1234" without the tag is ignored — see callsignMatches.
 function setVaConfigs(rawList) {
   const list = Array.isArray(rawList) ? rawList : [];
-  const normalized = list.map((ad) => normalizeConfig(ad || {}));
-  vaConfigs = normalized.filter((cfg) => cfg.prefixes.length && cfg.suffixes.length);
-  const skipped = normalized.length - vaConfigs.length;
-  if (skipped > 0) {
-    console.log(`[va-filter] Skipped ${skipped} VA(s) with no callsign suffix (can't distinguish members).`);
-  }
+  vaConfigs = list
+    .map((ad) => normalizeConfig(ad || {}))
+    .filter((cfg) => cfg.prefixes.length); // need at least one prefix to match
   return vaConfigs.length;
 }
 
