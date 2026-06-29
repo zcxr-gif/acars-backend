@@ -116,22 +116,32 @@ function normalizeConfig(q = {}) {
 /* ---- matching (Step 4 of the doc) ---- */
 
 // A callsign belongs to the VA when its compacted form starts with one of the
-// VA prefixes and (if suffixes are configured) ends with one of the suffixes.
-// Real VA callsigns are PREFIX + flight-number + SUFFIX, so when the mask has a
-// number we also require a digit immediately after the prefix. That boundary
-// stops a shorter airline from swallowing a longer one ("Air Canada" vs "Air
-// Canada Express") and "Ocean" from matching "Oceanic".
+// VA prefixes and ends with one of the suffixes. Real VA callsigns are
+// PREFIX + flight-number + SUFFIX (e.g. mask "STARLUX ###EX"), but the
+// flight-number run in the middle is optional and variable-length: "STARLUXEX",
+// "STARLUX42EX" and "STARLUX1234EX" all match. The suffix is the trailing
+// boundary that stops a shorter airline from swallowing a longer one and keeps
+// generic airline traffic ("Air Canada 1234", no VA suffix) from matching.
+//
+// When suffixes ARE configured we require both ends and skip the digit check
+// (numbers are optional). When they're NOT — only possible on the stateless
+// roster route, since the event engine drops suffix-less VAs — we fall back to
+// the old prefix + digit-boundary behaviour so "OCEAN" can't match "OCEANIC".
 function callsignMatches(callsign, cfg) {
   const c = compact(callsign);
   if (!c) return false;
   const p = cfg.prefixes.find((x) => x && c.startsWith(x));
   if (!p) return false;
+  if (cfg.suffixes.length) {
+    // Require the trailing literal, and ensure the prefix and suffix don't
+    // overlap on a too-short callsign (length must cover both ends).
+    return cfg.suffixes.some((suf) => suf && c.endsWith(suf) && c.length >= p.length + suf.length);
+  }
   if (cfg.requireDigit) {
     const next = c.charAt(p.length);
     if (next < '0' || next > '9') return false;
   }
-  if (!cfg.suffixes.length) return true; // prefix-only VA
-  return cfg.suffixes.some((suf) => suf && c.endsWith(suf));
+  return true; // prefix-only VA (roster pulls only)
 }
 
 // Server-name substring filter shared by the roster and the event engine.
@@ -169,11 +179,17 @@ const DEFAULT_VA_BACKEND = 'https://site--indgo-backend--6dmjph8ltlhv.code.run';
 let vaConfigs = []; // normalised configs for every VA we watch
 
 // Replace the watched VA set from a raw list. Drops entries we can't match on.
+// A VA needs BOTH a prefix and a suffix to be watched for events: a suffix-less
+// mask (e.g. "Air Canada ##") can't tell a VA member from a regular airline
+// pilot, so we skip it rather than fire on every "Air Canada 1234".
 function setVaConfigs(rawList) {
   const list = Array.isArray(rawList) ? rawList : [];
-  vaConfigs = list
-    .map((ad) => normalizeConfig(ad || {}))
-    .filter((cfg) => cfg.prefixes.length); // need at least one prefix to match
+  const normalized = list.map((ad) => normalizeConfig(ad || {}));
+  vaConfigs = normalized.filter((cfg) => cfg.prefixes.length && cfg.suffixes.length);
+  const skipped = normalized.length - vaConfigs.length;
+  if (skipped > 0) {
+    console.log(`[va-filter] Skipped ${skipped} VA(s) with no callsign suffix (can't distinguish members).`);
+  }
   return vaConfigs.length;
 }
 
@@ -252,6 +268,8 @@ function pushEvent(type, flight, serverName, cfg) {
     username: flight?.username || null,
     flightId: flight?.flightId || null,
     server: serverName || null,
+    departureIcao: flight?.departureIcao || null,
+    arrivalIcao: flight?.arrivalIcao || null,
     position: flight?.position || null,
     aircraft: flight?.aircraft || null,
     timestamp: Date.now(),
