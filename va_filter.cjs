@@ -73,22 +73,27 @@ function patternParts(pattern) {
 // config. Accepts the various field names the backends use, including the
 // va-ads `callsign` mask ("OCEAN ##VA").
 function normalizeConfig(q = {}) {
-  const code = firstToken(q.va || q.code || q.callsign || q.callsignCode);
-
-  // prefixes: compacted (spaces/separators removed), uppercased; default [code].
+  // prefixes: compacted (spaces/separators removed), uppercased.
   let prefixes = csv(q.prefixes || q.callsignPrefixes).map(compact).filter(Boolean);
 
   // suffixes: uppercased, whitespace stripped; [] => prefix-only match.
   let suffixes = csv(q.suffixes || q.callsignSuffixes).map(compact).filter(Boolean);
 
-  // No explicit prefix/suffix lists? Derive them from a callsign mask such as
-  // the va-ads "OCEAN ##VA". Explicit lists, if given, always win.
+  // No explicit prefix/suffix lists? Derive them from the VA's callsign mask
+  // ("Air Canada ##VA", or just "Air Canada"). The WHOLE fixed part becomes the
+  // prefix — "AIRCANADA", not just "AIR" — so it can't collide with "Air Force".
+  // requireDigit records that the mask expects a flight number after the prefix.
+  // Explicit lists, if given, always win.
   const mask = q.callsignPattern || q.callsignTemplate || q.callsign;
-  if ((!prefixes.length || !suffixes.length) && mask && String(mask).includes('#')) {
+  const requireDigit = !!mask && String(mask).includes('#');
+  if ((!prefixes.length || !suffixes.length) && mask) {
     const { prefix, suffix } = patternParts(mask);
     if (!prefixes.length && prefix) prefixes = [prefix];
     if (!suffixes.length && suffix) suffixes = [suffix];
   }
+
+  // code: an explicit short code if one was given, else the full prefix.
+  const code = firstToken(q.va || q.code || q.callsignCode) || prefixes[0] || '';
   if (!prefixes.length && code) prefixes = [code];
 
   // hubs: ICAO list (accepts hubs / icao / hub), uppercased. Branding only.
@@ -104,6 +109,7 @@ function normalizeConfig(q = {}) {
     suffixes,
     hubs,
     servers,
+    requireDigit,
   };
 }
 
@@ -111,11 +117,19 @@ function normalizeConfig(q = {}) {
 
 // A callsign belongs to the VA when its compacted form starts with one of the
 // VA prefixes and (if suffixes are configured) ends with one of the suffixes.
+// Real VA callsigns are PREFIX + flight-number + SUFFIX, so when the mask has a
+// number we also require a digit immediately after the prefix. That boundary
+// stops a shorter airline from swallowing a longer one ("Air Canada" vs "Air
+// Canada Express") and "Ocean" from matching "Oceanic".
 function callsignMatches(callsign, cfg) {
   const c = compact(callsign);
   if (!c) return false;
-  const prefixOk = cfg.prefixes.some((p) => p && c.startsWith(p));
-  if (!prefixOk) return false;
+  const p = cfg.prefixes.find((x) => x && c.startsWith(x));
+  if (!p) return false;
+  if (cfg.requireDigit) {
+    const next = c.charAt(p.length);
+    if (next < '0' || next > '9') return false;
+  }
   if (!cfg.suffixes.length) return true; // prefix-only VA
   return cfg.suffixes.some((suf) => suf && c.endsWith(suf));
 }
