@@ -156,6 +156,34 @@ function callsignMatches(callsign, cfg) {
   return cfg.suffixes.some((tag) => tokenHasSuffixTag(last, tag));
 }
 
+// Same decision as callsignMatches, but returns the intermediate reasoning so
+// the debug route can show WHY a callsign did or didn't match a VA. `matched`
+// is taken straight from callsignMatches so this can never drift from the real
+// rule — the extra fields are purely explanatory.
+function explainMatch(callsign, cfg) {
+  let tokens = callsignTokens(callsign);
+  while (tokens.length > 1 && WEIGHT_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
+  const compacted = tokens.join('');
+  const lastToken = tokens[tokens.length - 1] || '';
+  const prefixMatch = cfg.prefixes.some((p) => p && compacted.startsWith(p));
+  const suffixRequired = cfg.suffixes.length > 0;
+  const suffixMatch = suffixRequired
+    ? cfg.suffixes.some((tag) => tokenHasSuffixTag(lastToken, tag))
+    : null; // null = VA is prefix-only, no suffix needed
+  return {
+    code: cfg.code,
+    name: cfg.name,
+    prefixes: cfg.prefixes,
+    suffixes: cfg.suffixes,
+    compacted,
+    lastToken,
+    prefixMatch,
+    suffixRequired,
+    suffixMatch,
+    matched: callsignMatches(callsign, cfg),
+  };
+}
+
 // Server-name substring filter shared by the roster and the event engine.
 function serverWanted(cfg, serverName) {
   if (!cfg.servers.length) return true;
@@ -215,11 +243,18 @@ function vaListItems(data) {
   return Array.isArray(data) ? data : data?.data || data?.vas || data?.ads || data?.results || [];
 }
 
+// Resolve the URL the VA list is fetched from: VA_LIST_URL wins, else
+// `${VA_BACKEND_URL}/api/va-ads`, else the indgo default. Shared by the refresh
+// loop and the debug route so both always report the same source.
+function resolvedVaListUrl() {
+  const base = (process.env.VA_BACKEND_URL || DEFAULT_VA_BACKEND).replace(/\/$/, '');
+  return process.env.VA_LIST_URL || `${base}/api/va-ads`;
+}
+
 // Pull the VA list from the other backend and refresh the registry. Follows
 // pagination (va-ads returns { data, pagination: { page, totalPages } }).
 async function refreshVaConfigs() {
-  const base = (process.env.VA_BACKEND_URL || DEFAULT_VA_BACKEND).replace(/\/$/, '');
-  const url = process.env.VA_LIST_URL || `${base}/api/va-ads`;
+  const url = resolvedVaListUrl();
   const limit = Number(process.env.VA_LIST_PAGE_LIMIT) || 100;
   const headers = process.env.VA_LIST_SECRET ? { 'x-acars-signature': process.env.VA_LIST_SECRET } : undefined;
   try {
@@ -391,6 +426,64 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
       res.status(500).json({ ok: false, error: { status: 500, message: 'Failed to build VA roster' } });
     }
   });
+
+  // GET /api/va/debug — introspection for the watched VA set. Shows the source
+  // the configs are fetched from, the event-push wiring, and every loaded VA's
+  // normalised prefixes/suffixes so you can see whether a VA (e.g. Finnair)
+  // actually loaded and how its callsign mask was parsed.
+  //
+  // Add ?callsign=Finnair%20343AY (optionally &server=Expert) to test-match one
+  // callsign against every loaded VA and see, per VA, whether the prefix hit,
+  // whether the suffix tag was required/present, and whether the server passed.
+  app.get('/api/va/debug', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const out = {
+      ok: true,
+      source: {
+        // Where the VA list is pulled from and how often it refreshes.
+        url: resolvedVaListUrl(),
+        refreshMs: Number(process.env.VA_LIST_REFRESH_MS) || 5 * 60 * 1000,
+        // Events only POST when this is set — unset = matching runs but nothing
+        // is forwarded to the other backend.
+        forwardConfigured: !!process.env.VA_BOT_FORWARD_URL,
+        // Global server allow-list applied before any VA is matched (empty = all).
+        eventServers: EVENT_SERVERS,
+        groundSpeedKt: GROUND_SPEED_KT,
+        confirmSnapshots: CONFIRM_SNAPSHOTS,
+      },
+      count: vaConfigs.length,
+      configs: vaConfigs.map((c) => ({
+        code: c.code,
+        name: c.name,
+        prefixes: c.prefixes,
+        suffixes: c.suffixes,
+        hubs: c.hubs,
+        servers: c.servers,
+      })),
+    };
+
+    const callsign = req.query.callsign ? String(req.query.callsign) : '';
+    if (callsign) {
+      const server = req.query.server ? String(req.query.server) : null;
+      const candidates = vaConfigs.map((cfg) => {
+        const e = explainMatch(callsign, cfg);
+        e.serverAllowed = serverWanted(cfg, server);
+        e.willMatch = e.matched && e.serverAllowed;
+        return e;
+      });
+      const hit = candidates.find((e) => e.willMatch) || null;
+      out.test = {
+        callsign,
+        server,
+        // The same global gate processSnapshot applies before matching any VA.
+        globalServerGate: !EVENT_SERVERS.length || serverWanted({ servers: EVENT_SERVERS }, server),
+        matched: hit ? { code: hit.code, name: hit.name } : null,
+        candidates,
+      };
+    }
+
+    res.json(out);
+  });
 }
 
 module.exports = {
@@ -398,10 +491,12 @@ module.exports = {
   compact,
   normalizeConfig,
   callsignMatches,
+  explainMatch,
   filterLiveRoster,
   airborneState,
   setVaConfigs,
   matchVa,
+  resolvedVaListUrl,
   refreshVaConfigs,
   processSnapshot,
   initEventEngine,
