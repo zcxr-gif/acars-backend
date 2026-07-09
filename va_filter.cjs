@@ -28,6 +28,8 @@
  *   VA_BOT_FORWARD_URL    — where takeoff/landing events are POSTed.
  *   VA_BOT_FORWARD_TOKEN  — optional bearer token for that POST.
  *   VA_GROUND_SPEED_KT    — ground/air threshold, default 40 kt.
+ *   VA_AIRBORNE_ALT_FT    — at/above this MSL altitude a flight is always treated
+ *                           as airborne (no landing), default 10000 ft.
  *   VA_CONFIRM_SNAPSHOTS  — consecutive readings to confirm a flip, default 2.
  */
 
@@ -282,6 +284,11 @@ async function refreshVaConfigs() {
  * ========================= */
 
 const GROUND_SPEED_KT = Number(process.env.VA_GROUND_SPEED_KT) || 40;
+// Above this MSL altitude a flight is treated as airborne regardless of what
+// the groundspeed reads. Guards against spurious landing events when a cruising
+// flight (e.g. FL330) briefly reports a low or garbage groundspeed — nobody
+// lands from 10k+ feet, so we refuse to call it a landing up there.
+const AIRBORNE_ALT_FT = Number(process.env.VA_AIRBORNE_ALT_FT) || 10000;
 const CONFIRM_SNAPSHOTS = Math.max(1, Number(process.env.VA_CONFIRM_SNAPSHOTS) || 2);
 // Optional global server allow-list for events, e.g. VA_EVENT_SERVERS="Expert".
 // Empty = every server. va-ads has no per-VA server field, so this is the knob
@@ -292,7 +299,12 @@ const EVENT_SERVERS = csv(process.env.VA_EVENT_SERVERS);
 // Mirrors fleet_analytics.classifyPhase: only MSL altitude is available, so the
 // ground call leans on groundspeed.
 function airborneState(pos) {
-  if (!pos || typeof pos.gs_kt !== 'number') return null;
+  if (!pos) return null;
+  // At or above the altitude floor the aircraft is unambiguously airborne, so a
+  // low/garbage groundspeed reading can't be misread as a landing (VA ads were
+  // firing landings for pilots still cruising at 33k).
+  if (typeof pos.alt_ft === 'number' && pos.alt_ft >= AIRBORNE_ALT_FT) return true;
+  if (typeof pos.gs_kt !== 'number') return null;
   return pos.gs_kt >= GROUND_SPEED_KT;
 }
 
