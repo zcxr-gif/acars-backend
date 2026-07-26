@@ -19,6 +19,7 @@ const supabaseAuth = require('./supabase.cjs');
 const watchlist = require('./watchlist.cjs');
 const pushNotifications = require('./push.cjs');
 const vaFilter = require('./va_filter.cjs');
+const flightDelta = require('./flight_delta.cjs');
 
 // ⬇️ 1. IMPORT HTTP & SOCKET.IO
 const { createServer } = require('http');
@@ -59,7 +60,26 @@ const corsOptions = {
 };
 // 1. Apply CORS to Socket.IO
 const io = new Server(httpServer, {
-  cors: corsOptions
+  cors: corsOptions,
+
+  // ── Compression. Socket.IO v4 ships with permessage-deflate OFF, so every
+  // flight broadcast went out as raw JSON — ~600 KB per tick on a busy Expert
+  // Server. This data is highly repetitive (GUIDs, ICAOs, livery names), and
+  // deflate takes it to roughly a fifth of that for free, with no client
+  // change required.
+  //
+  // Both sides run with no context takeover: a per-socket deflate window would
+  // compress a little better, but it costs 100–300 KB of resident memory per
+  // connection, which we cannot afford at a few thousand concurrent clients.
+  // The window/memLevel below keep each transient context small.
+  perMessageDeflate: {
+    threshold: 1024,          // below this, framing overhead outweighs the win
+    concurrencyLimit: 10,
+    serverNoContextTakeover: true,
+    clientNoContextTakeover: true,
+    serverMaxWindowBits: 14,
+    zlibDeflateOptions: { level: 6, memLevel: 7 },
+  },
 });
 // Airline-logo takedown blocklist for the Inflight app (see
 // airline_logo_blocklist.cjs). Managed from the dashboard's "Logo Blocklist"
@@ -133,6 +153,10 @@ app.get('/api/admin/diagnostics', (req, res) => {
           ? Date.now() - apiCache.lastSessionsUpdate
           : null,
       },
+      // Delta broadcast health: how many packets went out, how many clients
+      // had to resync, and the sampled bytes-on-the-wire saving vs sending the
+      // full snapshot every tick.
+      delta: flightDelta.snapshot(),
       config: {
         activePollMs: ACTIVE_POLL_MS,
         idlePollMs: IDLE_POLL_MS,
@@ -1449,6 +1473,124 @@ async function getUserAtcSessionDetails(userId, atcSessionId) {
 
 
 /* =========================
+ * Delta broadcast plumbing (see flight_delta.cjs)
+ * ========================= */
+
+// Delta subscribers sit in a parallel room so the two wire formats never mix.
+const DELTA_ROOM_SUFFIX = '::delta';
+const deltaRoomFor = (roomName) => roomName + DELTA_ROOM_SUFFIX;
+
+/**
+ * The socket-facing shape of a secondary payload.
+ *
+ * The cached payload also carries `world` — the full IF world status, which is
+ * every active airport with its complete inbound/outbound flight-ID lists. That
+ * runs to ~100 KB and no client reads it off the socket; it exists so the
+ * poller can resolve each flight's departure/arrival ICAO, and it is still
+ * served on demand from GET /api/live/world/:sessionId. So it stays in the
+ * cache and off the wire.
+ */
+function toSecondaryWire(payload) {
+  if (!payload) return payload;
+  return {
+    server: payload.server,
+    sessionId: payload.sessionId,
+    atc: payload.atc,
+    notams: payload.notams,
+    timestamp: payload.timestamp,
+  };
+}
+
+/**
+ * Send a delta client the full state it needs before it can apply deltas. If
+ * this session has no encoder state yet (first delta subscriber since the room
+ * emptied), seed it from the cached snapshot so the client doesn't have to wait
+ * a whole poll cycle.
+ */
+function sendFlightSync(socket, sessionId, serverName) {
+  if (!flightDelta.has(sessionId)) {
+    const cached = apiCache.flights.get(sessionId);
+    if (!cached) return false;
+    flightDelta.seed(sessionId, serverName, cached);
+  }
+  const payload = flightDelta.sync(sessionId);
+  if (!payload) return false;
+  socket.emit('all_flights_sync', payload);
+  console.log(`[socket] 🚀 Fast-forwarded FLIGHTS (delta sync, seq=${payload.q}) to ${socket.id} for ${serverName}`);
+  return true;
+}
+
+// Rooms this handler manages. A socket is in at most one of them at a time,
+// in either its plain or its ::delta form.
+const SERVER_ROOMS = ['expert server', 'training server', 'casual server'];
+
+/**
+ * Move a socket to the room for `serverName` and fast-forward it with whatever
+ * we already have cached, so it doesn't sit blank until the next poll.
+ *
+ * Which stream it gets depends on whether it opted into deltas: the two wire
+ * formats live in separate rooms so a broadcast never has to be encoded twice
+ * for the same audience.
+ */
+async function joinServerRoom(socket, serverName) {
+  if (!serverName) return;
+  socket.data.serverName = serverName;
+
+  // Normalize the requested room name
+  const targetRoom = String(serverName).trim().toLowerCase();
+  const wantsDelta = !!socket.data.wantsDelta;
+  const joinRoom = wantsDelta ? deltaRoomFor(targetRoom) : targetRoom;
+
+  // 1. LEAVE OLD ROOMS
+  for (const room of socket.rooms) {
+    const base = room.endsWith(DELTA_ROOM_SUFFIX)
+      ? room.slice(0, -DELTA_ROOM_SUFFIX.length)
+      : room;
+    if (SERVER_ROOMS.includes(base) && room !== joinRoom) {
+      socket.leave(room);
+      // console.log(`[socket] 👋 ${socket.id} left room: ${room}`);
+    }
+  }
+
+  // 2. JOIN NEW ROOM
+  socket.join(joinRoom);
+  console.log(`[socket] 🚪 ${socket.id} joined room: ${joinRoom}`);
+
+  // --- [PERFORMANCE FIX] ---
+  // Immediately send the last known data from cache to THIS specific user.
+  // This prevents the user from waiting for the next polling cycle (2-5s delay).
+  try {
+    // A. Get current sessions (Uses existing cache logic in getSessions)
+    const sessions = await getSessions();
+    // B. Find the ID for the server they just joined
+    // Note: pickSessionIdByName handles fuzzy matching (e.g. "expert server" vs "Expert Server")
+    const sessionId = pickSessionIdByName(sessions, serverName);
+    if (!sessionId) return;
+
+    // C. Send cached FLIGHTS
+    if (wantsDelta) {
+      sendFlightSync(socket, sessionId, serverName);
+    } else {
+      const cachedFlights = apiCache.flights.get(sessionId);
+      if (cachedFlights) {
+        socket.emit('all_flights_update', cachedFlights);
+        console.log(`[socket] 🚀 Fast-forwarded FLIGHTS to ${socket.id} for ${serverName}`);
+      }
+    }
+
+    // D. Send cached ATC/NOTAMS (Secondary) - NEW FIX
+    const cachedSecondary = apiCache.secondary.get(sessionId);
+    if (cachedSecondary) {
+      socket.emit('secondary_data_update', toSecondaryWire(cachedSecondary));
+      console.log(`[socket] 🚀 Fast-forwarded ATC/NOTAMS to ${socket.id} for ${serverName}`);
+    }
+  } catch (err) {
+    console.warn(`[socket] Failed to send immediate cache for ${serverName}:`, err.message);
+  }
+  // --- [END FIX] ---
+}
+
+/* =========================
  * Socket.IO Connection Handling (FIXED)
  * ========================= */
 io.on('connection', (socket) => {
@@ -1459,58 +1601,46 @@ io.on('connection', (socket) => {
   // watchlist_subscribe / watchlist_event handling (cleans up on disconnect).
   watchlist.attachSocket(socket);
 
-  // Listen for a client to request a specific server's flight data
-  socket.on('join_server_room', async (serverName) => {
-    if (!serverName) return;
-    
-    // Normalize the requested room name
-    const targetRoom = String(serverName).trim().toLowerCase();
-    
-    // Define the specific flight data rooms we manage
-    const validServerRooms = ['expert server', 'training server', 'casual server'];
+  // Listen for a client to request a specific server's flight data.
+  // Fire-and-forget: the handler catches its own failures, and the .catch()
+  // is belt-and-braces so a socket event can never surface as an unhandled
+  // rejection and take the process down.
+  const join = (name) => joinServerRoom(socket, name).catch(
+    (e) => console.warn(`[socket] join_server_room failed:`, e?.message)
+  );
 
-   
- // 1. LEAVE OLD ROOMS
- 
+  socket.on('join_server_room', join);
 
-    for (const room of socket.rooms) {
-      if (validServerRooms.includes(room) && room !== targetRoom) {
-        socket.leave(room);
-        // console.log(`[socket] 👋 ${socket.id} left room: ${room}`);
-      }
+  // Opt in to the incremental flight stream. Sent as its own event rather than
+  // a flag on join_server_room so that neither side breaks when only one of
+  // them has been deployed: an older backend silently ignores an event it has
+  // no handler for and keeps sending full snapshots, and an older client never
+  // sends this so it stays on the full-snapshot stream. See flight_delta.cjs.
+  socket.on('enable_flight_deltas', (serverName) => {
+    socket.data.wantsDelta = true;
+    // Clients send this immediately before their first join_server_room, and
+    // that join does the room work — re-joining here would push a full
+    // snapshot the client is about to throw away for a sync. `serverName`
+    // being set is what tells us a room already exists, i.e. this is a
+    // mid-session upgrade rather than the opening handshake.
+    if (socket.data.serverName) {
+      join(serverName || socket.data.serverName);
     }
+  });
 
-    // 2. JOIN NEW ROOM
-    socket.join(targetRoom);
-    console.log(`[socket] 🚪 ${socket.id} joined room: ${targetRoom}`);
-    // --- [PERFORMANCE FIX] ---
-    // Immediately send the last known data from cache to THIS specific user.
-    // This prevents the user from waiting for the next polling cycle (2-5s delay).
+  // A delta client that notices a gap in the sequence (missed packet, socket
+  // hiccup, tab resumed from sleep) asks for the full state back.
+  socket.on('request_flight_sync', async (serverName) => {
+    const name = serverName || socket.data.serverName;
+    if (!name) return;
     try {
-      // A. Get current sessions (Uses existing cache logic in getSessions)
-      const sessions = await getSessions();
-      // B. Find the ID for the server they just joined
-      // Note: pickSessionIdByName handles fuzzy matching (e.g. "expert server" vs "Expert Server")
-      const sessionId = pickSessionIdByName(sessions, serverName);
-      if (sessionId) {
-        // C. Send cached FLIGHTS
-        const cachedFlights = apiCache.flights.get(sessionId);
-        if (cachedFlights) {
-          socket.emit('all_flights_update', cachedFlights);
-          console.log(`[socket] 🚀 Fast-forwarded FLIGHTS to ${socket.id} for ${serverName}`);
-        }
-
-        // D. Send cached ATC/NOTAMS (Secondary) - NEW FIX
-        const cachedSecondary = apiCache.secondary.get(sessionId);
-        if (cachedSecondary) {
-          socket.emit('secondary_data_update', cachedSecondary);
-          console.log(`[socket] 🚀 Fast-forwarded ATC/NOTAMS to ${socket.id} for ${serverName}`);
-        }
-      }
+      const sessionId = pickSessionIdByName(await getSessions(), name);
+      if (!sessionId) return;
+      flightDelta.noteResync();
+      sendFlightSync(socket, sessionId, name);
     } catch (err) {
-      console.warn(`[socket] Failed to send immediate cache for ${serverName}:`, err.message);
+      console.warn(`[socket] Resync failed for ${name}:`, err.message);
     }
-    // --- [END FIX] ---
   });
   socket.on('disconnect', (reason) => {
     const remaining = metrics.recordSocketDisconnect(reason);
@@ -1544,6 +1674,8 @@ async function pollAndBroadcastFlights() {
         if (!liveSessionIds.has(id)) cache.delete(id);
       }
     }
+    // Same for the delta encoder's retained snapshots.
+    flightDelta.pruneSessions(liveSessionIds);
   }
 
   // Active flight IDs across every server this cycle, so the save-throttle
@@ -1629,9 +1761,32 @@ async function pollAndBroadcastFlights() {
       
       // Update Cache and Broadcast IMMEDIATELY (Prioritize the user experience)
       apiCache.flights.set(sessionId, payload);
-      
+
       if (room && room.size > 0) {
         io.to(roomName).emit('all_flights_update', payload);
+      }
+
+      // Delta subscribers get only what moved since the last tick. On a busy
+      // server that is a ~30x cut in bytes on the wire, because the bulk of a
+      // full snapshot is identifiers and airframe metadata that never change.
+      const deltaRoom = deltaRoomFor(roomName);
+      const deltaSubscribers = io.sockets.adapter.rooms.get(deltaRoom);
+      if (deltaSubscribers && deltaSubscribers.size > 0) {
+        const delta = flightDelta.encode(sessionId, serverName, finalFlights, payload.timestamp);
+        // encode() returns null when nothing changed at all — then there is
+        // nothing worth waking every client up for.
+        if (delta) {
+          io.to(deltaRoom).emit('all_flights_delta', delta);
+          // Sampled — measuring it means serialising the full payload a second
+          // time, which is the very cost this whole path exists to avoid.
+          if (flightDelta.shouldSample()) {
+            flightDelta.noteSavings(JSON.stringify(delta).length, JSON.stringify(payload).length);
+          }
+        }
+      } else if (flightDelta.has(sessionId)) {
+        // Nobody is listening; drop the retained snapshot rather than diff
+        // against it forever. The next subscriber re-seeds from the cache.
+        flightDelta.drop(sessionId);
       }
 
       // ⬇️ OPTIMIZED: Non-blocking Database I/O
@@ -1811,13 +1966,14 @@ async function pollAndBroadcastSecondary() {
         world: world,
         timestamp: new Date().toISOString()
       };
-      // 1. Update Cache
+      // 1. Update Cache (keeps `world` — the HTTP endpoints serve it from here)
       apiCache.secondary.set(sessionId, payload);
-      // 2. Broadcast to room
+      // 2. Broadcast to room, without `world`. See toSecondaryWire().
       const roomName = serverName.toLowerCase();
-      const room = io.sockets.adapter.rooms.get(roomName);
-      if (room && room.size > 0) {
-          io.to(roomName).emit('secondary_data_update', payload);
+      const wire = toSecondaryWire(payload);
+      for (const name of [roomName, deltaRoomFor(roomName)]) {
+        const room = io.sockets.adapter.rooms.get(name);
+        if (room && room.size > 0) io.to(name).emit('secondary_data_update', wire);
       }
 
     } catch (e) {
