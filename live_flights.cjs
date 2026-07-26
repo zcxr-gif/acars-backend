@@ -5,6 +5,7 @@
 const { fileURLToPath } = require('url');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -26,6 +27,78 @@ const { createServer } = require('http');
 const { Server } = require('socket.io');
 
 const app = express();
+
+/* =========================
+ * JSON response compression
+ * =========================
+ *
+ * Every route here answers with res.json (44 of them, no streaming, no
+ * res.send), and none of it was compressed — a flight list or an ATC replay
+ * went out as raw JSON. This wraps res.json once, at the top, so the whole API
+ * surface is covered without touching a single handler.
+ *
+ * Deliberately hand-rolled rather than pulling in `compression`: node_modules
+ * is vendored in this repo, and the general middleware exists to handle
+ * streaming and content-type sniffing that a JSON-only API never needs.
+ */
+const GZIP_MIN_BYTES = 1024; // below this, the header overhead isn't worth it
+
+app.use((req, res, next) => {
+  // HEAD must not carry a body, and a client that didn't ask for gzip doesn't get it.
+  if (req.method === 'HEAD' || !/\bgzip\b/i.test(req.headers['accept-encoding'] || '')) {
+    return next();
+  }
+
+  const sendPlain = res.json.bind(res);
+
+  res.json = (body) => {
+    let text;
+    try {
+      text = JSON.stringify(body);
+    } catch (_) {
+      return sendPlain(body); // circular or otherwise unserialisable — let Express handle it
+    }
+    if (text === undefined) return sendPlain(body);
+
+    const raw = Buffer.from(text, 'utf8');
+    if (raw.length < GZIP_MIN_BYTES || res.getHeader('Content-Encoding')) {
+      return sendPlain(body);
+    }
+
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.vary('Accept-Encoding'); // appends, so an existing Vary survives
+
+    // Async: gzipping a large payload synchronously would block the event loop,
+    // and the broadcast poller shares it.
+    zlib.gzip(raw, { level: 6 }, (gzErr, out) => {
+      if (gzErr) {
+        // Nothing has been written yet and Content-Encoding is still unset,
+        // so falling back to the uncompressed body is safe.
+        console.warn('[gzip] Falling back to uncompressed response:', gzErr.message);
+        return sendPlain(body);
+      }
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Content-Length', out.length);
+      res.end(out);
+    });
+
+    return res;
+  };
+
+  next();
+});
+
+/**
+ * Let clients cache a response for as long as the value is good on our side.
+ *
+ * The rule for picking `seconds`: never longer than the server-side TTL that
+ * produced the data, so a cached response can't be staler than what a fresh
+ * request would have returned anyway.
+ */
+function cacheFor(res, seconds) {
+  res.set('Cache-Control', `public, max-age=${seconds}`);
+}
+
 // ⬇️ 2. CREATE HTTP SERVER & ATTACH SOCKET.IO
 const httpServer = createServer(app);
 const whitelist = [
@@ -2414,6 +2487,9 @@ app.get('/if-sessions', async (req, res) => {
     if (!IF_API_KEY) return res.status(500).json(err(500, 'INFINITE_FLIGHT_API_KEY is not set'));
     // This now uses the cache!
     const sessions = await getSessions();
+    // Half of SESSIONS_CACHE_TTL_MS. Session GUIDs only change when IF restarts
+    // a server, and this is the single most-requested endpoint we have.
+    cacheFor(res, 30);
     res.json({ ok: true, count: sessions?.length || 0, sessions });
   } catch (e) {
     const status = e?.response?.status || 500;
@@ -2563,6 +2639,9 @@ app.get('/atc/:sessionId', async (req, res) => {
   // 1. Try Cache First
   const cached = apiCache.secondary.get(sessionId);
   if (cached) {
+      // Refreshed by the secondary poller every 50s, so a few seconds of
+      // client-side caching costs no freshness at all.
+      cacheFor(res, 15);
       return res.json({ ok: true, count: cached.atc.length, atc: cached.atc, fromCache: true });
   }
 
@@ -2589,6 +2668,7 @@ app.get('/notams/:sessionId', async (req, res) => {
   // 1. Try Cache First
   const cached = apiCache.secondary.get(sessionId);
   if (cached) {
+      cacheFor(res, 15); // same 50s poller as /atc
       return res.json({ ok: true, count: cached.notams.length, notams: cached.notams, fromCache: true });
   }
 
@@ -2691,15 +2771,19 @@ app.get('/api/airport/:icao', async (req, res) => {
   const { icao } = req.params;
   const cacheKey = `airport:${icao.toUpperCase()}`;
   const cached = getOnDemandCached(cacheKey);
-  if (cached) return res.json({ ok: true, icao: cached.icao, airport: cached, fromCache: true });
+  if (cached) {
+    cacheFor(res, 300); // half the 10min server TTL below; this is static data
+    return res.json({ ok: true, icao: cached.icao, airport: cached, fromCache: true });
+  }
   try {
     const airportInfo = await getAirportInfo(icao);
-    
+
     if (!airportInfo) {
       return res.status(404).json(err(404, `Airport not found: ${icao}`));
     }
     setOnDemandCached(cacheKey, airportInfo, 10 * 60 * 1000); // 10min TTL (static data)
-    res.json({ 
+    cacheFor(res, 300);
+    res.json({
  
       ok: true, 
       icao: airportInfo.icao,
