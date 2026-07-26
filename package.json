@@ -13,6 +13,7 @@
     "better-sqlite3": "^12.6.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
+    "etag": "^1.8.1",
     "express": "^4.21.2",
     "ioredis": "^5.9.2",
     "node-fetch": "^3.3.2",

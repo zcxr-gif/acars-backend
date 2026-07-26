@@ -2570,6 +2570,17 @@ app.get('/flights/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
   const callsignFilter = req.query.callsignEndsWith;
 
+  // "Store it, but check with me every time." Callers poll this far faster
+  // than the broadcast poller refreshes the cache behind it — the live map
+  // asks every 3 seconds for data that moves every 15 — so most requests can
+  // be answered with a bodiless 304 off the ETag.
+  //
+  // Set for BOTH paths below, not just the cached one: a response carrying an
+  // ETag but no Cache-Control lets the browser pick its own freshness lifetime,
+  // and a heuristically-cached live position list means planes silently frozen
+  // on the map. Live data should never be left to a heuristic.
+  res.set('Cache-Control', 'no-cache');
+
   // 1. Check cache first
   const cachedData = apiCache.flights.get(sessionId);
   if (cachedData) {
@@ -2580,12 +2591,6 @@ app.get('/flights/:sessionId', async (req, res) => {
         f.callsign && f.callsign.toUpperCase().endsWith(suffix)
       );
     }
-    // "Store it, but check with me every time." Callers poll this far faster
-    // than the broadcast poller refreshes the cache behind it — the live map
-    // asks every 3 seconds for data that moves every 15 — so most requests
-    // can be answered with a bodiless 304 off the ETag. Without this header
-    // the browser has no instruction to revalidate and just refetches.
-    res.set('Cache-Control', 'no-cache');
     return res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: true
 });
   }
