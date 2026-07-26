@@ -6,6 +6,8 @@ const { fileURLToPath } = require('url');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+// Same generator Express uses internally, so our ETags and its own agree.
+const etag = require('etag');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -29,7 +31,7 @@ const { Server } = require('socket.io');
 const app = express();
 
 /* =========================
- * JSON response compression
+ * JSON response compression + conditional requests
  * =========================
  *
  * Every route here answers with res.json (44 of them, no streaming, no
@@ -40,6 +42,14 @@ const app = express();
  * Deliberately hand-rolled rather than pulling in `compression`: node_modules
  * is vendored in this repo, and the general middleware exists to handle
  * streaming and content-type sniffing that a JSON-only API never needs.
+ *
+ * The ETag half matters as much as the compression half. Clients poll faster
+ * than the data changes — the live-flights map asks every 3 seconds for a
+ * cache the broadcast poller only refreshes every 15 — so most requests are
+ * for bytes the caller already has. Tagging the response lets those come back
+ * as a bodiless 304. Express does this itself in res.send, but res.send is
+ * exactly what the compressed path has to bypass, so we do it here for both
+ * paths; Express skips its own generation when an ETag is already set.
  */
 const GZIP_MIN_BYTES = 1024; // below this, the header overhead isn't worth it
 
@@ -61,6 +71,22 @@ app.use((req, res, next) => {
     if (text === undefined) return sendPlain(body);
 
     const raw = Buffer.from(text, 'utf8');
+
+    // Tag before anything else, so an unchanged payload costs headers only.
+    // Same generator and same input bytes as Express, so the value a client
+    // holds stays valid whether or not it asked for gzip that time.
+    if (!res.getHeader('ETag')) res.setHeader('ETag', etag(raw, { weak: true }));
+
+    // req.fresh compares the client's If-None-Match against the ETag above,
+    // and is already limited to GET/HEAD with a 2xx status.
+    if (req.fresh) {
+      res.removeHeader('Content-Type');
+      res.removeHeader('Content-Length');
+      res.removeHeader('Content-Encoding');
+      res.removeHeader('Transfer-Encoding');
+      return res.status(304).end();
+    }
+
     if (raw.length < GZIP_MIN_BYTES || res.getHeader('Content-Encoding')) {
       return sendPlain(body);
     }
@@ -2554,7 +2580,13 @@ app.get('/flights/:sessionId', async (req, res) => {
         f.callsign && f.callsign.toUpperCase().endsWith(suffix)
       );
     }
-    return res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: true 
+    // "Store it, but check with me every time." Callers poll this far faster
+    // than the broadcast poller refreshes the cache behind it — the live map
+    // asks every 3 seconds for data that moves every 15 — so most requests
+    // can be answered with a bodiless 304 off the ETag. Without this header
+    // the browser has no instruction to revalidate and just refetches.
+    res.set('Cache-Control', 'no-cache');
+    return res.json({ ok: true, total: simplified.length, flights: simplified, fromCache: true
 });
   }
 
