@@ -263,6 +263,9 @@ function sanitizeTarget(raw) {
         flightId: typeof raw.flightId === 'string' ? raw.flightId.trim().slice(0, 128) : null,
         username,
         label: typeof raw.label === 'string' ? raw.label.trim().slice(0, 64) : username,
+        // Which server the flight is on. Carried across devices so the laptop
+        // links to the right session for a flight the phone picked.
+        server: typeof raw.server === 'string' ? raw.server.trim().slice(0, 64) : '',
     };
 }
 
@@ -329,7 +332,41 @@ function touchSession(userId, { connected, revision, target }) {
 // Routes
 // ---------------------------------------------------------------------------
 
-function registerRoutes(app) {
+/**
+ * Every live flight a pilot currently has, across every server.
+ *
+ * The socket feed the client already has is scoped to one server room, so a
+ * pilot flying on Expert while looking at Training cannot see their own
+ * aircraft in it — and picking a flight to broadcast is exactly when that
+ * matters. This reads the snapshots the poller already holds in memory, so it
+ * costs nothing upstream and can be called freely.
+ *
+ * @param {() => Map<string, {server: string, flights: object[]}>} getFlightsCache
+ */
+function findPilotFlights(getFlightsCache, username) {
+    const wanted = String(username || '').trim().toLowerCase();
+    if (!wanted || typeof getFlightsCache !== 'function') return [];
+
+    const cache = getFlightsCache();
+    if (!cache || typeof cache.forEach !== 'function') return [];
+
+    const found = [];
+    const seen = new Set();
+    cache.forEach((payload, sessionId) => {
+        for (const flight of payload?.flights || []) {
+            if (!flight?.username || flight.username.toLowerCase() !== wanted) continue;
+            const key = String(flight.flightId);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            // Tag the server: the client needs it for the deep link, and a
+            // pilot with two flights up needs to see which is which.
+            found.push({ ...flight, server: payload.server || '', sessionId });
+        }
+    });
+    return found;
+}
+
+function registerRoutes(app, deps = {}) {
   // Probed on boot before any Discord code runs, so the client can hide the
   // whole panel on a deploy that has no credentials.
   app.get('/api/discord/presence/config', (req, res) => {
@@ -406,6 +443,21 @@ function registerRoutes(app) {
     }
   });
 
+  // Everything this pilot has in the air right now, on any server, so the
+  // picker can offer all of them. Public for the same reason /flights/:id is:
+  // it is the live data the map already shows, just filtered.
+  app.get('/api/discord/presence/pilot-flights', (req, res) => {
+    if (rateLimited('assets', req)) return res.status(429).json(apiError(429, 'Too many lookups, try again shortly'));
+
+    const username = typeof req.query.username === 'string' ? req.query.username.trim() : '';
+    if (!username || username.length > 64) {
+      return res.status(400).json(apiError(400, 'username is required'));
+    }
+
+    res.set('Cache-Control', 'no-cache');
+    res.json({ ok: true, flights: findPilotFlights(deps.getFlightsCache, username) });
+  });
+
   // ── Remote control ──────────────────────────────────────────────────────
   // All three are per-account, so they sit behind the same Supabase token the
   // rest of the authed API uses.
@@ -449,4 +501,5 @@ module.exports = {
   registerRoutes,
   capabilities,
   resolveExternalAssets,
+  findPilotFlights,
 };

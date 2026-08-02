@@ -214,10 +214,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 watchlist.registerRoutes(app);
 pushNotifications.registerRoutes(app, supabaseAuth.requireAuth);
 
-// Discord Rich Presence broker — OAuth code exchange and community-photo
-// asset minting for the browser RPC client. See discord_presence.cjs; reports
-// itself disabled (and the client skips it) when unconfigured.
-discordPresence.registerRoutes(app);
+// Discord Rich Presence broker — OAuth code exchange, community-photo asset
+// minting, and the flight target a phone sets for a laptop to broadcast. See
+// discord_presence.cjs; reports itself disabled (and the client skips it) when
+// unconfigured. Reads the live cache to answer "every flight this pilot has
+// up", which the per-server socket feed cannot.
+discordPresence.registerRoutes(app, {
+  getFlightsCache: () => apiCache.flights,
+});
 
 // VA embed filter — stateless. Filters the live flight cache down to a VA's
 // roster (by callsign prefixes/suffixes/servers) for the indgo-backend bot to
