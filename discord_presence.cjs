@@ -24,6 +24,20 @@
  * disabled and the client silently skips it, so an unconfigured deploy behaves
  * exactly like today.
  *
+ * ── Remote control ─────────────────────────────────────────────────────────
+ * Rich Presence can only be reported to a Discord client on the same machine,
+ * so a phone can never push its own. What it can do is tell the pilot's laptop
+ * what to broadcast: the chosen flight lives here, keyed to their account, and
+ * the desktop tab polls for it. That is the third job this module does — hold
+ * one small piece of per-user state (which flight, and is a desktop tab alive)
+ * so two devices can agree on it.
+ *
+ * The state is deliberately in-memory. It is control state, not user data: a
+ * flight target is meaningless an hour after the flight lands, and the desktop
+ * tab re-seeds its own target after a restart, so a redeploy costs one poll
+ * interval rather than anything a pilot would notice. Revisions keep the two
+ * writers honest — a heartbeat never overwrites a newer pick from the phone.
+ *
  * Env:
  *   DISCORD_CLIENT_ID          — application id (public; served to the client)
  *   DISCORD_CLIENT_SECRET      — required for the code→token exchange
@@ -33,7 +47,17 @@
  *   DISCORD_PRESENCE_ENABLED   — force the master switch (0/false to disable)
  */
 
+const supabase = require('./supabase.cjs');
+
 const DISCORD_API = 'https://discord.com/api/v10';
+
+// A target nobody has touched in this long is from a flight that has long since
+// landed. Swept lazily, so an idle process does no work.
+const TARGET_TTL_MS = 12 * 60 * 60 * 1000;
+const TARGET_MAX = 20000;
+// A desktop tab polls every 10s; miss three and it is gone (closed, asleep, or
+// the laptop shut). The phone shows that rather than pretending it's live.
+const HOST_STALE_MS = 35 * 1000;
 
 // External asset paths are stable for a long time; a day of caching keeps us
 // far below any rate limit while a livery stays hot in the live feed.
@@ -44,7 +68,9 @@ const ASSET_CACHE_MAX = 4000;
 // and /token once per Discord authorisation, so these are generous for real
 // use and still cheap to enforce.
 const RATE_WINDOW_MS = 60 * 1000;
-const RATE_MAX = { token: 10, assets: 60 };
+// The session bucket carries the desktop poll (6/min) with room for a reconnect
+// storm; target writes are one per flight the pilot picks.
+const RATE_MAX = { token: 10, assets: 60, target: 30, session: 30 };
 
 function boolEnv(name, dflt) {
   const v = String(process.env[name] ?? '').trim().toLowerCase();
@@ -71,6 +97,9 @@ function capabilities() {
     enabled: boolEnv('DISCORD_PRESENCE_ENABLED', configured),
     clientId: clientId() || null,
     externalAssets: !!botToken(),
+    // Driving a laptop from a phone needs the account behind both devices, so
+    // it is only offered where tokens can actually be verified.
+    remote: supabase.canVerifyTokens(),
   };
 }
 
@@ -202,6 +231,101 @@ async function resolveExternalAssets(urls) {
 }
 
 // ---------------------------------------------------------------------------
+// Remote control: the shared flight target and the desktop session
+// ---------------------------------------------------------------------------
+
+// userId -> { target, revision, updatedAtMs, hostSeenAtMs, hostConnected }
+const _targets = new Map();
+
+function sweepTargets() {
+    const now = Date.now();
+    for (const [userId, record] of _targets) {
+        if (now - record.updatedAtMs > TARGET_TTL_MS) _targets.delete(userId);
+    }
+    // A pathological number of live users is still bounded: drop the coldest.
+    while (_targets.size > TARGET_MAX) {
+        const oldest = _targets.keys().next().value;
+        if (oldest === undefined) break;
+        _targets.delete(oldest);
+    }
+}
+
+/**
+ * Accept only the three fields the card needs, bounded. Anything else a client
+ * sends is dropped rather than stored — this record is echoed back to the
+ * pilot's other devices, so it holds nothing we didn't ask for.
+ */
+function sanitizeTarget(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const username = typeof raw.username === 'string' ? raw.username.trim().slice(0, 64) : '';
+    if (!username) return null;
+    return {
+        flightId: typeof raw.flightId === 'string' ? raw.flightId.trim().slice(0, 128) : null,
+        username,
+        label: typeof raw.label === 'string' ? raw.label.trim().slice(0, 64) : username,
+    };
+}
+
+/** What both devices see: the target, plus whether a desktop tab is alive. */
+function describeRecord(record) {
+    if (!record) {
+        return { target: null, revision: 0, host: { online: false, connected: false } };
+    }
+    const online = Date.now() - record.hostSeenAtMs < HOST_STALE_MS;
+    return {
+        target: record.target,
+        revision: record.revision,
+        host: {
+            online,
+            // "Online" is a tab that is polling; "connected" is that tab
+            // actually holding a Discord socket. The phone needs both to tell
+            // "laptop asleep" from "laptop up, Discord closed".
+            connected: online && !!record.hostConnected,
+            lastSeenMs: record.hostSeenAtMs || null,
+        },
+    };
+}
+
+function readRecord(userId) {
+    sweepTargets();
+    return describeRecord(_targets.get(userId));
+}
+
+function writeTarget(userId, target) {
+    sweepTargets();
+    const existing = _targets.get(userId);
+    const record = existing || { revision: 0, hostSeenAtMs: 0, hostConnected: false };
+    record.target = target;
+    record.revision += 1;
+    record.updatedAtMs = Date.now();
+    _targets.set(userId, record);
+    return describeRecord(record);
+}
+
+/**
+ * The desktop tab checking in. It never overwrites the target — that is the
+ * phone's job — with one exception: if we hold no record at all, the tab's own
+ * revision seeds one, which is how a target survives a backend restart.
+ */
+function touchSession(userId, { connected, revision, target }) {
+    sweepTargets();
+    let record = _targets.get(userId);
+
+    if (!record && revision > 0 && target) {
+        record = { target, revision, updatedAtMs: Date.now(), hostSeenAtMs: 0, hostConnected: false };
+        _targets.set(userId, record);
+    }
+    if (!record) {
+        record = { target: null, revision: 0, updatedAtMs: Date.now(), hostSeenAtMs: 0, hostConnected: false };
+        _targets.set(userId, record);
+    }
+
+    record.hostSeenAtMs = Date.now();
+    record.hostConnected = !!connected;
+    return describeRecord(record);
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -280,6 +404,44 @@ function registerRoutes(app) {
       // this is reported as a soft failure rather than breaking the presence.
       res.status(502).json(apiError(502, 'Could not resolve the image with Discord'));
     }
+  });
+
+  // ── Remote control ──────────────────────────────────────────────────────
+  // All three are per-account, so they sit behind the same Supabase token the
+  // rest of the authed API uses.
+
+  // What the phone reads to render its remote, and to show laptop status.
+  app.get('/api/discord/presence/target', supabase.requireAuth, (req, res) => {
+    res.json({ ok: true, ...readRecord(req.userId) });
+  });
+
+  // The phone (or the desktop itself) choosing a flight.
+  app.put('/api/discord/presence/target', supabase.requireAuth, (req, res) => {
+    if (rateLimited('target', req)) return res.status(429).json(apiError(429, 'Too many changes, try again shortly'));
+
+    const clearing = req.body?.clear === true;
+    const target = clearing ? null : sanitizeTarget(req.body?.target);
+    if (!clearing && !target) {
+      return res.status(400).json(apiError(400, 'target.username is required, or pass clear: true'));
+    }
+
+    res.json({ ok: true, ...writeTarget(req.userId, target) });
+  });
+
+  // The desktop tab checking in and picking up changes. Doubles as the
+  // heartbeat, so a tab that stops polling is a laptop that has gone away.
+  app.post('/api/discord/presence/session', supabase.requireAuth, (req, res) => {
+    if (rateLimited('session', req)) return res.status(429).json(apiError(429, 'Polling too fast'));
+
+    const revision = Number.isFinite(req.body?.revision) ? Math.max(0, Math.floor(req.body.revision)) : 0;
+    const state = touchSession(req.userId, {
+      connected: req.body?.connected,
+      revision,
+      target: sanitizeTarget(req.body?.target),
+    });
+
+    // `changed` saves the tab from diffing: it re-applies only on a new pick.
+    res.json({ ok: true, ...state, changed: state.revision !== revision });
   });
 }
 
