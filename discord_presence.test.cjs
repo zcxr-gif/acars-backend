@@ -29,8 +29,12 @@ supabase.requireAuth = (req, res, next) => {
 };
 supabase.canVerifyTokens = () => true;
 
-process.env.DISCORD_CLIENT_ID = 'test-client-id';
-process.env.DISCORD_CLIENT_SECRET = 'test-secret';
+process.env.DISCORD_PRESENCE_CLIENT_ID = 'test-client-id';
+process.env.DISCORD_PRESENCE_CLIENT_SECRET = 'test-secret';
+// Set deliberately: the VA bot's names must NOT be picked up, and the assertion
+// on `externalAssets` below is what proves this module never reads them.
+process.env.DISCORD_CLIENT_ID = 'the-va-bot-application';
+process.env.DISCORD_BOT_TOKEN = 'the-va-bot-token';
 
 const discordPresence = require('./discord_presence.cjs');
 
@@ -101,9 +105,14 @@ const ok = (name) => { pass += 1; console.log(`  ✓ ${name}`); };
             // Field names read verbatim by DiscordPresence.init().
             assert.strictEqual(json.enabled, true);
             assert.strictEqual(json.clientId, 'test-client-id');
-            assert.strictEqual(json.externalAssets, false, 'no bot token configured');
+            // Both of these prove the VA bot's credentials are not being read:
+            // its application id is not what we serve, and its bot token — set
+            // in this process — does not switch external assets on.
+            assert.notStrictEqual(json.clientId, 'the-va-bot-application');
+            assert.strictEqual(json.externalAssets, false, 'the VA bot token must not count as ours');
             assert.strictEqual(json.remote, true, 'remote control needs verifiable tokens');
             ok('config carries enabled, clientId, externalAssets and remote');
+            ok('the VA bot\'s DISCORD_CLIENT_ID / DISCORD_BOT_TOKEN are ignored');
         }
 
         // ── An account that has never picked anything ───────────────────────

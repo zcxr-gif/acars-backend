@@ -39,12 +39,15 @@
  * writers honest — a heartbeat never overwrites a newer pick from the phone.
  *
  * Env:
- *   DISCORD_CLIENT_ID          — application id (public; served to the client)
- *   DISCORD_CLIENT_SECRET      — required for the code→token exchange
- *   DISCORD_BOT_TOKEN          — required for external image assets
- *   DISCORD_PRESENCE_REDIRECT  — redirect URI registered on the app
- *                                (default https://inflight.info)
- *   DISCORD_PRESENCE_ENABLED   — force the master switch (0/false to disable)
+ * Env — all namespaced under DISCORD_PRESENCE_*, because the VA bot already
+ * owns the bare DISCORD_CLIENT_ID / DISCORD_BOT_TOKEN names. See clientId().
+ *
+ *   DISCORD_PRESENCE_CLIENT_ID      application id (public; served to the client)
+ *   DISCORD_PRESENCE_CLIENT_SECRET  required for the code→token exchange
+ *   DISCORD_PRESENCE_BOT_TOKEN      required for external image assets
+ *   DISCORD_PRESENCE_REDIRECT       redirect URI registered on the app
+ *                                   (default https://inflight.info)
+ *   DISCORD_PRESENCE_ENABLED        force the master switch (0/false to disable)
  */
 
 const supabase = require('./supabase.cjs');
@@ -78,9 +81,17 @@ function boolEnv(name, dflt) {
   return !['0', 'false', 'no', 'off'].includes(v);
 }
 
-function clientId() { return String(process.env.DISCORD_CLIENT_ID || '').trim(); }
-function clientSecret() { return String(process.env.DISCORD_CLIENT_SECRET || '').trim(); }
-function botToken() { return String(process.env.DISCORD_BOT_TOKEN || '').trim(); }
+// Namespaced, and deliberately with NO fallback to the bare DISCORD_* names.
+// The VA bot (database/bot.js) already owns DISCORD_BOT_TOKEN and
+// DISCORD_CLIENT_ID, and these services share env config in practice —
+// VA_BOT_FORWARD_TOKEN is set for both. A fallback would let presence quietly
+// pick up the bot's application: the card would name the wrong app, the token
+// exchange would fail `invalid_client` against a mismatched secret, and any
+// minted image would 404 under an application that never requested it. Reading
+// nothing is a better failure than reading somebody else's credentials.
+function clientId() { return String(process.env.DISCORD_PRESENCE_CLIENT_ID || '').trim(); }
+function clientSecret() { return String(process.env.DISCORD_PRESENCE_CLIENT_SECRET || '').trim(); }
+function botToken() { return String(process.env.DISCORD_PRESENCE_BOT_TOKEN || '').trim(); }
 function redirectUri() {
   return String(process.env.DISCORD_PRESENCE_REDIRECT || 'https://inflight.info').trim();
 }
