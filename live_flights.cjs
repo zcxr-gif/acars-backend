@@ -1459,6 +1459,25 @@ async function getUserStats(params) {
   }
 }
 
+// Turn a GradeConfiguration into the grade number pilots see in the app.
+//
+// `gradeDetails.gradeIndex` is an index into `gradeDetails.grades` — grades[0]
+// is "Grade 1" and grades[4] is "Grade 5" — so handing the index straight to a
+// client reports every pilot one grade too low. Read the grade's own name when
+// it is there (a renamed tier or a future sixth grade still resolves), fall
+// back to index + 1, and only then to whatever plain grade the caller supplies
+// from the POST /users stats.
+function resolveGrade(gradeDetails, fallbackGrade) {
+  const idx = Number(gradeDetails?.gradeIndex);
+  if (Number.isFinite(idx) && idx >= 0) {
+    const name = gradeDetails?.grades?.[idx]?.name;
+    const digits = typeof name === 'string' ? name.match(/\d+/) : null;
+    return digits ? Number(digits[0]) : idx + 1;
+  }
+  const fallback = Number(fallbackGrade);
+  return Number.isFinite(fallback) ? fallback : null;
+}
+
 // ⬇️ REPLACED: getUserGrade mapped exactly to apis.txt
 async function getUserGrade(userId) {
   if (!userId) throw new Error('Missing userId');
@@ -2258,12 +2277,14 @@ app.get('/api/users/:userId/stats', async (req, res) => {
       groups: userGrade.groups,
       roles: userGrade.roles,
       gradeDetails: userGrade.gradeDetails,
-      
-      // Included the calculated grade fix from earlier
-      calculatedGrade: userGrade.gradeDetails?.gradeIndex !== undefined 
-        ? userGrade.gradeDetails.gradeIndex + 1 
-        : (userGrade.gradeIndex !== undefined ? userGrade.gradeIndex + 1 : null),
-        
+
+      // `gradeIndex` is an index into `grades`, not a grade number, so both of
+      // these carry the resolved 1-5 value. `grade` is the name clients reach
+      // for first; `calculatedGrade` stays for the ones already reading it.
+      grade: resolveGrade(userGrade.gradeDetails, globalStats.grade),
+      calculatedGrade: resolveGrade(userGrade.gradeDetails, globalStats.grade),
+
+
       violationCountByLevel: userGrade.violationCountByLevel,
       totalXP: userGrade.totalXP,
       atcOperations: userGrade.atcOperations,
