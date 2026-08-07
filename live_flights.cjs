@@ -11,7 +11,7 @@ const etag = require('etag');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const { updateFlightPath, getFlightPath, updateBatch, claimFlightState } = require('./history.cjs');
+const { updateFlightPath, getFlightPath, updateBatch, getUserFlights, claimFlightState } = require('./history.cjs');
 const atcHistory = require('./atc_history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
@@ -2317,6 +2317,65 @@ app.get('/api/users/:userId/stats', async (req, res) => {
         detail: e?.message
       })
     );
+  }
+});
+
+// ⬇️ NEW ROUTE: Arrival trails for one pilot's recent flights.
+//
+// Feeds the client-side landing log. Infinite Flight's logbook reports how many
+// landings a pilot made and nothing about how they went, so the rates have to
+// come from the trails this tracker recorded itself — which means the log only
+// reaches as far back as flight_history's 48 h retention. `windowHours` in the
+// response says so explicitly; don't let a client imply a full career from it.
+//
+// Only the low-altitude portion of each trail is returned. Touchdown analysis
+// never looks at cruise, and shipping whole trails for 25 flights would be
+// megabytes of payload to throw away on arrival.
+app.get('/api/users/:userId/trails', (req, res) => {
+  const { userId } = req.params;
+  const limit = Math.max(1, Math.min(parseInt(req.query.limit || '20', 10) || 20, 50));
+  const windowHours = 48;
+
+  const cacheKey = `userTrails:${userId}:${limit}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) return res.json({ ...cached, fromCache: true });
+
+  try {
+    const sinceMs = Date.now() - windowHours * 60 * 60 * 1000;
+    const flights = getUserFlights(userId, { sinceMs, limit });
+
+    const trimmed = flights.map(f => {
+      const path = f.path || [];
+      // Keep everything within 8,000 ft of the trail's own floor: that spans
+      // every approach and rollout in the trail, however many legs it holds,
+      // while dropping the cruise. The last 20 fixes are always kept so a
+      // rollout can't be cut off by a field sitting high above the floor.
+      let minAlt = Infinity;
+      for (const p of path) if (typeof p.alt === 'number' && p.alt < minAlt) minAlt = p.alt;
+      const tailFrom = Math.max(0, path.length - 20);
+      const kept = minAlt === Infinity
+        ? path
+        : path.filter((p, i) => i >= tailFrom || (typeof p.alt === 'number' && p.alt <= minAlt + 8000));
+
+      return {
+        flightId: f.flightId,
+        callsign: f.callsign,
+        lastSeen: f.lastSeen,
+        aircraft: f.aircraft,
+        // Compact tuples — same field order the client's trail readers accept.
+        path: kept.slice(-400).map(p => ({
+          lat: p.lat, lon: p.lon, alt: p.alt, gs: p.gs, time: p.time, hdg: p.hdg || 0
+        }))
+      };
+    }).filter(f => f.path.length >= 3);
+
+    const payload = { ok: true, userId, windowHours, count: trimmed.length, flights: trimmed };
+    // Trails only change while a flight is live; a short TTL keeps a pilot
+    // report re-opening cheap without going stale on an active pilot.
+    setOnDemandCached(cacheKey, payload, 60 * 1000);
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to fetch user trails', { detail: e?.message }));
   }
 });
 

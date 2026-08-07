@@ -431,6 +431,44 @@ function getFlightsForReplay(sinceMs) {
   }));
 }
 
+/**
+ * Returns one pilot's recorded flights, newest first, with paths unpacked.
+ *
+ * Backs the landing log: Infinite Flight's own logbook says how many landings a
+ * pilot made but nothing about how any of them went, so the only way to say
+ * anything about their landings is to re-read the trails we recorded ourselves.
+ * That limits the log to the 48 h retention window — callers should say so.
+ *
+ * Served by idx_user_time (userId, lastSeen), so the ordering and the limit are
+ * both index-resolved rather than a scan-then-sort.
+ */
+function getUserFlights(userId, opts) {
+  const o = opts || {};
+  const since = Number.isFinite(o.sinceMs) ? o.sinceMs : 0;
+  const limit = Math.max(1, Math.min(Number.isFinite(o.limit) ? o.limit : 25, 100));
+  const rows = db
+    .prepare(
+      `SELECT flightId, callsign, lastSeen, path_json, aircraftId, liveryId, aircraftName, liveryName
+         FROM flight_history
+        WHERE userId = ? AND lastSeen >= ?
+        ORDER BY lastSeen DESC
+        LIMIT ?`
+    )
+    .all(String(userId), since, limit);
+  return rows.map(r => ({
+    flightId: r.flightId,
+    callsign: r.callsign,
+    lastSeen: r.lastSeen,
+    aircraft: {
+      aircraftId: r.aircraftId || null,
+      liveryId: r.liveryId || null,
+      aircraftName: r.aircraftName || null,
+      liveryName: r.liveryName || null
+    },
+    path: readPath(r.path_json)
+  }));
+}
+
 // Startup: deep clean after 5s so it doesn't block boot
 setTimeout(runDeepClean, 5000);
 
@@ -447,4 +485,4 @@ setInterval(() => {
   catch (e) { console.warn('[history] WAL checkpoint failed:', e.message); }
 }, 10 * 60 * 1000);
 
-module.exports = { updateBatch, getFlightPath, getFlightsForReplay, runDeepClean, claimFlightState };
+module.exports = { updateBatch, getFlightPath, getFlightsForReplay, getUserFlights, runDeepClean, claimFlightState };
