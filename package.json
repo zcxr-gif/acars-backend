@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node --max-old-space-size=${NODE_HEAP_MB:-700} live_flights.cjs",
-    "test": "node flight_delta.test.cjs && node path_codec.test.cjs && node archivist.test.cjs",
+    "test": "node flight_delta.test.cjs && node path_codec.test.cjs && node archivist.test.cjs && node global_playback.test.cjs",
     "bench": "node --expose-gc bench.cjs"
   },
   "dependencies": {

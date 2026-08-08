@@ -148,6 +148,81 @@ async function requireAuth(req, res, next) {
   }
 }
 
+// Like requireAuth, but a missing or bad token is not an error — it just means
+// nobody is signed in. Endpoints that serve everyone at a reduced tier use this
+// so an anonymous visitor gets the free experience instead of a 401.
+//
+// A token that is *present but unverifiable because Supabase is down* is
+// treated as anonymous too. The alternative — 503 on the whole endpoint — takes
+// the free tier down along with the paid one for a fault that has nothing to do
+// with it.
+async function optionalAuth(req, _res, next) {
+  req.userId = null;
+  const match = /^Bearer\s+(.+)$/i.exec(req.get('authorization') || '');
+  if (!match) return next();
+  try {
+    req.userId = await verifyAccessToken(match[1].trim());
+  } catch (e) {
+    console.warn('[supabase] Optional token verification failed (continuing anonymously):', e.message);
+  }
+  next();
+}
+
+/* =========================
+ * Pro entitlement (profiles.is_pro)
+ * ========================= */
+
+// `profiles.is_pro` is the entitlement the whole app gates on, and it is only
+// ever written server-side after Stripe has been consulted (see the tracker's
+// proAccess.js). Reading it here with the service-role key means a client
+// cannot talk its way into a Pro-sized playback window by lying about its tier:
+// the window is derived from what the row says, not from what the request says.
+const proCache = new Map(); // userId -> { isPro, expiresAt }
+const PRO_CACHE_TTL_MS = 5 * 60 * 1000;
+const PRO_CACHE_MAX = 5000;
+
+function cacheProStatus(userId, isPro) {
+  proCache.set(userId, { isPro, expiresAt: Date.now() + PRO_CACHE_TTL_MS });
+  if (proCache.size > PRO_CACHE_MAX) {
+    const overflow = proCache.size - PRO_CACHE_MAX;
+    let i = 0;
+    for (const k of proCache.keys()) {
+      proCache.delete(k);
+      if (++i >= overflow) break;
+    }
+  }
+}
+
+/**
+ * Is this account entitled to Pro?
+ *
+ * Fails closed on every uncertainty — no user, no service key, no row, a
+ * network error — because the failure mode of guessing "yes" is giving away
+ * the paid feature, while the failure mode of guessing "no" is a signed-in
+ * pilot briefly seeing the free window. Only the second one is recoverable.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function isProUser(userId) {
+  if (!userId || !restClient) return false;
+
+  const cached = proCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) return cached.isPro;
+  proCache.delete(userId);
+
+  try {
+    const { data } = await restClient.get('/profiles', {
+      params: { id: `eq.${userId}`, select: 'is_pro', limit: 1 },
+    });
+    const isPro = Array.isArray(data) && data[0]?.is_pro === true;
+    cacheProStatus(userId, isPro);
+    return isPro;
+  } catch (e) {
+    console.warn('[supabase] Pro entitlement lookup failed:', e.message);
+    return false;
+  }
+}
+
 /* =========================
  * Watchlist data (user_watchlist)
  * ========================= */
@@ -284,6 +359,8 @@ module.exports = {
   hasServiceKey,
   canVerifyTokens,
   requireAuth,
+  optionalAuth,
+  isProUser,
   verifyAccessToken,
   listWatchlist,
   addWatchlistEntry,
