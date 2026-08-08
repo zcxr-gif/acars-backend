@@ -11,8 +11,10 @@
  *      controller's airspace during the session window, using the recorded
  *      paths in flight_history.
  *
- * Hard limit: replay only works inside the flight-path retention window (48h),
+ * Hard limit: replay only works inside the flight-path retention window,
  * because that is the only window for which we have flight positions to show.
+ * That window is set by HISTORY_RETENTION_HOURS in history.cjs and read here
+ * so the two cannot drift apart.
  * ========================= */
 
 const Database = require('better-sqlite3');
@@ -25,8 +27,13 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'atc_history.db');
 
 // Match the flight-path retention. Replaying a session older than this is
-// pointless: the flights it contained have already been purged.
-const RETENTION_MS = 48 * 60 * 60 * 1000;
+// pointless: the flights it contained have already been purged. Interval rows
+// hold no positions, so following the longer window costs almost nothing here.
+const RETENTION_HOURS = (() => {
+  const parsed = parseInt(process.env.HISTORY_RETENTION_HOURS ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 24 * 14;
+})();
+const RETENTION_MS = RETENTION_HOURS * 60 * 60 * 1000;
 
 // Two frequency intervals from the same controller at the same airport are
 // considered one "controlling session" if the gap between them is under this.

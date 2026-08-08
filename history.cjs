@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
+const codec = require('./path_codec.cjs');
 
 // --- CONFIGURATION ---
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -12,6 +13,48 @@ const MAX_SESSIONS_PER_FLIGHT = 3;
 const SESSION_GAP_MS = 30 * 60 * 1000;
 const CRUISE_THROTTLE_MS = 120000;
 const CRUISE_ALT_FT = 20000;
+
+/* --- Retention ---
+ * Trails used to be dropped after 48 hours. That number was never about disk
+ * price; it was the only way to keep a table under control that rewrote every
+ * airborne aircraft's entire trail, as JSON, every fifteen seconds. Chunked
+ * binary storage (see path_codec.cjs and appendPoints below) cuts the bytes per
+ * point ~5x and the bytes written per poll by two orders of magnitude, so the
+ * window can now be opened up by roughly the same factor for the same disk.
+ *
+ * Two limits apply, and the tighter one wins:
+ *
+ *   HISTORY_RETENTION_HOURS  age ceiling. Default 14 days.
+ *   HISTORY_MAX_DB_MB        size ceiling. When the database exceeds it the
+ *                            oldest flights are dropped until it fits again.
+ *
+ * The size ceiling is the important one operationally: it means an unusually
+ * busy week degrades into a shorter window instead of filling the volume. Set
+ * HISTORY_MAX_DB_MB=0 to disable it and rely on age alone.
+ */
+const intEnv = (name, dflt) => {
+  const parsed = parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : dflt;
+};
+
+const RETENTION_HOURS = intEnv('HISTORY_RETENTION_HOURS', 24 * 14);
+const RETENTION_MS = RETENTION_HOURS * 60 * 60 * 1000;
+const MAX_DB_BYTES = intEnv('HISTORY_MAX_DB_MB', 4096) * 1024 * 1024;
+
+/* --- Chunking ---
+ * Points accumulate in a small hot tail on the flight's own row, which is the
+ * only thing rewritten on a normal poll. Once the tail reaches CHUNK_POINTS it
+ * is sealed into an immutable row in flight_path_chunks and the tail resets.
+ *
+ * Sealed chunks are never updated again — trimming deletes whole chunk rows —
+ * so the expensive part of the old design (rewriting the entire trail to append
+ * one point) simply does not happen any more.
+ *
+ * 48 points is a little over two minutes of climb/descent sampling, or ~90
+ * minutes of throttled cruise. It keeps the per-poll tail rewrite around half a
+ * kilobyte while holding each chunk's absolute-point overhead under 3%.
+ */
+const CHUNK_POINTS = intEnv('HISTORY_CHUNK_POINTS', 48);
 
 // Ensure the directory exists (Critical for Volumes!)
 if (!fs.existsSync(DATA_DIR)) {
@@ -58,6 +101,27 @@ db.prepare(`
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_user_time ON flight_history (userId, lastSeen)`).run();
 // Supports the ATC-replay candidate query, which filters purely on lastSeen.
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_last_seen ON flight_history (lastSeen)`).run();
+
+/* Sealed trail chunks.
+ *
+ * These live in their own table rather than a column on flight_history for one
+ * decisive reason: SQLite rewrites a row's entire record on any UPDATE. Had the
+ * sealed trail stayed a column, touching the hot tail every fifteen seconds
+ * would have rewritten the whole trail alongside it and the chunking would have
+ * bought nothing at all. As a separate table, sealing is an INSERT of one small
+ * row and existing chunks are never written again.
+ *
+ * `points` is stored so trimming can count a chunk without decoding it.
+ */
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS flight_path_chunks (
+    flightId TEXT NOT NULL,
+    seq      INTEGER NOT NULL,
+    points   INTEGER NOT NULL,
+    chunk    BLOB NOT NULL,
+    PRIMARY KEY (flightId, seq)
+  )
+`).run();
 
 // Dedupe ledger for VA takeoff/landing events already pushed to the other
 // backend. One row per (flightId, event) so we never announce the same state
@@ -107,6 +171,24 @@ function claimFlightState(flightId, event) {
       console.log(`[history] Migrated flight_history: added column ${col}`);
     }
   }
+
+  // Chunked-storage columns. `path_json` is left in place and kept readable —
+  // rows written by the old build are migrated lazily (on their next poll) or
+  // by the background sweep, never in one blocking pass at boot.
+  const chunkCols = {
+    tail_blob: 'BLOB',       // hot buffer of unsealed points
+    last_point: 'TEXT',      // last recorded point, so a just-sealed trail can
+                             // still answer shouldSkipPoint without a decode
+    point_count: 'INTEGER',  // chunks + tail, maintained incrementally
+    session_breaks: 'INTEGER',
+    chunk_seq: 'INTEGER'     // next sequence number to seal at
+  };
+  for (const [col, type] of Object.entries(chunkCols)) {
+    if (!existing.has(col)) {
+      db.prepare(`ALTER TABLE flight_history ADD COLUMN ${col} ${type}`).run();
+      console.log(`[history] Migrated flight_history: added column ${col}`);
+    }
+  }
 })();
 
 /* =========================
@@ -141,9 +223,10 @@ function unpackPoint(a) {
 
 
 /**
- * Reads a path_json string and returns it as an array of {lat,lon,alt,gs,time}.
- * Transparently handles both the new compact format (array of arrays) and
- * the legacy object format that may still be on disk pre-migration.
+ * Reads a legacy path_json string and returns it as an array of
+ * {lat,lon,alt,gs,time}. Handles both the compact format (array of arrays) and
+ * the older object format. Trails are no longer written this way — this exists
+ * so rows put down by previous builds stay readable until they are migrated.
  */
 function readPath(json) {
   if (!json) return [];
@@ -156,17 +239,98 @@ function readPath(json) {
   return parsed;
 }
 
-function writePath(pointsArr) {
-  return JSON.stringify(pointsArr.map(packPoint));
+/* =========================
+ * Chunked trail storage
+ * ========================= */
+
+const selectChunksStmt = db.prepare(
+  'SELECT chunk FROM flight_path_chunks WHERE flightId = ? ORDER BY seq'
+);
+
+/**
+ * Rebuilds a full trail: every sealed chunk in order, then the unsealed tail.
+ * `row` must carry tail_blob and path_json.
+ */
+function assemblePath(flightId, row) {
+  // A row still in the legacy format has no chunks yet.
+  if (row && row.path_json) return readPath(row.path_json);
+
+  const points = [];
+  for (const r of selectChunksStmt.all(flightId)) {
+    const decoded = codec.decodeBlob(r.chunk);
+    for (const p of decoded) points.push(p);
+  }
+  if (row && row.tail_blob && row.tail_blob.length) {
+    for (const p of codec.decodeBlob(row.tail_blob)) points.push(p);
+  }
+  return points;
+}
+
+function packLastPoint(p) {
+  return p ? JSON.stringify(packPoint(p)) : null;
+}
+
+function unpackLastPoint(text) {
+  if (!text) return null;
+  try {
+    const arr = JSON.parse(text);
+    return Array.isArray(arr) ? unpackPoint(arr) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Wipe flights not updated in the last 48 hours.
+ * Total bytes the history database occupies, main file plus WAL.
+ */
+function databaseBytes() {
+  let total = 0;
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { total += fs.statSync(DB_PATH + suffix).size; } catch { /* absent */ }
+  }
+  return total;
+}
+
+const deleteChunksForStmt = db.prepare(
+  'DELETE FROM flight_path_chunks WHERE flightId IN (SELECT flightId FROM flight_history WHERE lastSeen < ?)'
+);
+
+/**
+ * Drops flights past the age ceiling, then — if the database is still over its
+ * size ceiling — drops the oldest flights until it fits.
+ *
+ * Chunk rows are removed before their parent row, so the subquery that finds
+ * them still resolves. Nothing here decodes a trail.
  */
 function purgeOldData() {
-  const twoDaysAgo = Date.now() - (48 * 60 * 60 * 1000);
-  db.prepare('DELETE FROM flight_history WHERE lastSeen < ?').run(twoDaysAgo);
-  db.prepare('DELETE FROM va_sent_events WHERE sentAt < ?').run(twoDaysAgo);
+  const cutoff = Date.now() - RETENTION_MS;
+  deleteChunksForStmt.run(cutoff);
+  db.prepare('DELETE FROM flight_history WHERE lastSeen < ?').run(cutoff);
+  db.prepare('DELETE FROM va_sent_events WHERE sentAt < ?').run(Date.now() - (48 * 60 * 60 * 1000));
+
+  if (!MAX_DB_BYTES) return;
+
+  // Size ceiling. Walk forward from the oldest flights in slices, re-measuring
+  // as we go, so a quiet database never pays for a scan it doesn't need.
+  let guard = 0;
+  while (databaseBytes() > MAX_DB_BYTES && guard++ < 200) {
+    const slice = db
+      .prepare('SELECT lastSeen FROM flight_history ORDER BY lastSeen ASC LIMIT 1 OFFSET 2000')
+      .get();
+    // Fewer than 2000 rows left and still over budget — something other than
+    // trail volume is responsible, so stop rather than empty the table.
+    if (!slice) break;
+
+    deleteChunksForStmt.run(slice.lastSeen);
+    const removed = db.prepare('DELETE FROM flight_history WHERE lastSeen < ?').run(slice.lastSeen).changes;
+    if (!removed) break;
+
+    // Space is only actually reclaimed once the WAL folds back into the main
+    // file, and databaseBytes() counts both — checkpoint so the next
+    // measurement reflects the delete.
+    try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch { /* non-fatal */ }
+    console.log(`[history] Over size ceiling — dropped ${removed} oldest flights.`);
+  }
 }
 
 /**
@@ -248,102 +412,193 @@ function trimFlightSessions(pathArray, maxSessions = MAX_SESSIONS_PER_FLIGHT, se
   return pathArray;
 }
 
+const insertChunkStmt = db.prepare(
+  'INSERT OR REPLACE INTO flight_path_chunks (flightId, seq, points, chunk) VALUES (?, ?, ?, ?)'
+);
+const deleteFlightChunksStmt = db.prepare('DELETE FROM flight_path_chunks WHERE flightId = ?');
+
 /**
- * Retroactive Database Cleaner
- * Sweeps the entire DB to compress existing bloated arrays and migrate
- * legacy object-format paths to the new compact array format.
+ * Lays a whole trail down as chunks plus a leftover tail, replacing whatever
+ * was stored for the flight. Returns the next free sequence number and the
+ * unsealed remainder for the caller to put on the flight's row.
+ *
+ * This is the expensive path. It runs on migration and on a trim — never on an
+ * ordinary poll.
  */
-function runDeepClean() {
-  console.log('[history] 🧹 Starting deep clean of existing database...');
+function rewriteTrail(flightId, points) {
+  deleteFlightChunksStmt.run(flightId);
 
-  // Compress historical flight paths + migrate format
-  const allFlights = db.prepare('SELECT flightId, path_json FROM flight_history').all();
-  let updatedPaths = 0;
-  let migratedPaths = 0;
-  const updateStmt = db.prepare('UPDATE flight_history SET path_json = ? WHERE flightId = ?');
+  let seq = 0;
+  let i = 0;
+  for (; i + CHUNK_POINTS <= points.length; i += CHUNK_POINTS) {
+    const slice = points.slice(i, i + CHUNK_POINTS);
+    insertChunkStmt.run(flightId, seq++, slice.length, codec.encodeAll(slice));
+  }
 
-  const cleanBatch = db.transaction((flights) => {
-    for (const flight of flights) {
-      if (!flight.path_json) continue;
-
-      let raw;
-      try { raw = JSON.parse(flight.path_json); } catch { continue; }
-      if (!Array.isArray(raw) || raw.length === 0) continue;
-
-      const wasLegacy = !Array.isArray(raw[0]); // object-format detection
-      const pathArray = wasLegacy ? raw : raw.map(unpackPoint);
-
-      if (pathArray.length < 2) {
-        // Still migrate single-point legacy entries
-        if (wasLegacy) {
-          updateStmt.run(writePath(pathArray), flight.flightId);
-          migratedPaths++;
-        }
-        continue;
-      }
-
-      // Strip old stationary / over-sampled cruise bloat
-      let cleanedPath = [pathArray[0]];
-      for (let i = 1; i < pathArray.length; i++) {
-        const p1 = cleanedPath[cleanedPath.length - 1];
-        const p2 = pathArray[i];
-
-        if (p2.gs < 2 && p1.gs < 2) continue;
-        if (p2.alt >= CRUISE_ALT_FT && (p2.time - p1.time) < CRUISE_THROTTLE_MS) continue;
-
-        cleanedPath.push(p2);
-      }
-
-      cleanedPath = trimFlightSessions(cleanedPath);
-
-      // Write back if we compressed OR if we still need to migrate the format
-      if (cleanedPath.length < pathArray.length || wasLegacy) {
-        updateStmt.run(writePath(cleanedPath), flight.flightId);
-        if (cleanedPath.length < pathArray.length) updatedPaths++;
-        if (wasLegacy) migratedPaths++;
-      }
-    }
-  });
-
-  cleanBatch(allFlights);
-  console.log(
-    `[history] ✨ Deep clean complete! Compressed ${updatedPaths} paths, migrated ${migratedPaths} legacy paths to compact format.`
-  );
+  return { chunkSeq: seq, tail: points.slice(i) };
 }
 
 /**
+ * Migrates rows still holding a legacy `path_json` trail into chunked storage.
+ *
+ * The old deep clean read every row in the table in one go, which was tolerable
+ * at 48 hours and would not be at two weeks. This one takes a bounded slice per
+ * pass and stops as soon as no legacy rows remain — after the fleet has cycled
+ * through once it is a single indexed lookup that finds nothing.
+ */
+function runDeepClean(batchSize = 500) {
+  const legacy = db
+    .prepare('SELECT flightId, path_json FROM flight_history WHERE path_json IS NOT NULL LIMIT ?')
+    .all(batchSize);
+
+  if (legacy.length === 0) return 0;
+
+  const clearJsonStmt = db.prepare(
+    'UPDATE flight_history SET path_json = NULL, tail_blob = ?, last_point = ?, point_count = ?, session_breaks = ?, chunk_seq = ? WHERE flightId = ?'
+  );
+
+  let migrated = 0;
+  const migrateBatch = db.transaction((rows) => {
+    for (const row of rows) {
+      const points = trimFlightSessions(readPath(row.path_json));
+      const { chunkSeq, tail } = rewriteTrail(row.flightId, points);
+      clearJsonStmt.run(
+        tail.length ? codec.encodeAll(tail) : null,
+        packLastPoint(points[points.length - 1]),
+        points.length,
+        countSessionBreaks(points),
+        chunkSeq,
+        row.flightId
+      );
+      migrated++;
+    }
+  });
+
+  migrateBatch(legacy);
+  console.log(`[history] Migrated ${migrated} legacy trails to chunked storage.`);
+
+  // More waiting? Come back shortly rather than doing it all at once.
+  if (legacy.length === batchSize) setTimeout(() => runDeepClean(batchSize), 5000);
+  return migrated;
+}
+
+/** Counts session boundaries in an assembled trail. */
+function countSessionBreaks(pathArray) {
+  let breaks = 0;
+  for (let i = 1; i < pathArray.length; i++) {
+    const p1 = pathArray[i - 1];
+    const p2 = pathArray[i];
+    if ((p2.time - p1.time) > SESSION_GAP_MS || getDistanceNM(p1.lat, p1.lon, p2.lat, p2.lon) > 50) {
+      breaks++;
+    }
+  }
+  return breaks;
+}
+
+/**
+ * Applies the size and session limits to a flight that has just sealed a chunk.
+ *
+ * The cheap case — too many points — drops whole chunk rows off the front,
+ * which needs no decoding at all. Only a flight that has accumulated more
+ * sessions than we keep gets the full decode-trim-rewrite, and that needs three
+ * separate departures logged under one flightId to trigger.
+ *
+ * Limits are therefore enforced at chunk granularity: a trail can run up to
+ * CHUNK_POINTS over MAX_POINTS_PER_FLIGHT before the next seal pulls it back.
+ * That slack is the entire point — it is what keeps the common poll O(1).
+ */
+function enforceTrailLimits(flightId, state) {
+  if (state.sessionBreaks >= MAX_SESSIONS_PER_FLIGHT) {
+    const trimmed = trimFlightSessions(assemblePath(flightId, { tail_blob: null }));
+    const { chunkSeq, tail } = rewriteTrail(flightId, trimmed);
+    state.chunkSeq = chunkSeq;
+    state.tail = tail;
+    state.pointCount = trimmed.length;
+    state.sessionBreaks = countSessionBreaks(trimmed);
+    return;
+  }
+
+  if (state.pointCount <= MAX_POINTS_PER_FLIGHT) return;
+
+  const chunks = db
+    .prepare('SELECT seq, points FROM flight_path_chunks WHERE flightId = ? ORDER BY seq')
+    .all(flightId);
+  const dropStmt = db.prepare('DELETE FROM flight_path_chunks WHERE flightId = ? AND seq = ?');
+
+  for (const c of chunks) {
+    if (state.pointCount - c.points < MAX_POINTS_PER_FLIGHT) break;
+    dropStmt.run(flightId, c.seq);
+    state.pointCount -= c.points;
+  }
+}
+
+const selectFlightStateStmt = db.prepare(
+  'SELECT path_json, tail_blob, last_point, point_count, session_breaks, chunk_seq FROM flight_history WHERE flightId = ?'
+);
+
+const upsertFlightStmt = db.prepare(`
+  INSERT INTO flight_history (userId, flightId, callsign, lastSeen, path_json, aircraftId, liveryId, aircraftName, liveryName, tail_blob, last_point, point_count, session_breaks, chunk_seq)
+  VALUES (@userId, @flightId, @callsign, @lastSeen, NULL, @aircraftId, @liveryId, @aircraftName, @liveryName, @tail_blob, @last_point, @point_count, @session_breaks, @chunk_seq)
+  ON CONFLICT(flightId) DO UPDATE SET
+    lastSeen = excluded.lastSeen,
+    path_json = NULL,
+    aircraftId = excluded.aircraftId,
+    liveryId = excluded.liveryId,
+    aircraftName = excluded.aircraftName,
+    liveryName = excluded.liveryName,
+    tail_blob = excluded.tail_blob,
+    last_point = excluded.last_point,
+    point_count = excluded.point_count,
+    session_breaks = excluded.session_breaks,
+    chunk_seq = excluded.chunk_seq
+`);
+
+const touchLastSeenStmt = db.prepare('UPDATE flight_history SET lastSeen = ? WHERE flightId = ?');
+
+/**
  * Optimized Batch Update
+ *
+ * One poll appends at most one point per flight. The old implementation read,
+ * parsed, re-serialised and rewrote that flight's entire trail to do it, so the
+ * cost of recording a long-haul grew with its own length — the dominant write
+ * cost in this process by a wide margin.
+ *
+ * Now the point lands in a small tail that is the only thing rewritten, and the
+ * trail proper is touched once every CHUNK_POINTS polls by a single INSERT.
  */
 function updateBatch(flights) {
   const now = Date.now();
 
-  purgeOldData();
-
-  const upsertStmt = db.prepare(`
-    INSERT INTO flight_history (userId, flightId, callsign, lastSeen, path_json, aircraftId, liveryId, aircraftName, liveryName)
-    VALUES (@userId, @flightId, @callsign, @lastSeen, @path_json, @aircraftId, @liveryId, @aircraftName, @liveryName)
-    ON CONFLICT(flightId) DO UPDATE SET
-      lastSeen = excluded.lastSeen,
-      path_json = excluded.path_json,
-      aircraftId = excluded.aircraftId,
-      liveryId = excluded.liveryId,
-      aircraftName = excluded.aircraftName,
-      liveryName = excluded.liveryName
-  `);
-
-  const selectPathStmt = db.prepare('SELECT path_json FROM flight_history WHERE flightId = ?');
-  const touchLastSeenStmt = db.prepare('UPDATE flight_history SET lastSeen = ? WHERE flightId = ?');
-
   const runBatch = db.transaction((flightList) => {
     for (const flight of flightList) {
-      const existing = selectPathStmt.get(flight.flightId);
-      let flightPath = [];
+      const row = selectFlightStateStmt.get(flight.flightId);
 
-      if (existing?.path_json) {
-        flightPath = readPath(existing.path_json);
+      // A row written by the previous build still carries its trail as JSON.
+      // Convert it here rather than waiting for the sweep — this flight is
+      // active, so it would only be rewritten again in a moment anyway.
+      let state;
+      if (row && row.path_json) {
+        const legacy = trimFlightSessions(readPath(row.path_json));
+        const { chunkSeq, tail } = rewriteTrail(flight.flightId, legacy);
+        state = {
+          tail,
+          chunkSeq,
+          pointCount: legacy.length,
+          sessionBreaks: countSessionBreaks(legacy),
+          lastPoint: legacy[legacy.length - 1] || null
+        };
+      } else if (row) {
+        const tail = row.tail_blob && row.tail_blob.length ? codec.decodeBlob(row.tail_blob) : [];
+        state = {
+          tail,
+          chunkSeq: row.chunk_seq || 0,
+          pointCount: row.point_count || 0,
+          sessionBreaks: row.session_breaks || 0,
+          lastPoint: unpackLastPoint(row.last_point) || tail[tail.length - 1] || null
+        };
+      } else {
+        state = { tail: [], chunkSeq: 0, pointCount: 0, sessionBreaks: 0, lastPoint: null };
       }
-
-      const lastPoint = flightPath[flightPath.length - 1];
 
       // Stamp the point with the aircraft's actual report time, not the server
       // poll time. This is the same value the live socket broadcasts
@@ -353,33 +608,54 @@ function updateBatch(flights) {
       const reportMs = flight.position.lastReportMs;
       const pointTime = (typeof reportMs === 'number' && reportMs > 0) ? reportMs : now;
 
-      if (shouldSkipPoint(flight, lastPoint, pointTime)) {
+      if (shouldSkipPoint(flight, state.lastPoint, pointTime)) {
         touchLastSeenStmt.run(now, flight.flightId);
         continue;
       }
 
-      flightPath.push({
+      const point = {
         lat: flight.position.lat,
         lon: flight.position.lon,
         alt: flight.position.alt_ft,
         gs: flight.position.gs_kt,
         time: pointTime,
         hdg: flight.position.heading_deg
-      });
+      };
 
-      flightPath = trimFlightSessions(flightPath);
+      // Session boundaries are spotted as they happen — the same test the old
+      // full-array walk applied, just against the one point that can create a
+      // new boundary instead of re-walking everything recorded so far.
+      if (state.lastPoint) {
+        const isTimeGap = (point.time - state.lastPoint.time) > SESSION_GAP_MS;
+        const isTeleport = getDistanceNM(state.lastPoint.lat, state.lastPoint.lon, point.lat, point.lon) > 50;
+        if (isTimeGap || isTeleport) state.sessionBreaks++;
+      }
+
+      state.tail.push(point);
+      state.pointCount++;
+      state.lastPoint = point;
+
+      if (state.tail.length >= CHUNK_POINTS) {
+        insertChunkStmt.run(flight.flightId, state.chunkSeq++, state.tail.length, codec.encodeAll(state.tail));
+        state.tail = [];
+        enforceTrailLimits(flight.flightId, state);
+      }
 
       const ac = flight.aircraft || {};
-      upsertStmt.run({
+      upsertFlightStmt.run({
         userId: flight.userId,
         flightId: flight.flightId,
         callsign: flight.callsign,
         lastSeen: now,
-        path_json: writePath(flightPath),
         aircraftId: ac.aircraftId || null,
         liveryId: ac.liveryId || null,
         aircraftName: ac.aircraftName || null,
-        liveryName: ac.liveryName || null
+        liveryName: ac.liveryName || null,
+        tail_blob: state.tail.length ? codec.encodeAll(state.tail) : null,
+        last_point: packLastPoint(state.lastPoint),
+        point_count: state.pointCount,
+        session_breaks: state.sessionBreaks,
+        chunk_seq: state.chunkSeq
       });
     }
   });
@@ -397,9 +673,11 @@ function updateBatch(flights) {
  * tip can never lead the live position the client is currently drawing.
  */
 async function getFlightPath(flightId, untilMs) {
-  const row = db.prepare('SELECT path_json FROM flight_history WHERE flightId = ?').get(flightId);
+  const row = db
+    .prepare('SELECT path_json, tail_blob FROM flight_history WHERE flightId = ?')
+    .get(flightId);
   if (!row) return [];
-  const path = readPath(row.path_json);
+  const path = assemblePath(flightId, row);
   if (typeof untilMs === 'number' && Number.isFinite(untilMs)) {
     return path.filter(p => p.time <= untilMs);
   }
@@ -415,29 +693,78 @@ async function getFlightPath(flightId, untilMs) {
  */
 function getFlightsForReplay(sinceMs) {
   const rows = db
-    .prepare('SELECT userId, flightId, callsign, path_json, aircraftId, liveryId, aircraftName, liveryName FROM flight_history WHERE lastSeen >= ?')
+    .prepare('SELECT userId, flightId, callsign, path_json, tail_blob, aircraftId, liveryId, aircraftName, liveryName FROM flight_history WHERE lastSeen >= ?')
     .all(sinceMs);
-  return rows.map(r => ({
-    userId: r.userId,
-    flightId: r.flightId,
-    callsign: r.callsign,
-    aircraft: {
-      aircraftId: r.aircraftId || null,
-      liveryId: r.liveryId || null,
-      aircraftName: r.aircraftName || null,
-      liveryName: r.liveryName || null
-    },
-    path: readPath(r.path_json)
-  }));
+
+  // Pull every chunk for the whole window in one indexed pass and group it by
+  // flight, rather than issuing a query per candidate. This runs over the full
+  // replay window, so an N+1 here would be felt.
+  const chunksByFlight = new Map();
+  const chunkRows = db
+    .prepare(`
+      SELECT c.flightId, c.chunk
+      FROM flight_path_chunks c
+      JOIN flight_history f ON f.flightId = c.flightId
+      WHERE f.lastSeen >= ?
+      ORDER BY c.flightId, c.seq
+    `)
+    .all(sinceMs);
+
+  for (const r of chunkRows) {
+    let list = chunksByFlight.get(r.flightId);
+    if (!list) chunksByFlight.set(r.flightId, (list = []));
+    list.push(r.chunk);
+  }
+
+  return rows.map(r => {
+    let pathPoints;
+    if (r.path_json) {
+      // Not yet migrated — the sweep will get to it.
+      pathPoints = readPath(r.path_json);
+    } else {
+      pathPoints = [];
+      for (const chunk of chunksByFlight.get(r.flightId) || []) {
+        for (const p of codec.decodeBlob(chunk)) pathPoints.push(p);
+      }
+      if (r.tail_blob && r.tail_blob.length) {
+        for (const p of codec.decodeBlob(r.tail_blob)) pathPoints.push(p);
+      }
+    }
+
+    return {
+      userId: r.userId,
+      flightId: r.flightId,
+      callsign: r.callsign,
+      aircraft: {
+        aircraftId: r.aircraftId || null,
+        liveryId: r.liveryId || null,
+        aircraftName: r.aircraftName || null,
+        liveryName: r.liveryName || null
+      },
+      path: pathPoints
+    };
+  });
 }
 
-// Startup: deep clean after 5s so it doesn't block boot
-setTimeout(runDeepClean, 5000);
+console.log(
+  `[history] Retention: ${RETENTION_HOURS}h` +
+  (MAX_DB_BYTES ? `, capped at ${Math.round(MAX_DB_BYTES / (1024 * 1024))} MB` : ', uncapped') +
+  `, sealing every ${CHUNK_POINTS} points.`
+);
 
-// Periodic maintenance: purge flights older than 48h every hour,
-// and compress paths once a day.
+// Startup: migrate legacy trails after 5s so it doesn't block boot. Each pass
+// is bounded and re-arms itself while work remains. purgeOldData used to run on
+// every batch, which meant a restart always swept immediately — keep that.
+setTimeout(() => {
+  try { purgeOldData(); } catch (e) { console.warn('[history] Startup purge failed:', e.message); }
+  runDeepClean();
+}, 5000);
+
+// Periodic maintenance. purgeOldData no longer runs on every poll — it is a
+// scan, and doing it sixty times a minute for a window measured in weeks was
+// pure overhead. Once trails are migrated the hourly sweep finds nothing.
 setInterval(purgeOldData, 60 * 60 * 1000);
-setInterval(runDeepClean, 24 * 60 * 60 * 1000);
+setInterval(() => runDeepClean(), 6 * 60 * 60 * 1000);
 
 // With synchronous=OFF and a steady write stream the WAL file (and the memory
 // mapping behind it) keeps growing until a checkpoint reclaims it. Force a
@@ -447,4 +774,14 @@ setInterval(() => {
   catch (e) { console.warn('[history] WAL checkpoint failed:', e.message); }
 }, 10 * 60 * 1000);
 
-module.exports = { updateBatch, getFlightPath, getFlightsForReplay, runDeepClean, claimFlightState };
+module.exports = {
+  updateBatch,
+  getFlightPath,
+  getFlightsForReplay,
+  runDeepClean,
+  claimFlightState,
+  purgeOldData,
+  // Exposed for path_codec.test.cjs, which asserts against the stored shape
+  // (chunk rows, hot-tail size) and not just the decoded trail.
+  _db: db
+};
