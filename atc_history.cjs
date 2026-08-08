@@ -11,22 +11,29 @@
  *      controller's airspace during the session window, using the recorded
  *      paths in flight_history.
  *
- * Hard limit: replay only works inside the flight-path retention window (48h),
+ * Hard limit: replay only works inside the flight-path retention window,
  * because that is the only window for which we have flight positions to show.
+ * That window is set by HISTORY_RETENTION_HOURS in history.cjs and read here
+ * so the two cannot drift apart.
  * ========================= */
 
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
-const { getFlightsForReplay } = require('./history.cjs');
+const { forEachFlightForReplay } = require('./history.cjs');
 
 // --- CONFIGURATION ---
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'atc_history.db');
 
 // Match the flight-path retention. Replaying a session older than this is
-// pointless: the flights it contained have already been purged.
-const RETENTION_MS = 48 * 60 * 60 * 1000;
+// pointless: the flights it contained have already been purged. Interval rows
+// hold no positions, so following the longer window costs almost nothing here.
+const RETENTION_HOURS = (() => {
+  const parsed = parseInt(process.env.HISTORY_RETENTION_HOURS ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 24 * 14;
+})();
+const RETENTION_MS = RETENTION_HOURS * 60 * 60 * 1000;
 
 // Two frequency intervals from the same controller at the same airport are
 // considered one "controlling session" if the gap between them is under this.
@@ -370,9 +377,11 @@ function getReplay(key) {
 
   const flights = [];
   if (hasFacility) {
-    const candidates = getFlightsForReplay(winStart);
-    for (const f of candidates) {
-      if (!Array.isArray(f.path) || f.path.length === 0) continue;
+    // Streamed rather than collected: only the segments that were actually
+    // inside the airspace are kept, so a two-week retention window costs one
+    // decoded trail at a time instead of the whole window at once.
+    forEachFlightForReplay(winStart, winEnd, (f) => {
+      if (!Array.isArray(f.path) || f.path.length === 0) return;
 
       let closestNm = Infinity;
       const seg = [];
@@ -384,7 +393,7 @@ function getReplay(key) {
           if (d < closestNm) closestNm = d;
         }
       }
-      if (seg.length === 0) continue;
+      if (seg.length === 0) return;
 
       flights.push({
         flightId: f.flightId,
@@ -395,7 +404,7 @@ function getReplay(key) {
         atAirport: closestNm <= AT_AIRPORT_NM,
         path: seg
       });
-    }
+    });
     flights.sort((a, b) => a.closestNm - b.closestNm);
   }
 

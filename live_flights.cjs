@@ -11,7 +11,8 @@ const etag = require('etag');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const { updateFlightPath, getFlightPath, updateBatch, claimFlightState } = require('./history.cjs');
+const { getFlightPath, updateBatch, claimFlightState } = require('./history.cjs');
+const archivist = require('./archivist.cjs');
 const atcHistory = require('./atc_history.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
@@ -2945,6 +2946,10 @@ httpServer.listen(PORT, () => {
   // Updated logs to use the new constants
   console.log(`📡 Flight Polling: ${ACTIVE_POLL_MS/1000}s (active) / ${IDLE_POLL_MS/1000}s (idle)`);
   console.log(`📡 Secondary Polling: ${SECONDARY_ACTIVE_MS/1000}s (active) / ${SECONDARY_IDLE_MS/1000}s (idle)`);
+
+  // Promote finished flights into the permanent replay archive. The trail
+  // window is a rolling one; this is what survives it.
+  archivist.start();
 
   // Start the Telemetry Snapshotter (Runs every 15 minutes)
   const FIFTEEN_MINUTES = 15 * 60 * 1000;
