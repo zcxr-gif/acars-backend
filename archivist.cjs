@@ -126,10 +126,16 @@ function findCandidates(now = Date.now()) {
     .all(now - GRACE_MS, now - EFFECTIVE_MAX_AGE_MS, BATCH);
 }
 
+const UPLOAD_TIMEOUT_MS = intEnv('ARCHIVE_UPLOAD_TIMEOUT_MS', 30000);
+
 async function uploadTrail(row, path) {
   const res = await fetch(`${ARCHIVE_BACKEND_URL}/api/trails`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    // A hung request would otherwise hold the sweep open indefinitely, and with
+    // it the trail it is carrying. Timing out releases the claim and retries on
+    // the next pass, which is what should happen anyway.
+    signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
     body: JSON.stringify({
       userId: row.userId,
       flightId: row.flightId,
@@ -149,9 +155,28 @@ async function uploadTrail(row, path) {
  * One pass. Returns a small summary so the caller (and the tests) can see what
  * happened without reading the logs.
  */
+// A sweep uploads serially, so a slow or timing-out archive can take longer
+// than the interval between sweeps. Without this the timer would stack passes
+// on top of each other, each re-reading the same candidates and holding another
+// trail in memory while it waited.
+let sweeping = false;
+
 async function sweepOnce(now = Date.now()) {
-  const result = { considered: 0, archived: 0, skipped: 0, failed: 0 };
+  const result = { considered: 0, archived: 0, skipped: 0, failed: 0, busy: false };
   if (!ENABLED) return result;
+  if (sweeping) {
+    result.busy = true;
+    return result;
+  }
+  sweeping = true;
+  try {
+    return await runSweep(now, result);
+  } finally {
+    sweeping = false;
+  }
+}
+
+async function runSweep(now, result) {
 
   let candidates;
   try {

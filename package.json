@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node live_flights.cjs",
-    "test": "node flight_delta.test.cjs && node path_codec.test.cjs && node archivist.test.cjs"
+    "test": "node flight_delta.test.cjs && node path_codec.test.cjs && node archivist.test.cjs",
+    "bench": "node --expose-gc bench.cjs"
   },
   "dependencies": {
     "axios": "^1.12.2",
