@@ -157,6 +157,27 @@ function claimFlightState(flightId, event) {
   }
 }
 
+const releaseEventStmt = db.prepare(
+  `DELETE FROM va_sent_events WHERE flightId = ? AND event = ?`
+);
+
+/**
+ * Gives a claim back, so the work it guarded can be retried.
+ *
+ * Announcing a takeoff never needed this — a send either happened or it didn't.
+ * Archiving does: it claims before uploading, and an upload that fails to a
+ * network blip must not cost the pilot their replay permanently.
+ */
+function releaseFlightState(flightId, event) {
+  if (!flightId || !event) return false;
+  try {
+    return releaseEventStmt.run(String(flightId), String(event)).changes > 0;
+  } catch (e) {
+    console.warn('[history] releaseFlightState failed:', e.message);
+    return false;
+  }
+}
+
 // Migration: add the aircraft/livery columns to databases created before they
 // existed. CREATE TABLE IF NOT EXISTS won't touch an existing table, so we add
 // each missing column explicitly. Plane type + livery are constant for the life
@@ -780,6 +801,7 @@ module.exports = {
   getFlightsForReplay,
   runDeepClean,
   claimFlightState,
+  releaseFlightState,
   purgeOldData,
   // Exposed for path_codec.test.cjs, which asserts against the stored shape
   // (chunk rows, hot-tail size) and not just the decoded trail.
