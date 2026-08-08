@@ -214,7 +214,17 @@ function releaseFlightState(flightId, event) {
     // When the flight was first recorded. Without it a replay window can only
     // be expressed as "seen since X", which selects every flight from X to now
     // — fine over 48 hours, ruinous over two weeks.
-    firstSeen: 'INTEGER'
+    firstSeen: 'INTEGER',
+    // Which Infinite Flight server the flight was recorded on. Global playback
+    // replays one server at a time — Expert and Casual traffic drawn on the
+    // same map is not a picture of anything that ever happened. NULL on rows
+    // written before this column existed; those are treated as "unknown server"
+    // and only appear when no server filter is asked for.
+    sessionId: 'TEXT',
+    // The pilot's display name at the time of recording, so a replayed contact
+    // can be identified without a second lookup against the live API (which
+    // cannot answer for a flight that ended a week ago).
+    username: 'TEXT'
   };
   for (const [col, type] of Object.entries(chunkCols)) {
     if (!existing.has(col)) {
@@ -230,6 +240,15 @@ function releaseFlightState(flightId, event) {
     `CREATE INDEX IF NOT EXISTS idx_replay_window ON flight_history (lastSeen, firstSeen)`
   ).run();
 })();
+
+/* =========================
+ * Retention, published
+ * =========================
+ * Global playback cannot offer a window the recorder has already purged, so
+ * the retention ceiling is part of the module's public surface rather than a
+ * number the caller has to guess from the same env var.
+ */
+const RETENTION_WINDOW_MS = RETENTION_MS;
 
 /* =========================
  * Compact point format
@@ -478,7 +497,16 @@ const selectFlightRowStmt = db.prepare(
 // Closed at both ends. `firstSeen IS NULL` keeps rows written before that
 // column existed visible rather than silently dropping them from replays.
 const selectReplayRowsStmt = db.prepare(`
-  SELECT userId, flightId, callsign, path_json, tail_blob, aircraftId, liveryId, aircraftName, liveryName
+  SELECT userId, flightId, callsign, username, sessionId, path_json, tail_blob, aircraftId, liveryId, aircraftName, liveryName
+  FROM flight_history
+  WHERE lastSeen >= ? AND (firstSeen IS NULL OR firstSeen <= ?)
+`);
+
+// How many flights a replay window would visit. Answered from the same index
+// the walk itself seeks on, without decoding a single trail — global playback
+// uses it to size its sampling interval *before* committing to the walk.
+const countReplayRowsStmt = db.prepare(`
+  SELECT COUNT(*) AS n
   FROM flight_history
   WHERE lastSeen >= ? AND (firstSeen IS NULL OR firstSeen <= ?)
 `);
@@ -614,11 +642,16 @@ const selectFlightStateStmt = db.prepare(
 );
 
 const upsertFlightStmt = db.prepare(`
-  INSERT INTO flight_history (userId, flightId, callsign, lastSeen, firstSeen, path_json, aircraftId, liveryId, aircraftName, liveryName, tail_blob, last_point, point_count, session_breaks, chunk_seq)
-  VALUES (@userId, @flightId, @callsign, @lastSeen, @lastSeen, NULL, @aircraftId, @liveryId, @aircraftName, @liveryName, @tail_blob, @last_point, @point_count, @session_breaks, @chunk_seq)
+  INSERT INTO flight_history (userId, flightId, callsign, username, sessionId, lastSeen, firstSeen, path_json, aircraftId, liveryId, aircraftName, liveryName, tail_blob, last_point, point_count, session_breaks, chunk_seq)
+  VALUES (@userId, @flightId, @callsign, @username, @sessionId, @lastSeen, @lastSeen, NULL, @aircraftId, @liveryId, @aircraftName, @liveryName, @tail_blob, @last_point, @point_count, @session_breaks, @chunk_seq)
   ON CONFLICT(flightId) DO UPDATE SET
     lastSeen = excluded.lastSeen,
     path_json = NULL,
+    -- COALESCE, not a blind overwrite: a poll that happens to omit the pilot's
+    -- name must not erase one we already recorded. The server a flight is on
+    -- never changes mid-flight, so the first non-null value stands.
+    username = COALESCE(excluded.username, flight_history.username),
+    sessionId = COALESCE(excluded.sessionId, flight_history.sessionId),
     aircraftId = excluded.aircraftId,
     liveryId = excluded.liveryId,
     aircraftName = excluded.aircraftName,
@@ -642,8 +675,14 @@ const touchLastSeenStmt = db.prepare('UPDATE flight_history SET lastSeen = ? WHE
  *
  * Now the point lands in a small tail that is the only thing rewritten, and the
  * trail proper is touched once every CHUNK_POINTS polls by a single INSERT.
+ *
+ * `sessionId` is the Infinite Flight server the batch was polled from. It is
+ * passed in rather than read off each flight because the live socket payload
+ * carries it once for the whole batch — putting it on every flight object would
+ * add a GUID per aircraft to a broadcast sent to every connected client, to
+ * record a value that is constant across the batch.
  */
-function updateBatch(flights) {
+function updateBatch(flights, sessionId = null) {
   const now = Date.now();
 
   const runBatch = db.transaction((flightList) => {
@@ -723,6 +762,8 @@ function updateBatch(flights) {
         userId: flight.userId,
         flightId: flight.flightId,
         callsign: flight.callsign,
+        username: flight.username || null,
+        sessionId: sessionId || null,
         lastSeen: now,
         aircraftId: ac.aircraftId || null,
         liveryId: ac.liveryId || null,
@@ -760,6 +801,23 @@ async function getFlightPath(flightId, untilMs) {
 }
 
 /**
+ * How many flights a window would visit, answered from the index alone.
+ *
+ * Global playback sizes its sampling interval from this before it commits to
+ * the walk, so a peak-hour window comes back coarser instead of coming back
+ * refused. Counting is a seek over idx_replay_window — no trail is decoded.
+ */
+function countFlightsForReplay(sinceMs, untilMs) {
+  const upper = Number.isFinite(untilMs) ? untilMs : Number.MAX_SAFE_INTEGER;
+  try {
+    return countReplayRowsStmt.get(sinceMs, upper)?.n || 0;
+  } catch (e) {
+    console.warn('[history] Replay candidate count failed:', e.message);
+    return 0;
+  }
+}
+
+/**
  * Streams every recorded flight whose trail overlaps [sinceMs, untilMs], giving
  * each one to `visit` as { userId, flightId, callsign, aircraft, path }.
  *
@@ -776,7 +834,9 @@ async function getFlightPath(flightId, untilMs) {
  * iterate() so only one trail is ever decoded at a time. Peak memory is one
  * flight, not the window.
  *
- * `visit` may keep whatever it needs; nothing else is retained.
+ * `visit` may keep whatever it needs; nothing else is retained. Returning
+ * `false` from it stops the walk — a caller that has filled its budget should
+ * not pay to decode the rest of the window just to throw it away.
  */
 function forEachFlightForReplay(sinceMs, untilMs, visit) {
   const upper = Number.isFinite(untilMs) ? untilMs : Number.MAX_SAFE_INTEGER;
@@ -796,10 +856,12 @@ function forEachFlightForReplay(sinceMs, untilMs, visit) {
       }
     }
 
-    visit({
+    const keepGoing = visit({
       userId: r.userId,
       flightId: r.flightId,
       callsign: r.callsign,
+      username: r.username || null,
+      sessionId: r.sessionId || null,
       aircraft: {
         aircraftId: r.aircraftId || null,
         liveryId: r.liveryId || null,
@@ -808,6 +870,10 @@ function forEachFlightForReplay(sinceMs, untilMs, visit) {
       },
       path: pathPoints
     });
+
+    // Only an explicit `false` stops the walk. Every existing caller returns
+    // undefined, which must keep meaning "carry on".
+    if (keepGoing === false) break;
   }
 }
 
@@ -843,6 +909,8 @@ module.exports = {
   updateBatch,
   getFlightPath,
   forEachFlightForReplay,
+  countFlightsForReplay,
+  RETENTION_WINDOW_MS,
   runDeepClean,
   claimFlightState,
   releaseFlightState,

@@ -14,6 +14,7 @@ const cors = require('cors');
 const { getFlightPath, updateBatch, claimFlightState } = require('./history.cjs');
 const archivist = require('./archivist.cjs');
 const atcHistory = require('./atc_history.cjs');
+const globalPlayback = require('./global_playback.cjs');
 require('dotenv').config();
 const telemetry = require('./telemetry.cjs');
 const metrics = require('./metrics.cjs');
@@ -1920,7 +1921,7 @@ async function pollAndBroadcastFlights() {
       if (flightsToSave.length > 0) {
         setImmediate(() => {
             try {
-                updateBatch(flightsToSave);
+                updateBatch(flightsToSave, sessionId);
             } catch (dbError) {
                 console.error(`[broadcast] ❌ Background DB batch update failed:`, dbError.message);
             }
@@ -2388,6 +2389,80 @@ app.get('/api/atc/replay', (req, res) => {
     res.status(500).json(err(500, 'Failed to build ATC replay', { detail: e.message }));
   }
 });
+
+/* =========================
+ * Global Playback
+ * Rewind the whole map. Free accounts reach back a day, Inflight Pro reaches
+ * back the full fortnight the recorder keeps.
+ * ========================= */
+
+// What this caller may ask for. The client calls this before it draws the time
+// picker, so the picker's range is the server's answer rather than a number
+// duplicated in the front end — and so a Pro user who upgraded in another tab
+// gets the wider range on their next open without a reload.
+app.get('/api/playback/limits', supabaseAuth.optionalAuth, async (req, res) => {
+  try {
+    const isPro = req.userId ? await supabaseAuth.isProUser(req.userId) : false;
+    const limits = globalPlayback.limitsFor(isPro);
+    // Never cached: it is per-account and it moves with the wall clock.
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ ok: true, signedIn: !!req.userId, ...limits });
+  } catch (e) {
+    res.status(500).json(err(500, 'Failed to read playback limits', { detail: e.message }));
+  }
+});
+
+// One playback window.
+// Query: ?start=<epochMs>[&end=<epochMs>][&sessionId=<server guid>][&bbox=w,s,e,n]
+//
+// `start` is the only required parameter; omitting `end` asks for a full span
+// from there. `sessionId` scopes the replay to one Infinite Flight server, which
+// is almost always what you want — Expert and Casual traffic on one map is not
+// a picture of anything that happened.
+app.get('/api/playback/global', supabaseAuth.optionalAuth, async (req, res) => {
+  try {
+    const isPro = req.userId ? await supabaseAuth.isProUser(req.userId) : false;
+
+    const resolved = globalPlayback.resolveWindow({
+      startMs: req.query.start !== undefined ? Number(req.query.start) : NaN,
+      endMs: req.query.end !== undefined ? Number(req.query.end) : NaN,
+      isPro
+    });
+    if (!resolved.ok) {
+      // 403 means "well-formed, but past your tier" — the client shows the
+      // upgrade prompt on that and only that, so the limits ride along.
+      return res.status(resolved.status).json(
+        err(resolved.status, resolved.message, { limits: resolved.limits, upgradeRequired: resolved.status === 403 })
+      );
+    }
+
+    const bboxRaw = req.query.bbox;
+    const bbox = globalPlayback.parseBbox(bboxRaw);
+    if (bboxRaw && !bbox) {
+      return res.status(400).json(err(400, 'bbox must be `west,south,east,north` in degrees.'));
+    }
+
+    const payload = globalPlayback.buildWindow({
+      start: resolved.start,
+      end: resolved.end,
+      sessionId: req.query.sessionId ? String(req.query.sessionId) : null,
+      bbox
+    });
+
+    // A closed window in the past can never change; only one that runs up to
+    // "now" can still gain points. Cache the settled ones hard — scrubbing back
+    // and forth over the same hour should not re-walk the table every time.
+    const settled = resolved.end < Date.now() - 5 * 60 * 1000;
+    if (settled) cacheFor(res, 3600);
+    else res.set('Cache-Control', 'private, max-age=30');
+
+    res.json({ ok: true, tier: resolved.limits.tier, limits: resolved.limits, ...payload });
+  } catch (e) {
+    console.error('[playback] ❌ Failed to build global playback window:', e.message);
+    res.status(500).json(err(500, 'Failed to build playback window', { detail: e.message }));
+  }
+});
+
 // ⬇️ NEW ROUTE: Batch Route Fetcher (The Fix)
 // Usage: POST /api/flights/routes/batch
 // Body: { "sessionId": "...", "flightIds": ["id1", "id2", "id3"] }
