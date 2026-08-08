@@ -394,13 +394,34 @@ test('replay assembly returns the same trails as individual lookups', async () =
   const flight = recordableFlight(130);
   for (const id of ids) for (const p of flight) poll(id, p);
 
-  const replay = history.getFlightsForReplay(0);
+  const replay = [];
+  history.forEachFlightForReplay(0, Date.now() + 60000, f => replay.push(f));
   for (const id of ids) {
     const entry = replay.find(r => r.flightId === id);
     assert.ok(entry, `expected ${id} in the replay set`);
     assertSameTrail(entry.path, flight, `replay ${id}`);
     assert.strictEqual(entry.aircraft.aircraftName, 'A350-900');
   }
+});
+
+test('the replay window excludes flights that began after it closed', () => {
+  const id = nextFlightId();
+  for (const p of recordableFlight(60)) poll(id, p);
+
+  // firstSeen is stamped at insert, so a window that closed before this flight
+  // existed must not select it. Without the upper bound the query could only
+  // say "seen since X", which at two weeks of retention means nearly the whole
+  // table gets decoded into memory for one replay.
+  const row = history._db.prepare('SELECT firstSeen FROM flight_history WHERE flightId = ?').get(id);
+  assert.ok(row.firstSeen > 0, 'expected firstSeen to be stamped on insert');
+
+  const seen = [];
+  history.forEachFlightForReplay(0, row.firstSeen - 1000, f => seen.push(f.flightId));
+  assert.ok(!seen.includes(id), 'a flight that started after the window closed was still loaded');
+
+  const inWindow = [];
+  history.forEachFlightForReplay(0, row.firstSeen + 1000, f => inWindow.push(f.flightId));
+  assert.ok(inWindow.includes(id), 'a flight inside the window should be selected');
 });
 
 test('purging a flight takes its chunks with it', () => {

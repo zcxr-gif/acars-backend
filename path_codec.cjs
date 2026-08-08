@@ -61,8 +61,8 @@
  * Deliberately not compressed
  * ---------------------------
  * Running deflate over sealed chunks buys roughly a further 30%, but every
- * read then pays an inflate — including getFlightsForReplay(), which decodes
- * every flight in a window at once to build ATC replay. Trading read CPU for
+ * read then pays an inflate — including the ATC replay sweep, which decodes
+ * every flight in a window to build a session. Trading read CPU for
  * disk was the wrong side of the deal when the delta encoding had already
  * taken the bulk of the win. The chunk header carries a version byte, so a
  * compressed chunk type can be added later without breaking blobs on disk.

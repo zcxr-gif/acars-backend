@@ -20,7 +20,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
-const { getFlightsForReplay } = require('./history.cjs');
+const { forEachFlightForReplay } = require('./history.cjs');
 
 // --- CONFIGURATION ---
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -377,9 +377,11 @@ function getReplay(key) {
 
   const flights = [];
   if (hasFacility) {
-    const candidates = getFlightsForReplay(winStart);
-    for (const f of candidates) {
-      if (!Array.isArray(f.path) || f.path.length === 0) continue;
+    // Streamed rather than collected: only the segments that were actually
+    // inside the airspace are kept, so a two-week retention window costs one
+    // decoded trail at a time instead of the whole window at once.
+    forEachFlightForReplay(winStart, winEnd, (f) => {
+      if (!Array.isArray(f.path) || f.path.length === 0) return;
 
       let closestNm = Infinity;
       const seg = [];
@@ -391,7 +393,7 @@ function getReplay(key) {
           if (d < closestNm) closestNm = d;
         }
       }
-      if (seg.length === 0) continue;
+      if (seg.length === 0) return;
 
       flights.push({
         flightId: f.flightId,
@@ -402,7 +404,7 @@ function getReplay(key) {
         atAirport: closestNm <= AT_AIRPORT_NM,
         path: seg
       });
-    }
+    });
     flights.sort((a, b) => a.closestNm - b.closestNm);
   }
 

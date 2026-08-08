@@ -79,9 +79,15 @@ try {
 }
 
 // 2. High-Performance & Memory Safety Configuration
+//
+// cache_size is negative, so it is in KiB rather than pages. The old -50000
+// reserved ~49 MB of page cache for this one database — a big slice of a 1 GB
+// container, and mostly wasted now that the hot path touches a small tail row
+// instead of re-reading whole trails. HISTORY_CACHE_MB raises it again on a
+// larger instance.
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = OFF');
-db.pragma('cache_size = -50000');
+db.pragma(`cache_size = -${intEnv('HISTORY_CACHE_MB', 16) * 1024}`);
 
 // 3. Create Tables
 db.prepare(`
@@ -100,6 +106,8 @@ db.prepare(`
 `).run();
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_user_time ON flight_history (userId, lastSeen)`).run();
 // Supports the ATC-replay candidate query, which filters purely on lastSeen.
+// A covering index over (lastSeen, firstSeen) is added after the migration
+// below, once that column is guaranteed to exist.
 db.prepare(`CREATE INDEX IF NOT EXISTS idx_last_seen ON flight_history (lastSeen)`).run();
 
 /* Sealed trail chunks.
@@ -202,7 +210,11 @@ function releaseFlightState(flightId, event) {
                              // still answer shouldSkipPoint without a decode
     point_count: 'INTEGER',  // chunks + tail, maintained incrementally
     session_breaks: 'INTEGER',
-    chunk_seq: 'INTEGER'     // next sequence number to seal at
+    chunk_seq: 'INTEGER',    // next sequence number to seal at
+    // When the flight was first recorded. Without it a replay window can only
+    // be expressed as "seen since X", which selects every flight from X to now
+    // — fine over 48 hours, ruinous over two weeks.
+    firstSeen: 'INTEGER'
   };
   for (const [col, type] of Object.entries(chunkCols)) {
     if (!existing.has(col)) {
@@ -210,6 +222,13 @@ function releaseFlightState(flightId, event) {
       console.log(`[history] Migrated flight_history: added column ${col}`);
     }
   }
+
+  // Now that firstSeen certainly exists: the replay window seeks on lastSeen
+  // and filters the range by firstSeen, so covering both keeps that filter in
+  // the index rather than fetching every row in the window to test it.
+  db.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_replay_window ON flight_history (lastSeen, firstSeen)`
+  ).run();
 })();
 
 /* =========================
@@ -456,15 +475,12 @@ const dropChunkStmt = db.prepare('DELETE FROM flight_path_chunks WHERE flightId 
 const selectFlightRowStmt = db.prepare(
   'SELECT path_json, tail_blob FROM flight_history WHERE flightId = ?'
 );
-const selectReplayRowsStmt = db.prepare(
-  'SELECT userId, flightId, callsign, path_json, tail_blob, aircraftId, liveryId, aircraftName, liveryName FROM flight_history WHERE lastSeen >= ?'
-);
-const selectReplayChunksStmt = db.prepare(`
-  SELECT c.flightId, c.chunk
-  FROM flight_path_chunks c
-  JOIN flight_history f ON f.flightId = c.flightId
-  WHERE f.lastSeen >= ?
-  ORDER BY c.flightId, c.seq
+// Closed at both ends. `firstSeen IS NULL` keeps rows written before that
+// column existed visible rather than silently dropping them from replays.
+const selectReplayRowsStmt = db.prepare(`
+  SELECT userId, flightId, callsign, path_json, tail_blob, aircraftId, liveryId, aircraftName, liveryName
+  FROM flight_history
+  WHERE lastSeen >= ? AND (firstSeen IS NULL OR firstSeen <= ?)
 `);
 
 /**
@@ -598,8 +614,8 @@ const selectFlightStateStmt = db.prepare(
 );
 
 const upsertFlightStmt = db.prepare(`
-  INSERT INTO flight_history (userId, flightId, callsign, lastSeen, path_json, aircraftId, liveryId, aircraftName, liveryName, tail_blob, last_point, point_count, session_breaks, chunk_seq)
-  VALUES (@userId, @flightId, @callsign, @lastSeen, NULL, @aircraftId, @liveryId, @aircraftName, @liveryName, @tail_blob, @last_point, @point_count, @session_breaks, @chunk_seq)
+  INSERT INTO flight_history (userId, flightId, callsign, lastSeen, firstSeen, path_json, aircraftId, liveryId, aircraftName, liveryName, tail_blob, last_point, point_count, session_breaks, chunk_seq)
+  VALUES (@userId, @flightId, @callsign, @lastSeen, @lastSeen, NULL, @aircraftId, @liveryId, @aircraftName, @liveryName, @tail_blob, @last_point, @point_count, @session_breaks, @chunk_seq)
   ON CONFLICT(flightId) DO UPDATE SET
     lastSeen = excluded.lastSeen,
     path_json = NULL,
@@ -744,43 +760,43 @@ async function getFlightPath(flightId, untilMs) {
 }
 
 /**
- * Returns every recorded flight whose trail was still being updated at or after
- * `sinceMs`, with its path already unpacked. This is the candidate set the ATC
- * replay layer scans to find the flights that were inside a controller's
- * airspace during a session window. Filtering on lastSeen alone is cheap thanks
- * to idx_last_seen; the spatial/temporal narrowing happens in atc_history.cjs.
+ * Streams every recorded flight whose trail overlaps [sinceMs, untilMs], giving
+ * each one to `visit` as { userId, flightId, callsign, aircraft, path }.
+ *
+ * This used to return an array of every flight seen since `sinceMs`, with all
+ * of their trails decoded up front. That was survivable when trails only lived
+ * for 48 hours. It is not survivable at two weeks: replaying a session from
+ * thirteen days ago selected virtually the whole table and decoded it into
+ * memory in one go, which on a 1 GB instance is an OOM rather than a slow
+ * request.
+ *
+ * Two things fix it. The window is now closed at both ends — a flight that
+ * first appeared after the session ended cannot be a candidate, which
+ * `lastSeen >= sinceMs` alone could not express — and rows are walked with
+ * iterate() so only one trail is ever decoded at a time. Peak memory is one
+ * flight, not the window.
+ *
+ * `visit` may keep whatever it needs; nothing else is retained.
  */
-function getFlightsForReplay(sinceMs) {
-  const rows = selectReplayRowsStmt.all(sinceMs);
+function forEachFlightForReplay(sinceMs, untilMs, visit) {
+  const upper = Number.isFinite(untilMs) ? untilMs : Number.MAX_SAFE_INTEGER;
 
-  // Pull every chunk for the whole window in one indexed pass and group it by
-  // flight, rather than issuing a query per candidate. This runs over the full
-  // replay window, so an N+1 here would be felt.
-  const chunksByFlight = new Map();
-  const chunkRows = selectReplayChunksStmt.all(sinceMs);
-
-  for (const r of chunkRows) {
-    let list = chunksByFlight.get(r.flightId);
-    if (!list) chunksByFlight.set(r.flightId, (list = []));
-    list.push(r.chunk);
-  }
-
-  return rows.map(r => {
+  for (const r of selectReplayRowsStmt.iterate(sinceMs, upper)) {
     let pathPoints;
     if (r.path_json) {
       // Not yet migrated — the sweep will get to it.
       pathPoints = readPath(r.path_json);
     } else {
       pathPoints = [];
-      for (const chunk of chunksByFlight.get(r.flightId) || []) {
-        for (const p of codec.decodeBlob(chunk)) pathPoints.push(p);
+      for (const c of selectChunksStmt.all(r.flightId)) {
+        for (const p of codec.decodeBlob(c.chunk)) pathPoints.push(p);
       }
       if (r.tail_blob && r.tail_blob.length) {
         for (const p of codec.decodeBlob(r.tail_blob)) pathPoints.push(p);
       }
     }
 
-    return {
+    visit({
       userId: r.userId,
       flightId: r.flightId,
       callsign: r.callsign,
@@ -791,8 +807,8 @@ function getFlightsForReplay(sinceMs) {
         liveryName: r.liveryName || null
       },
       path: pathPoints
-    };
-  });
+    });
+  }
 }
 
 console.log(
@@ -826,7 +842,7 @@ setInterval(() => {
 module.exports = {
   updateBatch,
   getFlightPath,
-  getFlightsForReplay,
+  forEachFlightForReplay,
   runDeepClean,
   claimFlightState,
   releaseFlightState,

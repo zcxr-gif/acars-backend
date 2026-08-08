@@ -91,12 +91,18 @@ const heap = () => { if (global.gc) global.gc(); return process.memoryUsage().he
   const readMs = Date.now() - r0;
 
   const q0 = Date.now();
-  const replay = history.getFlightsForReplay(0);
+  let replayCount = 0;
+  let replayPeakPoints = 0;
+  history.forEachFlightForReplay(0, Date.now() + 60000, (f) => {
+    replayCount++;
+    // Streamed, so this is the largest single trail held at once — not the sum.
+    replayPeakPoints = Math.max(replayPeakPoints, f.path.length);
+  });
   const replayMs = Date.now() - q0;
 
   console.log(`\nreads`);
   console.log(`  getFlightPath    ${(readMs / 200).toFixed(2)}ms each (200 calls)`);
-  console.log(`  replay window    ${replayMs}ms for ${replay.length} flights`);
+  console.log(`  replay window    ${replayMs}ms for ${replayCount} flights (peak ${replayPeakPoints} pts held)`);
 
   console.log(`\nmemory`);
   console.log(`  heap start       ${(heapStart / 1024 / 1024).toFixed(1)} MB`);
