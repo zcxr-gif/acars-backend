@@ -22,7 +22,9 @@
  */
 
 const assert = require('assert');
-const { normalizeConfig, callsignMatches, matchMode } = require('./va_filter.cjs');
+const {
+  normalizeConfig, callsignMatches, matchMode, setRosterWatch, isWatchedPilot,
+} = require('./va_filter.cjs');
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -143,6 +145,30 @@ test('exact holds regular callsigns to the whole callsign too', () => {
     ['Ocean Staff 7', true],
     ['Ocean Staff Alpha', false], // not the name, and not the name plus a number
   ]);
+});
+
+/* =========================
+ * Roster watch list — the pilots forwarded on membership alone
+ * ========================= */
+
+test('a watched pilot is recognised however their name is punctuated', () => {
+  // The published list is pre-expanded by the other backend, so what this side
+  // owns is only the trim/lowercase/@ normalisation of the LIVE username.
+  setRosterWatch(['john doe', 'john_doe', 'john-doe', 'john.doe', 'johndoe']);
+  for (const live of ['John_Doe', ' john doe ', '@JohnDoe', 'JOHN.DOE']) {
+    assert.strictEqual(isWatchedPilot(live), true, `${JSON.stringify(live)} should be watched`);
+  }
+  assert.strictEqual(isWatchedPilot('Jane Doe'), false);
+  assert.strictEqual(isWatchedPilot(''), false);
+  assert.strictEqual(isWatchedPilot(null), false);
+});
+
+test('an empty watch list watches nobody', () => {
+  // The endpoint returning nothing must not turn into "forward everything".
+  setRosterWatch([]);
+  assert.strictEqual(isWatchedPilot('John Doe'), false);
+  setRosterWatch(null);
+  assert.strictEqual(isWatchedPilot('John Doe'), false);
 });
 
 /* =========================

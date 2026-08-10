@@ -24,7 +24,11 @@
  *   VA_LIST_URL           — explicit URL to fetch the VA list from (overrides
  *                           the default above).
  *   VA_LIST_SECRET        — optional; sent as `x-acars-signature` on that fetch.
- *   VA_LIST_REFRESH_MS    — VA-list refresh interval, default 5 min.
+ *   VA_LIST_REFRESH_MS    — VA-list refresh interval, default 5 min. Also paces
+ *                           the roster watch list.
+ *   VA_ROSTER_WATCH_URL   — explicit URL for the roster watch list (the pilots
+ *                           of VAs that accept any callsign). Defaults to
+ *                           `${VA_BACKEND_URL}/api/va/roster-watch`.
  *   VA_BOT_FORWARD_URL    — where takeoff/landing events are POSTed.
  *   VA_BOT_FORWARD_TOKEN  — optional bearer token for that POST.
  *   VA_GROUND_SPEED_KT    — ground/air threshold, default 40 kt.
@@ -323,6 +327,60 @@ function matchVa(callsign, serverName) {
   return null;
 }
 
+/* ---- roster watch list (VAs that accept any callsign) ---- */
+
+// Usernames whose flights must be forwarded even when the callsign matches no
+// VA at all. A VA can set `rosterTrust: "any"` — "our members fly codeshare and
+// partner callsigns, count them anyway" — and those flights are exactly the ones
+// this matcher would never forward, because nothing in the callsign points at a
+// VA. So the other backend publishes the roster usernames of the VAs that opted
+// in, and a flight by one of them is pushed UNATTRIBUTED for that backend to
+// resolve against the roster itself. We deliberately don't learn which VA a
+// username belongs to: attribution lives on one side, and this is not it.
+let rosterWatch = new Set();
+
+// Lowercased, trimmed, '@' dropped. The published list is already expanded into
+// every separator form a name can be written in (rosterMatchKeys on the other
+// side), so a plain lowercase lookup is enough here.
+function watchKey(username) {
+  return String(username || '').trim().replace(/^@+/, '').toLowerCase();
+}
+
+function isWatchedPilot(username) {
+  if (!rosterWatch.size) return false;
+  const k = watchKey(username);
+  return !!k && rosterWatch.has(k);
+}
+
+// Replace the watch set from a raw username list. The refresh path below uses
+// it, and it's the seam the tests drive instead of the network (same shape as
+// setVaConfigs). Returns the resulting size.
+function setRosterWatch(list) {
+  rosterWatch = new Set((Array.isArray(list) ? list : []).map(watchKey).filter(Boolean));
+  return rosterWatch.size;
+}
+
+// Where the watch list is fetched from. Same base as the VA list, and the same
+// override story: VA_ROSTER_WATCH_URL wins if set.
+function resolvedRosterWatchUrl() {
+  const base = (process.env.VA_BACKEND_URL || DEFAULT_VA_BACKEND).replace(/\/$/, '');
+  return process.env.VA_ROSTER_WATCH_URL || `${base}/api/va/roster-watch`;
+}
+
+// Refresh the watch list. A failure leaves the previous set in place rather than
+// emptying it — a blip on this endpoint should cost nobody their notifications.
+async function refreshRosterWatch() {
+  const url = resolvedRosterWatchUrl();
+  const headers = process.env.VA_LIST_SECRET ? { 'x-acars-signature': process.env.VA_LIST_SECRET } : undefined;
+  try {
+    const { data } = await axios.get(url, { timeout: 10000, headers });
+    const n = setRosterWatch(Array.isArray(data?.usernames) ? data.usernames : []);
+    console.log(`[va-filter] Watching ${n} rostered pilot(s) for any-callsign VAs.`);
+  } catch (e) {
+    console.warn(`[va-filter] ⚠️ Roster watch refresh failed (${url}), keeping ${rosterWatch.size} entries: ${e.message}`);
+  }
+}
+
 // Unwrap whatever envelope the VA list arrives in into a plain array.
 function vaListItems(data) {
   return Array.isArray(data) ? data : data?.data || data?.vas || data?.ads || data?.results || [];
@@ -395,6 +453,11 @@ function airborneState(pos) {
 const committed = new Map(); // flightId -> bool airborne (last confirmed)
 const pending = new Map(); // flightId -> { air: bool, n: int } (flip being confirmed)
 
+// Stand-in "VA" for a flight forwarded on the roster watch list alone. Empty
+// code/name is the signal: the other backend reads it as "no attribution
+// offered" and resolves the flight against its own rosters.
+const ROSTER_ONLY_CFG = { code: '', name: '', prefixes: [], suffixes: [], regulars: [], match: 'strict', hubs: [], servers: [] };
+
 // POST a single takeoff/landing event to the other backend. Fire-and-forget:
 // never awaited on the poll path, never cached.
 function pushEvent(type, flight, serverName, cfg) {
@@ -438,7 +501,12 @@ function processSnapshot(flightsCache, claimEvent) {
     if (EVENT_SERVERS.length && !serverWanted({ servers: EVENT_SERVERS }, payload?.server)) continue;
     for (const f of payload?.flights || []) {
       if (!f?.flightId) continue;
-      const cfg = matchVa(f.callsign, payload?.server);
+      let cfg = matchVa(f.callsign, payload?.server);
+      // No VA owns this callsign — but the pilot may be on the roster of a VA
+      // that asked for their flights whatever they're flying (rosterTrust:
+      // "any"). Forward it unattributed and let the other backend decide; this
+      // side has no rosters and no business guessing which VA it belongs to.
+      if (!cfg && isWatchedPilot(f.username)) cfg = ROSTER_ONLY_CFG;
       if (!cfg) continue;
       present.add(f.flightId);
 
@@ -488,9 +556,14 @@ function initEventEngine() {
   if (started) return;
   started = true;
   refreshVaConfigs();
+  refreshRosterWatch();
   const ms = Number(process.env.VA_LIST_REFRESH_MS) || 5 * 60 * 1000;
   const t = setInterval(refreshVaConfigs, ms);
   if (typeof t.unref === 'function') t.unref();
+  // Same cadence: a pilot added to a roster shouldn't wait longer to be seen
+  // than a VA added to the directory.
+  const r = setInterval(refreshRosterWatch, ms);
+  if (typeof r.unref === 'function') r.unref();
 }
 
 /* ---- roster route (single-VA pull / backfill) ---- */
@@ -538,6 +611,10 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
         // Where the VA list is pulled from and how often it refreshes.
         url: resolvedVaListUrl(),
         refreshMs: Number(process.env.VA_LIST_REFRESH_MS) || 5 * 60 * 1000,
+        // Pilots forwarded on roster membership alone (VAs with rosterTrust
+        // "any"), and where that list comes from.
+        rosterWatchUrl: resolvedRosterWatchUrl(),
+        rosterWatchCount: rosterWatch.size,
         // Events only POST when this is set — unset = matching runs but nothing
         // is forwarded to the other backend.
         forwardConfigured: !!process.env.VA_BOT_FORWARD_URL,
@@ -569,12 +646,17 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
         return e;
       });
       const hit = candidates.find((e) => e.willMatch) || null;
+      const username = req.query.username ? String(req.query.username) : '';
       out.test = {
         callsign,
         server,
         // The same global gate processSnapshot applies before matching any VA.
         globalServerGate: !EVENT_SERVERS.length || serverWanted({ servers: EVENT_SERVERS }, server),
         matched: hit ? { code: hit.code, name: hit.name } : null,
+        // Add &username=… to see whether a flight no VA claims would still be
+        // forwarded on the roster watch list alone.
+        username: username || null,
+        rosterWatched: username ? isWatchedPilot(username) : null,
         candidates,
       };
     }
@@ -597,6 +679,10 @@ module.exports = {
   matchVa,
   resolvedVaListUrl,
   refreshVaConfigs,
+  resolvedRosterWatchUrl,
+  refreshRosterWatch,
+  setRosterWatch,
+  isWatchedPilot,
   processSnapshot,
   initEventEngine,
   registerRoutes,
