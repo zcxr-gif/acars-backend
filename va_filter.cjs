@@ -24,7 +24,11 @@
  *   VA_LIST_URL           — explicit URL to fetch the VA list from (overrides
  *                           the default above).
  *   VA_LIST_SECRET        — optional; sent as `x-acars-signature` on that fetch.
- *   VA_LIST_REFRESH_MS    — VA-list refresh interval, default 5 min.
+ *   VA_LIST_REFRESH_MS    — VA-list refresh interval, default 5 min. Also paces
+ *                           the roster watch list.
+ *   VA_ROSTER_WATCH_URL   — explicit URL for the roster watch list (the pilots
+ *                           of VAs that accept any callsign). Defaults to
+ *                           `${VA_BACKEND_URL}/api/va/roster-watch`.
  *   VA_BOT_FORWARD_URL    — where takeoff/landing events are POSTed.
  *   VA_BOT_FORWARD_TOKEN  — optional bearer token for that POST.
  *   VA_GROUND_SPEED_KT    — ground/air threshold, default 40 kt.
@@ -82,6 +86,35 @@ function patternParts(pattern) {
   return { prefix: c.slice(0, first), suffix: c.slice(last + 1) };
 }
 
+// How hard we work to call a flight this VA's. Owner/staff pick one per VA (the
+// `callsignMatch` field on the va-ads listing); anything unrecognised is
+// 'strict', because showing somebody else's pilot as yours is the error a VA has
+// not agreed to.
+//   'exact'  — the callsign must BE the registered shape: <prefix><number><tag>,
+//              nothing before, between or after it. "Air Canada 001VA" only.
+//   'strict' — declared prefix AND the tag on one of the last two tokens, so a
+//              pilot may append a division/event tag after the VA one.
+//   'broad'  — the declared prefix alone is enough, tag or no tag.
+const MATCH_MODES = new Set(['exact', 'strict', 'broad']);
+function matchMode(v) {
+  const m = String(v || '').trim().toLowerCase();
+  return MATCH_MODES.has(m) ? m : 'strict';
+}
+
+// Every callsign mask a VA declared, in preference order. A listing may carry
+// the multi-value `callsigns` (the authoritative field), a legacy single
+// `callsign`, or — on older documents — BOTH, with `callsigns` sitting empty.
+// An empty array is truthy in JS, so `q.callsigns || q.callsign` silently
+// resolves to [] on exactly those older documents and the VA stops matching
+// anything. Hence the explicit length checks.
+function callsignMasks(q) {
+  for (const v of [q.callsignPattern, q.callsignTemplate, q.callsigns, q.callsign]) {
+    const list = (Array.isArray(v) ? v : [v]).filter((s) => String(s || '').trim());
+    if (list.length) return list;
+  }
+  return [];
+}
+
 // Turn raw input (query param or VA-list item) into the normalised matching
 // config. Accepts the various field names the backends use, including the
 // va-ads `callsign` mask ("OCEAN ##VA").
@@ -92,17 +125,31 @@ function normalizeConfig(q = {}) {
   // suffixes: uppercased, whitespace stripped; [] => prefix-only match.
   let suffixes = csv(q.suffixes || q.callsignSuffixes).map(compact).filter(Boolean);
 
-  // No explicit prefix/suffix lists? Derive them from the VA's callsign mask
+  // No explicit prefix/suffix lists? Derive them from the VA's callsign mask(s)
   // ("Air Canada ##VA", or just "Air Canada"). The WHOLE fixed part becomes the
   // prefix — "AIRCANADA", not just "AIR" — so it can't collide with "Air Force".
-  // The trailing literal (if any) becomes the suffix tag ("VA"). Explicit lists,
-  // if given, always win.
-  const mask = q.callsignPattern || q.callsignTemplate || q.callsign;
-  if ((!prefixes.length || !suffixes.length) && mask) {
-    const { prefix, suffix } = patternParts(mask);
-    if (!prefixes.length && prefix) prefixes = [prefix];
-    if (!suffixes.length && suffix) suffixes = [suffix];
+  // The trailing literal (if any) becomes the suffix tag ("VA"). A listing may
+  // hold several callsigns (parent brand + sub-fleets); every one contributes,
+  // so a VA's second callsign is not silently unmatched. Explicit lists, if
+  // given, always win.
+  //
+  // `patterns` keeps the mask PAIRS as declared. The flat prefix/suffix lists
+  // lose which tag belongs to which airline, which is fine for the loose modes
+  // (a VA running one tag across several airlines is a documented setup) but not
+  // for 'exact', where a VA that registered "OCEAN ##VA" and "SHAMROCK ###EX"
+  // means those two shapes and not the four the cross-product would accept.
+  let patterns = [];
+  const masks = callsignMasks(q);
+  if ((!prefixes.length || !suffixes.length) && masks.length) {
+    const parts = masks.map(patternParts).filter((p) => p.prefix);
+    patterns = parts;
+    if (!prefixes.length) prefixes = [...new Set(parts.map((p) => p.prefix))];
+    if (!suffixes.length) suffixes = [...new Set(parts.map((p) => p.suffix).filter(Boolean))];
   }
+
+  // regulars: untagged callsigns matched by PREFIX ONLY and always included,
+  // even while the prefixes above run in tag mode (staff / charter callsigns).
+  const regulars = csv(q.regulars || q.regularCallsigns || q.callsignRegulars).map(compact).filter(Boolean);
 
   // code: an explicit short code if one was given, else the full prefix.
   const code = firstToken(q.va || q.code || q.callsignCode) || prefixes[0] || '';
@@ -119,6 +166,12 @@ function normalizeConfig(q = {}) {
     name: (q.name && String(q.name)) || code,
     prefixes,
     suffixes,
+    // The declared airline+tag pairs, when the config came from callsign masks.
+    // Empty when prefixes/suffixes were given as independent lists — there are
+    // no pairs to keep then, and the cross-product IS the intent.
+    patterns,
+    regulars,
+    match: matchMode(q.callsignMatch || q.match),
     hubs,
     servers,
   };
@@ -137,25 +190,98 @@ function tokenHasSuffixTag(token, tag) {
   return before >= '0' && before <= '9';
 }
 
+// Exact-mode test: the compacted callsign must be EXACTLY one of the registered
+// shapes — a declared prefix, then the flight number, then (when the VA uses
+// tags) one of those tags, and then nothing at all. "AIRCANADA001VA" ✓ ;
+// "AIRCANADA001VACX" ✗ (trailing extra), "AIRCANADA001" ✗ (no tag),
+// "AIRCANADAX01VA" ✗ (the number isn't a number). This is the setting a VA turns
+// on when it wants only the callsigns it registered and nothing that merely
+// resembles them.
+function matchesExactShape(compacted, prefixes, suffixes) {
+  for (const p of prefixes) {
+    if (!p || !compacted.startsWith(p)) continue;
+    const rest = compacted.slice(p.length); // "001VA"
+    if (!suffixes.length) {
+      if (/^\d+$/.test(rest)) return true; // prefix-only VA: <prefix><number>
+      continue;
+    }
+    for (const tag of suffixes) {
+      if (!tag || !rest.endsWith(tag)) continue;
+      if (/^\d+$/.test(rest.slice(0, rest.length - tag.length))) return true;
+    }
+  }
+  return false;
+}
+
+// Exact mode against a config's DECLARED shapes. When the VA registered its
+// callsigns as masks we know which tag goes with which airline, so a VA holding
+// "OCEAN ##VA" and "SHAMROCK ###EX" matches exactly those two — not "Ocean 12EX"
+// or "Shamrock 4VA", which is what testing every prefix against every suffix
+// would let through. With no pairs on file (prefixes and suffixes supplied as
+// independent lists, as an embed config does) the cross-product is the intent,
+// so fall back to it.
+function matchesExactConfig(compacted, cfg) {
+  if (cfg.patterns && cfg.patterns.length) {
+    return cfg.patterns.some((p) => matchesExactShape(compacted, [p.prefix], p.suffix ? [p.suffix] : []));
+  }
+  return matchesExactShape(compacted, cfg.prefixes, cfg.suffixes);
+}
+
+// Regular (untagged) callsigns are matched by name alone and never need a tag.
+// In exact mode they still have to be the whole callsign — the bare name, or the
+// name plus a flight number — rather than merely its opening.
+function matchesRegular(compacted, regulars, mode) {
+  return regulars.some((p) => {
+    if (!p || !compacted.startsWith(p)) return false;
+    if (mode !== 'exact') return true;
+    const rest = compacted.slice(p.length);
+    return rest === '' || /^\d+$/.test(rest);
+  });
+}
+
 // A callsign belongs to the VA when (after uppercasing, stripping separators
 // and trailing weight-class words) its compacted form STARTS WITH a declared
-// prefix and — if the VA uses suffix tags — its LAST token CARRIES one of those
-// tags. Prefix-only VAs (no suffixes configured) match on the prefix alone.
-// The whole leading name is compacted into the prefix ("AIRCANADA"), so "Air
-// Canada" matches only Air Canada, never "Air France".
+// prefix and — if the VA uses suffix tags — one of the last two tokens CARRIES
+// one of those tags. Prefix-only VAs (no suffixes configured) match on the
+// prefix alone. The whole leading name is compacted into the prefix
+// ("AIRCANADA"), so "Air Canada" matches only Air Canada, never "Air France".
+//
+// `cfg.match` decides how much slack that rule has — see MATCH_MODES. Mirrors
+// embed.js callsignMatches so the widget and the event feed agree on who is a
+// member.
 function callsignMatches(callsign, cfg) {
   let tokens = callsignTokens(callsign);
   // Strip spoken weight-class words off the end ("... Heavy" / "... Super").
   while (tokens.length > 1 && WEIGHT_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
   if (!tokens.length) return false;
 
-  const c = tokens.join('');          // "AIRCANADA001VA"
-  const last = tokens[tokens.length - 1]; // "001VA"
+  const mode = cfg.match || 'strict';
+  const c = tokens.join(''); // "AIRCANADA001VA"
+
+  // Always-included untagged callsigns first — they bypass the tag rule.
+  if (matchesRegular(c, cfg.regulars || [], mode)) return true;
 
   const prefixHit = cfg.prefixes.some((p) => p && c.startsWith(p));
-  if (!cfg.suffixes.length) return prefixHit; // prefix-only VA
-  if (!prefixHit) return false;               // tag mode: BOTH must hold
-  return cfg.suffixes.some((tag) => tokenHasSuffixTag(last, tag));
+  if (!prefixHit) return false;
+  if (mode === 'exact') return matchesExactConfig(c, cfg);
+  if (mode === 'broad') return true;          // the airline name is enough
+
+  // Tag mode. A pilot often appends a second trailing tag (division / event code)
+  // after the VA one — "Air Canada 001VA CX" — so either of the last two tokens
+  // carrying a configured tag counts.
+  const tail = tokens.slice(-2);
+  const carriesTag = (tag) => tail.some((t) => tokenHasSuffixTag(t, tag));
+
+  // With the declared pairs on file, each airline is held to ITS OWN tag. That
+  // matters for a VA whose callsigns don't all work the same way: a listing
+  // holding "BAW ###" (no tag) alongside "SPEEDBIRD ##VA" should accept
+  // "BAW 123" AND "Speedbird 12VA", where a single flattened suffix list would
+  // demand the tag from both and drop every BAW flight.
+  if (cfg.patterns && cfg.patterns.length) {
+    return cfg.patterns.some((p) => c.startsWith(p.prefix) && (!p.suffix || carriesTag(p.suffix)));
+  }
+  if (!cfg.suffixes.length) return true;      // prefix-only VA
+  return cfg.suffixes.some(carriesTag);
 }
 
 // Same decision as callsignMatches, but returns the intermediate reasoning so
@@ -165,23 +291,34 @@ function callsignMatches(callsign, cfg) {
 function explainMatch(callsign, cfg) {
   let tokens = callsignTokens(callsign);
   while (tokens.length > 1 && WEIGHT_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
+  const mode = cfg.match || 'strict';
   const compacted = tokens.join('');
+  const tail = tokens.slice(-2);
   const lastToken = tokens[tokens.length - 1] || '';
   const prefixMatch = cfg.prefixes.some((p) => p && compacted.startsWith(p));
-  const suffixRequired = cfg.suffixes.length > 0;
+  // A tag is only *required* in strict mode; exact folds it into the shape test
+  // and broad waives it outright.
+  const suffixRequired = mode === 'strict' && cfg.suffixes.length > 0;
   const suffixMatch = suffixRequired
-    ? cfg.suffixes.some((tag) => tokenHasSuffixTag(lastToken, tag))
-    : null; // null = VA is prefix-only, no suffix needed
+    ? cfg.suffixes.some((tag) => tail.some((t) => tokenHasSuffixTag(t, tag)))
+    : null; // null = no tag needed in this mode
   return {
     code: cfg.code,
     name: cfg.name,
+    match: mode,
     prefixes: cfg.prefixes,
     suffixes: cfg.suffixes,
+    regulars: cfg.regulars || [],
     compacted,
     lastToken,
     prefixMatch,
     suffixRequired,
     suffixMatch,
+    // Only meaningful in exact mode: did the callsign fit <prefix><number><tag>
+    // with nothing extra?
+    exactShapeMatch: mode === 'exact' ? matchesExactConfig(compacted, cfg) : null,
+    patterns: cfg.patterns || [],
+    regularMatch: matchesRegular(compacted, cfg.regulars || [], mode),
     matched: callsignMatches(callsign, cfg),
   };
 }
@@ -223,7 +360,9 @@ let vaConfigs = []; // normalised configs for every VA we watch
 // Replace the watched VA set from a raw list. Drops entries we can't match on.
 // Like embed.js, a VA matches on its prefix(es); suffix tags are optional. To
 // keep generic airline traffic out, a VA should declare a tag (e.g. "VA") so a
-// bare "Air Canada 1234" without the tag is ignored — see callsignMatches.
+// bare "Air Canada 1234" without the tag is ignored — see callsignMatches. A VA
+// that wants nothing but its registered shape sets `callsignMatch: "exact"` on
+// its listing, which is carried through here and applied per VA.
 function setVaConfigs(rawList) {
   const list = Array.isArray(rawList) ? rawList : [];
   vaConfigs = list
@@ -238,6 +377,60 @@ function matchVa(callsign, serverName) {
     if (callsignMatches(callsign, cfg) && serverWanted(cfg, serverName)) return cfg;
   }
   return null;
+}
+
+/* ---- roster watch list (VAs that accept any callsign) ---- */
+
+// Usernames whose flights must be forwarded even when the callsign matches no
+// VA at all. A VA can set `rosterTrust: "any"` — "our members fly codeshare and
+// partner callsigns, count them anyway" — and those flights are exactly the ones
+// this matcher would never forward, because nothing in the callsign points at a
+// VA. So the other backend publishes the roster usernames of the VAs that opted
+// in, and a flight by one of them is pushed UNATTRIBUTED for that backend to
+// resolve against the roster itself. We deliberately don't learn which VA a
+// username belongs to: attribution lives on one side, and this is not it.
+let rosterWatch = new Set();
+
+// Lowercased, trimmed, '@' dropped. The published list is already expanded into
+// every separator form a name can be written in (rosterMatchKeys on the other
+// side), so a plain lowercase lookup is enough here.
+function watchKey(username) {
+  return String(username || '').trim().replace(/^@+/, '').toLowerCase();
+}
+
+function isWatchedPilot(username) {
+  if (!rosterWatch.size) return false;
+  const k = watchKey(username);
+  return !!k && rosterWatch.has(k);
+}
+
+// Replace the watch set from a raw username list. The refresh path below uses
+// it, and it's the seam the tests drive instead of the network (same shape as
+// setVaConfigs). Returns the resulting size.
+function setRosterWatch(list) {
+  rosterWatch = new Set((Array.isArray(list) ? list : []).map(watchKey).filter(Boolean));
+  return rosterWatch.size;
+}
+
+// Where the watch list is fetched from. Same base as the VA list, and the same
+// override story: VA_ROSTER_WATCH_URL wins if set.
+function resolvedRosterWatchUrl() {
+  const base = (process.env.VA_BACKEND_URL || DEFAULT_VA_BACKEND).replace(/\/$/, '');
+  return process.env.VA_ROSTER_WATCH_URL || `${base}/api/va/roster-watch`;
+}
+
+// Refresh the watch list. A failure leaves the previous set in place rather than
+// emptying it — a blip on this endpoint should cost nobody their notifications.
+async function refreshRosterWatch() {
+  const url = resolvedRosterWatchUrl();
+  const headers = process.env.VA_LIST_SECRET ? { 'x-acars-signature': process.env.VA_LIST_SECRET } : undefined;
+  try {
+    const { data } = await axios.get(url, { timeout: 10000, headers });
+    const n = setRosterWatch(Array.isArray(data?.usernames) ? data.usernames : []);
+    console.log(`[va-filter] Watching ${n} rostered pilot(s) for any-callsign VAs.`);
+  } catch (e) {
+    console.warn(`[va-filter] ⚠️ Roster watch refresh failed (${url}), keeping ${rosterWatch.size} entries: ${e.message}`);
+  }
 }
 
 // Unwrap whatever envelope the VA list arrives in into a plain array.
@@ -312,6 +505,11 @@ function airborneState(pos) {
 const committed = new Map(); // flightId -> bool airborne (last confirmed)
 const pending = new Map(); // flightId -> { air: bool, n: int } (flip being confirmed)
 
+// Stand-in "VA" for a flight forwarded on the roster watch list alone. Empty
+// code/name is the signal: the other backend reads it as "no attribution
+// offered" and resolves the flight against its own rosters.
+const ROSTER_ONLY_CFG = { code: '', name: '', prefixes: [], suffixes: [], regulars: [], match: 'strict', hubs: [], servers: [] };
+
 // POST a single takeoff/landing event to the other backend. Fire-and-forget:
 // never awaited on the poll path, never cached.
 function pushEvent(type, flight, serverName, cfg) {
@@ -355,7 +553,12 @@ function processSnapshot(flightsCache, claimEvent) {
     if (EVENT_SERVERS.length && !serverWanted({ servers: EVENT_SERVERS }, payload?.server)) continue;
     for (const f of payload?.flights || []) {
       if (!f?.flightId) continue;
-      const cfg = matchVa(f.callsign, payload?.server);
+      let cfg = matchVa(f.callsign, payload?.server);
+      // No VA owns this callsign — but the pilot may be on the roster of a VA
+      // that asked for their flights whatever they're flying (rosterTrust:
+      // "any"). Forward it unattributed and let the other backend decide; this
+      // side has no rosters and no business guessing which VA it belongs to.
+      if (!cfg && isWatchedPilot(f.username)) cfg = ROSTER_ONLY_CFG;
       if (!cfg) continue;
       present.add(f.flightId);
 
@@ -405,9 +608,14 @@ function initEventEngine() {
   if (started) return;
   started = true;
   refreshVaConfigs();
+  refreshRosterWatch();
   const ms = Number(process.env.VA_LIST_REFRESH_MS) || 5 * 60 * 1000;
   const t = setInterval(refreshVaConfigs, ms);
   if (typeof t.unref === 'function') t.unref();
+  // Same cadence: a pilot added to a roster shouldn't wait longer to be seen
+  // than a VA added to the directory.
+  const r = setInterval(refreshRosterWatch, ms);
+  if (typeof r.unref === 'function') r.unref();
 }
 
 /* ---- roster route (single-VA pull / backfill) ---- */
@@ -455,6 +663,10 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
         // Where the VA list is pulled from and how often it refreshes.
         url: resolvedVaListUrl(),
         refreshMs: Number(process.env.VA_LIST_REFRESH_MS) || 5 * 60 * 1000,
+        // Pilots forwarded on roster membership alone (VAs with rosterTrust
+        // "any"), and where that list comes from.
+        rosterWatchUrl: resolvedRosterWatchUrl(),
+        rosterWatchCount: rosterWatch.size,
         // Events only POST when this is set — unset = matching runs but nothing
         // is forwarded to the other backend.
         forwardConfigured: !!process.env.VA_BOT_FORWARD_URL,
@@ -467,8 +679,10 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
       configs: vaConfigs.map((c) => ({
         code: c.code,
         name: c.name,
+        match: c.match,
         prefixes: c.prefixes,
         suffixes: c.suffixes,
+        regulars: c.regulars,
         hubs: c.hubs,
         servers: c.servers,
       })),
@@ -484,12 +698,17 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
         return e;
       });
       const hit = candidates.find((e) => e.willMatch) || null;
+      const username = req.query.username ? String(req.query.username) : '';
       out.test = {
         callsign,
         server,
         // The same global gate processSnapshot applies before matching any VA.
         globalServerGate: !EVENT_SERVERS.length || serverWanted({ servers: EVENT_SERVERS }, server),
         matched: hit ? { code: hit.code, name: hit.name } : null,
+        // Add &username=… to see whether a flight no VA claims would still be
+        // forwarded on the roster watch list alone.
+        username: username || null,
+        rosterWatched: username ? isWatchedPilot(username) : null,
         candidates,
       };
     }
@@ -501,8 +720,10 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
 module.exports = {
   firstToken,
   compact,
+  matchMode,
   normalizeConfig,
   callsignMatches,
+  matchesExactShape,
   explainMatch,
   filterLiveRoster,
   airborneState,
@@ -510,6 +731,10 @@ module.exports = {
   matchVa,
   resolvedVaListUrl,
   refreshVaConfigs,
+  resolvedRosterWatchUrl,
+  refreshRosterWatch,
+  setRosterWatch,
+  isWatchedPilot,
   processSnapshot,
   initEventEngine,
   registerRoutes,
