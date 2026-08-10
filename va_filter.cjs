@@ -82,6 +82,21 @@ function patternParts(pattern) {
   return { prefix: c.slice(0, first), suffix: c.slice(last + 1) };
 }
 
+// How hard we work to call a flight this VA's. Owner/staff pick one per VA (the
+// `callsignMatch` field on the va-ads listing); anything unrecognised is
+// 'strict', because showing somebody else's pilot as yours is the error a VA has
+// not agreed to.
+//   'exact'  — the callsign must BE the registered shape: <prefix><number><tag>,
+//              nothing before, between or after it. "Air Canada 001VA" only.
+//   'strict' — declared prefix AND the tag on one of the last two tokens, so a
+//              pilot may append a division/event tag after the VA one.
+//   'broad'  — the declared prefix alone is enough, tag or no tag.
+const MATCH_MODES = new Set(['exact', 'strict', 'broad']);
+function matchMode(v) {
+  const m = String(v || '').trim().toLowerCase();
+  return MATCH_MODES.has(m) ? m : 'strict';
+}
+
 // Turn raw input (query param or VA-list item) into the normalised matching
 // config. Accepts the various field names the backends use, including the
 // va-ads `callsign` mask ("OCEAN ##VA").
@@ -92,17 +107,23 @@ function normalizeConfig(q = {}) {
   // suffixes: uppercased, whitespace stripped; [] => prefix-only match.
   let suffixes = csv(q.suffixes || q.callsignSuffixes).map(compact).filter(Boolean);
 
-  // No explicit prefix/suffix lists? Derive them from the VA's callsign mask
+  // No explicit prefix/suffix lists? Derive them from the VA's callsign mask(s)
   // ("Air Canada ##VA", or just "Air Canada"). The WHOLE fixed part becomes the
   // prefix — "AIRCANADA", not just "AIR" — so it can't collide with "Air Force".
-  // The trailing literal (if any) becomes the suffix tag ("VA"). Explicit lists,
-  // if given, always win.
-  const mask = q.callsignPattern || q.callsignTemplate || q.callsign;
-  if ((!prefixes.length || !suffixes.length) && mask) {
-    const { prefix, suffix } = patternParts(mask);
-    if (!prefixes.length && prefix) prefixes = [prefix];
-    if (!suffixes.length && suffix) suffixes = [suffix];
+  // The trailing literal (if any) becomes the suffix tag ("VA"). A listing may
+  // hold several callsigns (parent brand + sub-fleets) in `callsigns`; every one
+  // of them contributes, so a VA's second callsign is not silently unmatched.
+  // Explicit lists, if given, always win.
+  const masks = q.callsignPattern || q.callsignTemplate || q.callsigns || q.callsign;
+  if ((!prefixes.length || !suffixes.length) && masks) {
+    const parts = (Array.isArray(masks) ? masks : [masks]).map(patternParts);
+    if (!prefixes.length) prefixes = [...new Set(parts.map((p) => p.prefix).filter(Boolean))];
+    if (!suffixes.length) suffixes = [...new Set(parts.map((p) => p.suffix).filter(Boolean))];
   }
+
+  // regulars: untagged callsigns matched by PREFIX ONLY and always included,
+  // even while the prefixes above run in tag mode (staff / charter callsigns).
+  const regulars = csv(q.regulars || q.regularCallsigns || q.callsignRegulars).map(compact).filter(Boolean);
 
   // code: an explicit short code if one was given, else the full prefix.
   const code = firstToken(q.va || q.code || q.callsignCode) || prefixes[0] || '';
@@ -119,6 +140,8 @@ function normalizeConfig(q = {}) {
     name: (q.name && String(q.name)) || code,
     prefixes,
     suffixes,
+    regulars,
+    match: matchMode(q.callsignMatch || q.match),
     hubs,
     servers,
   };
@@ -137,25 +160,73 @@ function tokenHasSuffixTag(token, tag) {
   return before >= '0' && before <= '9';
 }
 
+// Exact-mode test: the compacted callsign must be EXACTLY one of the registered
+// shapes — a declared prefix, then the flight number, then (when the VA uses
+// tags) one of those tags, and then nothing at all. "AIRCANADA001VA" ✓ ;
+// "AIRCANADA001VACX" ✗ (trailing extra), "AIRCANADA001" ✗ (no tag),
+// "AIRCANADAX01VA" ✗ (the number isn't a number). This is the setting a VA turns
+// on when it wants only the callsigns it registered and nothing that merely
+// resembles them.
+function matchesExactShape(compacted, prefixes, suffixes) {
+  for (const p of prefixes) {
+    if (!p || !compacted.startsWith(p)) continue;
+    const rest = compacted.slice(p.length); // "001VA"
+    if (!suffixes.length) {
+      if (/^\d+$/.test(rest)) return true; // prefix-only VA: <prefix><number>
+      continue;
+    }
+    for (const tag of suffixes) {
+      if (!tag || !rest.endsWith(tag)) continue;
+      if (/^\d+$/.test(rest.slice(0, rest.length - tag.length))) return true;
+    }
+  }
+  return false;
+}
+
+// Regular (untagged) callsigns are matched by name alone and never need a tag.
+// In exact mode they still have to be the whole callsign — the bare name, or the
+// name plus a flight number — rather than merely its opening.
+function matchesRegular(compacted, regulars, mode) {
+  return regulars.some((p) => {
+    if (!p || !compacted.startsWith(p)) return false;
+    if (mode !== 'exact') return true;
+    const rest = compacted.slice(p.length);
+    return rest === '' || /^\d+$/.test(rest);
+  });
+}
+
 // A callsign belongs to the VA when (after uppercasing, stripping separators
 // and trailing weight-class words) its compacted form STARTS WITH a declared
-// prefix and — if the VA uses suffix tags — its LAST token CARRIES one of those
-// tags. Prefix-only VAs (no suffixes configured) match on the prefix alone.
-// The whole leading name is compacted into the prefix ("AIRCANADA"), so "Air
-// Canada" matches only Air Canada, never "Air France".
+// prefix and — if the VA uses suffix tags — one of the last two tokens CARRIES
+// one of those tags. Prefix-only VAs (no suffixes configured) match on the
+// prefix alone. The whole leading name is compacted into the prefix
+// ("AIRCANADA"), so "Air Canada" matches only Air Canada, never "Air France".
+//
+// `cfg.match` decides how much slack that rule has — see MATCH_MODES. Mirrors
+// embed.js callsignMatches so the widget and the event feed agree on who is a
+// member.
 function callsignMatches(callsign, cfg) {
   let tokens = callsignTokens(callsign);
   // Strip spoken weight-class words off the end ("... Heavy" / "... Super").
   while (tokens.length > 1 && WEIGHT_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
   if (!tokens.length) return false;
 
-  const c = tokens.join('');          // "AIRCANADA001VA"
-  const last = tokens[tokens.length - 1]; // "001VA"
+  const mode = cfg.match || 'strict';
+  const c = tokens.join(''); // "AIRCANADA001VA"
+
+  // Always-included untagged callsigns first — they bypass the tag rule.
+  if (matchesRegular(c, cfg.regulars || [], mode)) return true;
 
   const prefixHit = cfg.prefixes.some((p) => p && c.startsWith(p));
-  if (!cfg.suffixes.length) return prefixHit; // prefix-only VA
-  if (!prefixHit) return false;               // tag mode: BOTH must hold
-  return cfg.suffixes.some((tag) => tokenHasSuffixTag(last, tag));
+  if (!prefixHit) return false;
+  if (mode === 'exact') return matchesExactShape(c, cfg.prefixes, cfg.suffixes);
+  if (mode === 'broad') return true;          // the airline name is enough
+  if (!cfg.suffixes.length) return true;      // prefix-only VA
+  // Tag mode. A pilot often appends a second trailing tag (division / event code)
+  // after the VA one — "Air Canada 001VA CX" — so either of the last two tokens
+  // carrying a configured tag counts.
+  const tail = tokens.slice(-2);
+  return cfg.suffixes.some((tag) => tail.some((t) => tokenHasSuffixTag(t, tag)));
 }
 
 // Same decision as callsignMatches, but returns the intermediate reasoning so
@@ -165,23 +236,33 @@ function callsignMatches(callsign, cfg) {
 function explainMatch(callsign, cfg) {
   let tokens = callsignTokens(callsign);
   while (tokens.length > 1 && WEIGHT_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
+  const mode = cfg.match || 'strict';
   const compacted = tokens.join('');
+  const tail = tokens.slice(-2);
   const lastToken = tokens[tokens.length - 1] || '';
   const prefixMatch = cfg.prefixes.some((p) => p && compacted.startsWith(p));
-  const suffixRequired = cfg.suffixes.length > 0;
+  // A tag is only *required* in strict mode; exact folds it into the shape test
+  // and broad waives it outright.
+  const suffixRequired = mode === 'strict' && cfg.suffixes.length > 0;
   const suffixMatch = suffixRequired
-    ? cfg.suffixes.some((tag) => tokenHasSuffixTag(lastToken, tag))
-    : null; // null = VA is prefix-only, no suffix needed
+    ? cfg.suffixes.some((tag) => tail.some((t) => tokenHasSuffixTag(t, tag)))
+    : null; // null = no tag needed in this mode
   return {
     code: cfg.code,
     name: cfg.name,
+    match: mode,
     prefixes: cfg.prefixes,
     suffixes: cfg.suffixes,
+    regulars: cfg.regulars || [],
     compacted,
     lastToken,
     prefixMatch,
     suffixRequired,
     suffixMatch,
+    // Only meaningful in exact mode: did the callsign fit <prefix><number><tag>
+    // with nothing extra?
+    exactShapeMatch: mode === 'exact' ? matchesExactShape(compacted, cfg.prefixes, cfg.suffixes) : null,
+    regularMatch: matchesRegular(compacted, cfg.regulars || [], mode),
     matched: callsignMatches(callsign, cfg),
   };
 }
@@ -223,7 +304,9 @@ let vaConfigs = []; // normalised configs for every VA we watch
 // Replace the watched VA set from a raw list. Drops entries we can't match on.
 // Like embed.js, a VA matches on its prefix(es); suffix tags are optional. To
 // keep generic airline traffic out, a VA should declare a tag (e.g. "VA") so a
-// bare "Air Canada 1234" without the tag is ignored — see callsignMatches.
+// bare "Air Canada 1234" without the tag is ignored — see callsignMatches. A VA
+// that wants nothing but its registered shape sets `callsignMatch: "exact"` on
+// its listing, which is carried through here and applied per VA.
 function setVaConfigs(rawList) {
   const list = Array.isArray(rawList) ? rawList : [];
   vaConfigs = list
@@ -467,8 +550,10 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
       configs: vaConfigs.map((c) => ({
         code: c.code,
         name: c.name,
+        match: c.match,
         prefixes: c.prefixes,
         suffixes: c.suffixes,
+        regulars: c.regulars,
         hubs: c.hubs,
         servers: c.servers,
       })),
@@ -501,8 +586,10 @@ function registerRoutes(app, { getSessions, getFlightsCache }) {
 module.exports = {
   firstToken,
   compact,
+  matchMode,
   normalizeConfig,
   callsignMatches,
+  matchesExactShape,
   explainMatch,
   filterLiveRoster,
   airborneState,
