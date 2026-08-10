@@ -2633,6 +2633,73 @@ app.get('/api/live/tracks', (req, res) => {
     tracks: apiCache.tracks
   });
 });
+/**
+ * Which of these Infinite Flight aircraft are airborne RIGHT NOW?
+ *
+ * WHY THIS EXISTS. PublicApi v3 gives a VA's crew center its Live organization:
+ * the aircraft it owns and, per aircraft, a `/position` that is explicitly the
+ * LAST PERSISTED state — "can be stale when the aircraft is not actively
+ * reporting". The v3 docs say what to do about that in as many words: "To check
+ * whether the aircraft is currently active in multiplayer, compare this
+ * aircraft id with v2 FlightEntry.flightId from /public/v2/sessions/{sessionId}
+ * /flights."
+ *
+ * This service already holds exactly that, for every server, refreshed by the
+ * broadcast poller. So the comparison is a Map lookup here rather than a fleet's
+ * worth of extra calls against somebody's rate limit — and it costs the Infinite
+ * Flight API nothing at all, because it reads the cache the poller has already
+ * filled.
+ *
+ * READS THE CACHE ONLY. Never triggers a fetch. A cold cache answers "none
+ * active", which is the honest reading of "we have not been told otherwise" and
+ * is a far better failure than a fleet board that blocks for ten seconds while
+ * it wakes a poller up.
+ *
+ * POST, with the ids in the body, because a fleet of forty uuids is longer than
+ * a query string ought to be — and this is a lookup, not a mutation.
+ */
+app.post('/api/live/aircraft-active', cors({ origin: '*' }), (req, res) => {
+  const raw = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  // Capped so one request cannot ask us to walk every cached flight a hundred
+  // times over. Two hundred is far beyond any real VA fleet.
+  const ids = new Set(
+    raw.slice(0, 200)
+      .map((i) => String(i || '').trim())
+      .filter(Boolean)
+  );
+  if (!ids.size) return res.json({ ok: true, active: {}, checked: 0, servers: 0 });
+
+  const active = {};
+  let servers = 0;
+  for (const payload of apiCache.flights.values()) {
+    if (!payload || !Array.isArray(payload.flights)) continue;
+    servers++;
+    for (const f of payload.flights) {
+      if (!f || !f.flightId || !ids.has(f.flightId)) continue;
+      // First match wins. An aircraft cannot be flying on two servers at once,
+      // and a later duplicate would be a stale cache entry for a server the
+      // pilot has already left.
+      if (active[f.flightId]) continue;
+      active[f.flightId] = {
+        server: payload.server || '',
+        sessionId: payload.sessionId || '',
+        callsign: f.callsign || '',
+        username: f.username || '',
+        userId: f.userId || null,
+        departureIcao: f.departureIcao || null,
+        arrivalIcao: f.arrivalIcao || null,
+        position: f.position || null,
+        pilotState: f.pilotState,
+        // The cache's own age, so a caller can decide how much to believe it
+        // rather than having to assume it is live.
+        seenAt: payload.timestamp || null,
+      };
+    }
+  }
+
+  res.json({ ok: true, active, checked: ids.size, servers });
+});
+
 app.get('/if-sessions-test', async (req, res) => {
   try {
     if (!IF_API_KEY) return res.status(500).json(err(500, 'INFINITE_FLIGHT_API_KEY is not set'));
