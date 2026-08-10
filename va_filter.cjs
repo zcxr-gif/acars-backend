@@ -101,6 +101,20 @@ function matchMode(v) {
   return MATCH_MODES.has(m) ? m : 'strict';
 }
 
+// Every callsign mask a VA declared, in preference order. A listing may carry
+// the multi-value `callsigns` (the authoritative field), a legacy single
+// `callsign`, or — on older documents — BOTH, with `callsigns` sitting empty.
+// An empty array is truthy in JS, so `q.callsigns || q.callsign` silently
+// resolves to [] on exactly those older documents and the VA stops matching
+// anything. Hence the explicit length checks.
+function callsignMasks(q) {
+  for (const v of [q.callsignPattern, q.callsignTemplate, q.callsigns, q.callsign]) {
+    const list = (Array.isArray(v) ? v : [v]).filter((s) => String(s || '').trim());
+    if (list.length) return list;
+  }
+  return [];
+}
+
 // Turn raw input (query param or VA-list item) into the normalised matching
 // config. Accepts the various field names the backends use, including the
 // va-ads `callsign` mask ("OCEAN ##VA").
@@ -115,13 +129,21 @@ function normalizeConfig(q = {}) {
   // ("Air Canada ##VA", or just "Air Canada"). The WHOLE fixed part becomes the
   // prefix — "AIRCANADA", not just "AIR" — so it can't collide with "Air Force".
   // The trailing literal (if any) becomes the suffix tag ("VA"). A listing may
-  // hold several callsigns (parent brand + sub-fleets) in `callsigns`; every one
-  // of them contributes, so a VA's second callsign is not silently unmatched.
-  // Explicit lists, if given, always win.
-  const masks = q.callsignPattern || q.callsignTemplate || q.callsigns || q.callsign;
-  if ((!prefixes.length || !suffixes.length) && masks) {
-    const parts = (Array.isArray(masks) ? masks : [masks]).map(patternParts);
-    if (!prefixes.length) prefixes = [...new Set(parts.map((p) => p.prefix).filter(Boolean))];
+  // hold several callsigns (parent brand + sub-fleets); every one contributes,
+  // so a VA's second callsign is not silently unmatched. Explicit lists, if
+  // given, always win.
+  //
+  // `patterns` keeps the mask PAIRS as declared. The flat prefix/suffix lists
+  // lose which tag belongs to which airline, which is fine for the loose modes
+  // (a VA running one tag across several airlines is a documented setup) but not
+  // for 'exact', where a VA that registered "OCEAN ##VA" and "SHAMROCK ###EX"
+  // means those two shapes and not the four the cross-product would accept.
+  let patterns = [];
+  const masks = callsignMasks(q);
+  if ((!prefixes.length || !suffixes.length) && masks.length) {
+    const parts = masks.map(patternParts).filter((p) => p.prefix);
+    patterns = parts;
+    if (!prefixes.length) prefixes = [...new Set(parts.map((p) => p.prefix))];
     if (!suffixes.length) suffixes = [...new Set(parts.map((p) => p.suffix).filter(Boolean))];
   }
 
@@ -144,6 +166,10 @@ function normalizeConfig(q = {}) {
     name: (q.name && String(q.name)) || code,
     prefixes,
     suffixes,
+    // The declared airline+tag pairs, when the config came from callsign masks.
+    // Empty when prefixes/suffixes were given as independent lists — there are
+    // no pairs to keep then, and the cross-product IS the intent.
+    patterns,
     regulars,
     match: matchMode(q.callsignMatch || q.match),
     hubs,
@@ -187,6 +213,20 @@ function matchesExactShape(compacted, prefixes, suffixes) {
   return false;
 }
 
+// Exact mode against a config's DECLARED shapes. When the VA registered its
+// callsigns as masks we know which tag goes with which airline, so a VA holding
+// "OCEAN ##VA" and "SHAMROCK ###EX" matches exactly those two — not "Ocean 12EX"
+// or "Shamrock 4VA", which is what testing every prefix against every suffix
+// would let through. With no pairs on file (prefixes and suffixes supplied as
+// independent lists, as an embed config does) the cross-product is the intent,
+// so fall back to it.
+function matchesExactConfig(compacted, cfg) {
+  if (cfg.patterns && cfg.patterns.length) {
+    return cfg.patterns.some((p) => matchesExactShape(compacted, [p.prefix], p.suffix ? [p.suffix] : []));
+  }
+  return matchesExactShape(compacted, cfg.prefixes, cfg.suffixes);
+}
+
 // Regular (untagged) callsigns are matched by name alone and never need a tag.
 // In exact mode they still have to be the whole callsign — the bare name, or the
 // name plus a flight number — rather than merely its opening.
@@ -223,14 +263,25 @@ function callsignMatches(callsign, cfg) {
 
   const prefixHit = cfg.prefixes.some((p) => p && c.startsWith(p));
   if (!prefixHit) return false;
-  if (mode === 'exact') return matchesExactShape(c, cfg.prefixes, cfg.suffixes);
+  if (mode === 'exact') return matchesExactConfig(c, cfg);
   if (mode === 'broad') return true;          // the airline name is enough
-  if (!cfg.suffixes.length) return true;      // prefix-only VA
+
   // Tag mode. A pilot often appends a second trailing tag (division / event code)
   // after the VA one — "Air Canada 001VA CX" — so either of the last two tokens
   // carrying a configured tag counts.
   const tail = tokens.slice(-2);
-  return cfg.suffixes.some((tag) => tail.some((t) => tokenHasSuffixTag(t, tag)));
+  const carriesTag = (tag) => tail.some((t) => tokenHasSuffixTag(t, tag));
+
+  // With the declared pairs on file, each airline is held to ITS OWN tag. That
+  // matters for a VA whose callsigns don't all work the same way: a listing
+  // holding "BAW ###" (no tag) alongside "SPEEDBIRD ##VA" should accept
+  // "BAW 123" AND "Speedbird 12VA", where a single flattened suffix list would
+  // demand the tag from both and drop every BAW flight.
+  if (cfg.patterns && cfg.patterns.length) {
+    return cfg.patterns.some((p) => c.startsWith(p.prefix) && (!p.suffix || carriesTag(p.suffix)));
+  }
+  if (!cfg.suffixes.length) return true;      // prefix-only VA
+  return cfg.suffixes.some(carriesTag);
 }
 
 // Same decision as callsignMatches, but returns the intermediate reasoning so
@@ -265,7 +316,8 @@ function explainMatch(callsign, cfg) {
     suffixMatch,
     // Only meaningful in exact mode: did the callsign fit <prefix><number><tag>
     // with nothing extra?
-    exactShapeMatch: mode === 'exact' ? matchesExactShape(compacted, cfg.prefixes, cfg.suffixes) : null,
+    exactShapeMatch: mode === 'exact' ? matchesExactConfig(compacted, cfg) : null,
+    patterns: cfg.patterns || [],
     regularMatch: matchesRegular(compacted, cfg.regulars || [], mode),
     matched: callsignMatches(callsign, cfg),
   };

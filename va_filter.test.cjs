@@ -23,7 +23,7 @@
 
 const assert = require('assert');
 const {
-  normalizeConfig, callsignMatches, matchMode, setRosterWatch, isWatchedPilot,
+  normalizeConfig, callsignMatches, matchMode, setVaConfigs, setRosterWatch, isWatchedPilot,
 } = require('./va_filter.cjs');
 
 const tests = [];
@@ -61,6 +61,87 @@ test('every callsign a VA flies under contributes a prefix', () => {
   const cfg = normalizeConfig({ callsigns: ['OCEAN ##VA', 'SHAMROCK ###EX'] });
   assert.deepStrictEqual(cfg.prefixes, ['OCEAN', 'SHAMROCK']);
   assert.deepStrictEqual(cfg.suffixes, ['VA', 'EX']);
+});
+
+test('a listing with an EMPTY callsigns[] still matches on its legacy callsign', () => {
+  // Older documents carry the single `callsign` with `callsigns` left empty, and
+  // an empty array is truthy — so a plain `q.callsigns || q.callsign` resolves
+  // to [] here and the VA silently stops matching anything at all.
+  const cfg = normalizeConfig({ name: 'Ocean', callsign: 'OCEAN ##VA', callsigns: [] });
+  assert.deepStrictEqual(cfg.prefixes, ['OCEAN']);
+  assert.deepStrictEqual(cfg.suffixes, ['VA']);
+  assert.strictEqual(callsignMatches('Ocean 12VA', cfg), true);
+});
+
+test('a VA with no callsign at all is dropped, not left matching everything', () => {
+  const kept = setVaConfigs([
+    { name: 'Ocean', callsign: 'OCEAN ##VA', callsigns: [] },
+    { name: 'Ghost', callsign: null, callsigns: [] },
+  ]);
+  assert.strictEqual(kept, 1);
+});
+
+/* =========================
+ * Several callsigns, and they need not work alike
+ * ========================= */
+
+test('exact holds each airline to ITS OWN tag, not the cross-product', () => {
+  // "OCEAN ##VA" + "SHAMROCK ###EX" is two registered shapes, not four. Testing
+  // every prefix against every suffix would let "Ocean 12EX" through.
+  const cfg = normalizeConfig({ callsigns: ['OCEAN ##VA', 'SHAMROCK ###EX'], callsignMatch: 'exact' });
+  expect(cfg, [
+    ['Ocean 12VA', true],
+    ['Shamrock 004EX', true],
+    ['Shamrock 004EX Heavy', true],
+    ['Ocean 12EX', false],
+    ['Shamrock 4VA', false],
+    ['Ocean 12', false],
+  ]);
+});
+
+test('a tagless callsign alongside a tagged one keeps working', () => {
+  // "BAW ###" declares no tag; "SPEEDBIRD ##VA" declares one. Flattening both
+  // into a single suffix list demands "VA" from BAW too and drops every BAW
+  // flight — so the pairs are what the tag rule is applied against.
+  const strict = normalizeConfig({ callsigns: ['BAW ###', 'SPEEDBIRD ##VA'] });
+  expect(strict, [
+    ['BAW 123', true],
+    ['Speedbird 12VA', true],
+    ['Speedbird 12', false],   // this one DID declare a tag
+    ['Ryanair 4VA', false],
+  ]);
+  const exact = normalizeConfig({ callsigns: ['BAW ###', 'SPEEDBIRD ##VA'], callsignMatch: 'exact' });
+  expect(exact, [
+    ['BAW 123', true],
+    ['Speedbird 12VA', true],
+    ['BAW 123VA', false],      // BAW declared no tag, so nothing may follow
+  ]);
+});
+
+test('one tag shared across several airlines still works', () => {
+  const cfg = normalizeConfig({ callsigns: ['AIR CANADA ##VA', 'JAZZ ##VA'] });
+  expect(cfg, [
+    ['Air Canada 001VA', true],
+    ['Jazz 44VA', true],
+    ['Air Canada 001', false],
+    ['Air France 1VA', false],
+  ]);
+});
+
+test('independent prefix/suffix lists keep their cross-product', () => {
+  // An embed config supplies these as two separate lists — there are no pairs to
+  // preserve and running one tag across several airlines is the documented setup,
+  // so every combination is meant to match.
+  const cfg = normalizeConfig({
+    callsignPrefixes: 'Air Canada, Jazz', callsignSuffixes: 'VA, EX', callsignMatch: 'exact',
+  });
+  assert.deepStrictEqual(cfg.patterns, []);
+  expect(cfg, [
+    ['Air Canada 001VA', true],
+    ['Air Canada 001EX', true],
+    ['Jazz 44EX', true],
+    ['Air France 1VA', false],
+  ]);
 });
 
 test('an unknown or missing mode is strict, never the loosest one', () => {
