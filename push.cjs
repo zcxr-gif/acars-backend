@@ -729,6 +729,9 @@ function liveActivityAttributes(username, flight) {
     scheduledArrival: nowSec + enrouteSec - APPLE_EPOCH_OFFSET,
     totalDistanceNm: Math.round(totalNm * 10) / 10,
     pilotUsername: username,
+    // The app never saw this activity start, so this is the only thing tying
+    // the banner back to an aircraft it can look up.
+    flightId: flight?.flightId || '',
   };
 }
 
