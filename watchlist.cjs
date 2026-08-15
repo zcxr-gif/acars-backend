@@ -19,6 +19,7 @@
 const cors = require('cors');
 const supabase = require('./supabase.cjs');
 const push = require('./push.cjs');
+const friendEvents = require('./friend_events.cjs');
 
 function boolEnv(name, dflt) {
   const v = String(process.env[name] ?? '').trim().toLowerCase();
@@ -35,6 +36,14 @@ function capabilities() {
     events: boolEnv('WATCHLIST_EVENTS_ENABLED', true),
     // Never advertise push without working APNs credentials.
     push: push.configured() && boolEnv('PUSH_ENABLED', true),
+    // Which event kinds a client can subscribe to. Sent as a list rather than
+    // a flag so a client built against an older backend keeps working: it asks
+    // for what it knows, and anything it doesn't recognise here it ignores.
+    eventKinds: push.EVENT_KINDS,
+    // Whether a takeoff can raise a Live Activity on its own. Needs the same
+    // APNs credentials as any other push, plus a push-to-start token from the
+    // device — the client checks the first here and the second locally.
+    liveActivity: push.configured() && boolEnv('LIVE_ACTIVITY_ENABLED', true),
   };
 }
 
@@ -157,6 +166,14 @@ function processSnapshot(flightsBySession) {
     }
   }
 
+  // Everything any live socket is subscribed to, so a client watching the feed
+  // without having registered for pushes still gets takeoff events.
+  const subscribed = new Set();
+  for (const sub of socketSubs.values()) {
+    for (const name of sub.usernames) subscribed.add(name);
+  }
+  friendEvents.setEphemeralWatched(subscribed);
+
   if (!primed) {
     for (const [key, flight] of present) onlineFlights.set(key, flight);
     primed = true;
@@ -181,11 +198,27 @@ function processSnapshot(flightsBySession) {
     }
   }
 
+  // Ground↔air transitions for the pilots being watched. Runs after presence
+  // so a pilot who has only just appeared is already primed, and fires through
+  // the same path as online/offline — one place decides what an event does.
+  if (primed) {
+    try {
+      friendEvents.processPresent(present, fireEvent);
+    } catch (e) {
+      console.warn('[watchlist] ⚠️ Friend event processing failed:', e.message);
+    }
+  }
+
   push
     .pushLiveActivityUpdates(byFlightId)
     .catch((e) => console.warn('[watchlist] ⚠️ Live activity updates failed:', e.message));
 }
 
+/**
+ * One watchlist event: out to every subscribed socket, and on to APNs.
+ *
+ * @param {'pilot_online'|'pilot_offline'|'takeoff'|'landing'} type
+ */
 function fireEvent(type, username, flight) {
   const lower = String(username).toLowerCase();
   const event = { type, username, flight, timestamp: Date.now() };
@@ -202,10 +235,14 @@ function fireEvent(type, username, flight) {
     }
   }
 
-  if (type === 'pilot_online') {
+  // The socket event names presence transitions `pilot_*`; the push layer
+  // names all four events after what happened. Mapped in one place so the
+  // socket contract the web client is built against doesn't have to change.
+  const pushKind = { pilot_online: 'online', pilot_offline: 'offline', takeoff: 'takeoff', landing: 'landing' }[type];
+  if (pushKind) {
     push
-      .notifyWatchersPilotOnline(username, flight)
-      .catch((e) => console.warn('[watchlist] ⚠️ Online push failed:', e.message));
+      .notifyWatchers(pushKind, username, flight)
+      .catch((e) => console.warn(`[watchlist] ⚠️ ${pushKind} push failed:`, e.message));
   }
 }
 
@@ -215,4 +252,5 @@ module.exports = {
   registerRoutes,
   attachSocket,
   processSnapshot,
+  friendEventStats: friendEvents.stats,
 };
