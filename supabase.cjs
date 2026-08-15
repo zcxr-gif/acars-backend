@@ -314,6 +314,28 @@ async function getWatcherUserIds(username) {
   return [...new Set(ids)];
 }
 
+/**
+ * Every pilot on anybody's watchlist, lowercased.
+ *
+ * Read once a minute by the friend-event engine to decide whose ground/air
+ * state is worth tracking, so it is capped rather than paged: past the cap the
+ * engine simply tracks fewer pilots, which costs some people their takeoff
+ * events but can never turn one Supabase hiccup into an unbounded response.
+ */
+const ALL_WATCHED_LIMIT = 20000;
+
+async function listAllWatchedUsernames() {
+  const { data } = await requireRest().get('/user_watchlist', {
+    params: { select: 'watched_username', limit: ALL_WATCHED_LIMIT },
+  });
+  const names = new Set();
+  for (const row of Array.isArray(data) ? data : []) {
+    const name = typeof row.watched_username === 'string' ? row.watched_username.trim().toLowerCase() : '';
+    if (name) names.add(name);
+  }
+  return names;
+}
+
 /* =========================
  * Notification preference (user_preferences.notification_watchlist_enabled)
  * ========================= */
@@ -366,5 +388,6 @@ module.exports = {
   addWatchlistEntry,
   deleteWatchlistEntry,
   getWatcherUserIds,
+  listAllWatchedUsernames,
   isWatchlistNotificationEnabled,
 };

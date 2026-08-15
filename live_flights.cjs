@@ -264,6 +264,10 @@ app.get('/api/admin/diagnostics', (req, res) => {
       // had to resync, and the sampled bytes-on-the-wire saving vs sending the
       // full snapshot every tick.
       delta: flightDelta.snapshot(),
+      // Friend takeoff/landing detection: how many pilots are being watched,
+      // how many flights currently hold ground/air state, and how many are
+      // mid-flip. A takeoff nobody received is diagnosed from here.
+      friendEvents: watchlist.friendEventStats(),
       config: {
         activePollMs: ACTIVE_POLL_MS,
         idlePollMs: IDLE_POLL_MS,
