@@ -20,6 +20,7 @@ const cors = require('cors');
 const supabase = require('./supabase.cjs');
 const push = require('./push.cjs');
 const friendEvents = require('./friend_events.cjs');
+const liveHydrate = require('./live_hydrate.cjs');
 
 function boolEnv(name, dflt) {
   const v = String(process.env[name] ?? '').trim().toLowerCase();
@@ -212,6 +213,17 @@ function processSnapshot(flightsBySession) {
   push
     .pushLiveActivityUpdates(byFlightId)
     .catch((e) => console.warn('[watchlist] ⚠️ Live activity updates failed:', e.message));
+
+  // Pilots broadcasting through Infinite Flight Connect whose app iOS has
+  // suspended behind the sim. Their position comes off this same snapshot, by
+  // the flight id they published themselves, so they stay on the map instead of
+  // dropping off it four minutes into the flight. Rate-limited inside; never
+  // awaited, for the same reason as everything else on this path.
+  try {
+    liveHydrate.processSnapshot(byFlightId);
+  } catch (e) {
+    console.warn('[watchlist] ⚠️ Live status hydration failed:', e.message);
+  }
 }
 
 /**
@@ -253,4 +265,5 @@ module.exports = {
   attachSocket,
   processSnapshot,
   friendEventStats: friendEvents.stats,
+  hydrationStats: liveHydrate.stats,
 };

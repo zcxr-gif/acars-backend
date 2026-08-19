@@ -337,6 +337,27 @@ async function listAllWatchedUsernames() {
 }
 
 /* =========================
+ * Stored procedures
+ * ========================= */
+
+/**
+ * Call a `security definer` function with the service key.
+ *
+ * The live-status surface is functions rather than tables on purpose — the
+ * table itself is unreadable to every role but this one, because "?select=*"
+ * against a table of live positions is the real-time location of every pilot
+ * on the platform. Reaching it through the named function keeps the rule about
+ * who may see what in the database rather than in this file.
+ *
+ * @param {string} fn    function name, without the schema
+ * @param {object} body  named arguments, PostgREST style
+ */
+async function rpc(fn, body = {}) {
+  const { data } = await requireRest().post(`/rpc/${fn}`, body);
+  return data;
+}
+
+/* =========================
  * Notification preference (user_preferences.notification_watchlist_enabled)
  * ========================= */
 
@@ -390,4 +411,5 @@ module.exports = {
   getWatcherUserIds,
   listAllWatchedUsernames,
   isWatchlistNotificationEnabled,
+  rpc,
 };
