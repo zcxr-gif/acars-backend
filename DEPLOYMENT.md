@@ -66,6 +66,90 @@ Sweeps upload serially and refuse to overlap, so the archivist's memory cost is
 one trail at a time regardless of backlog. A failed upload releases its claim
 and is retried on the next sweep.
 
+## Live status hydration (`live_hydrate.cjs`)
+
+Keeps a pilot broadcasting through Infinite Flight Connect on the map after iOS
+suspends their app behind the sim, by refreshing their position from the public
+feed. It runs inside `processSnapshot`, on the 15s broadcast path, so the number
+that matters is what a poll costs when it is *not* running a pass — which is
+every poll but one a minute.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `LIVE_HYDRATION_ENABLED` | on | `0`/`false` hydrates nothing. |
+| `LIVE_HYDRATION_INTERVAL_MS` | `60000` | How often a snapshot is posted. Floor of 15s. |
+| `LIVE_HYDRATION_MAX_ROWS` | `500` | Rows per pass. A safety rail, not a working limit. |
+| `CONNECT_ALERTS_ENABLED` | on | `0`/`false` never sends the sim-drop notice. |
+| `CONNECT_ALERT_INTERVAL_MS` | `120000` | How often the drop check runs. Floor of 30s. |
+| `CONNECT_ALERTS_MAX_PER_PASS` | `100` | Notices claimed per pass — see below. |
+
+Everything here no-ops without `SUPABASE_SERVICE_ROLE_KEY`.
+
+### Why one pass a minute and not one every fifteen seconds
+
+The position TTL is four minutes, so anything under that keeps a pilot live and
+the obvious tuning is "as often as possible". That is the wrong ceiling. This is
+a write to a row Postgres does not overwrite in place, and the `fillfactor = 70`
+and dropped-`updated_at`-index work on `pilot_live_status` exists to keep the
+dead-tuple cost of a fourteen-hour flight bounded.
+
+So the rule is: **never write more often than the app it stands in for**, which
+broadcasts every 45s in the cruise. Sixty seconds is that, and comfortably
+inside the TTL, and costs 60 row versions an hour per suspended pilot against
+the app's own 80.
+
+### Why the notice claims a bounded number
+
+`pilot_connect_alerts_due` marks a flight as told **in the same statement** that
+hands it over, because the alternative — the backend remembering — does not
+survive a redeploy, and a pilot told twice on one flight that their sim went
+quiet is worse than not being told.
+
+The cost of that is that marking and delivering are two systems and only the
+first is transactional. So the function takes a limit, and the backend asks for
+no more than it will actually push through APNs on this pass. Anything over it
+is still due on the next pass rather than marked told and silently skipped.
+`CONNECT_ALERTS_MAX_PER_PASS` is therefore also roughly how long a pass can be
+held open by a mass drop — pushes go out one device at a time.
+
+### Measured
+
+```
+node --expose-gc bench_hydrate.cjs        # Node side, Supabase stubbed
+BENCH_BROADCASTING=5000 node --expose-gc bench_hydrate.cjs   # the safety rail
+```
+
+800 flights on the feed, 200 of them broadcasting and suspended, 240 polls
+(one simulated hour), single core:
+
+| | |
+|---|---|
+| Mean per poll | **0.048 ms** — 0.0003% of the 15s budget |
+| Slowest poll | 0.77 ms |
+| Hydration passes | 60, mean 0.17 ms |
+| Posted | 29.6 KB per pass |
+| Heap retained | **330 KB**, flat from 1 hour to 4 |
+
+At 5,000 broadcasting — far past anything real — the batch cap holds it to 500
+rows and 74 KB per pass, 2.3 ms worst poll, 1.6 MB retained.
+
+The database half, measured on a throwaway Postgres 16 with the migrations
+applied, 200 suspended pilots, 60 passes:
+
+| | |
+|---|---|
+| `pilot_live_hydrate` | **13.2 ms** mean, 20.0 ms worst, once a minute |
+| HOT updates | **97.1%** (11,845 of 12,200) |
+| Table size | 80 kB → **176 kB** after an hour, and stable |
+| `pilot_connect_alerts_due` | 4.0 ms claiming 100, 2.1 ms for the rest |
+
+97% HOT is the number to watch: it is what the fillfactor is for, and it is why
+an hour of hydration adds 96 kB rather than the 3.6 MB the raw row-version count
+would suggest. If it falls, something has added an index on a column one of
+these writes touches — `latitude`, `longitude`, `altitude_msl`, `heading`,
+`ground_speed_knots`, `vertical_speed_fpm`, `position_source`, `last_live_at` or
+`updated_at`. The dropped `pilot_live_status_fresh_idx` is the cautionary tale.
+
 ## What to watch after deploying
 
 - **First boot after upgrading** runs a bounded migration of legacy `path_json`
@@ -77,3 +161,10 @@ and is retried on the next sweep.
   the volume or accept the shorter window.
 - **`[archivist] ... could not be archived`** is retried automatically. Sustained
   failures mean the archive backend is unreachable, not that flights are lost.
+- **`liveHydration` on `/api/admin/diagnostics`.** `watching: 0` means nobody is
+  broadcasting through Connect at all; a non-zero `watching` with `matched: 0`
+  means none of them has a flight on the feed right now. `lastError` holds the
+  last failure. A Supabase outage shows here as a stale `lastRunAt` and does
+  **not** turn into a retry storm — the refresh clock is stamped whether or not
+  the fetch worked, so a failure costs a minute of staleness rather than a
+  request every three seconds.

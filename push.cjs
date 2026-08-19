@@ -611,6 +611,65 @@ function notifyWatchersPilotOnline(username, flight) {
   return notifyWatchers('online', username, flight);
 }
 
+/**
+ * A notification to a pilot about their OWN flight.
+ *
+ * Everything above this line is about somebody you are watching; this is the
+ * other direction, and it needs a different address. Watchlist pushes are
+ * routed by APNs token because the native app registers the usernames it cares
+ * about against its own token — but "your sim link dropped" has to reach the
+ * person flying, who is identified by the account their live status is keyed
+ * on. `push_devices` is the only table that joins the two, which is why the app
+ * now registers its token there once it is signed in.
+ *
+ * Silent when that registration has not happened. There is no fallback worth
+ * having: guessing at a device from a username would mean notifying whoever
+ * happened to be watching that pilot instead of the pilot.
+ *
+ * @param {string} userId  Supabase account id
+ * @returns {Promise<number>} how many devices were reached
+ */
+async function notifyAccount(userId, { title, subtitle, body, kind, collapseId, data = {} }) {
+  if (!configured() || !userId) return 0;
+
+  let devices = [];
+  try {
+    devices = stmts.devicesForUser.all(userId);
+  } catch (e) {
+    console.warn('[push] ⚠️ Device lookup failed:', e.message);
+    return 0;
+  }
+  if (!devices.length) return 0;
+
+  const payload = {
+    aps: {
+      alert: { title, subtitle, body },
+      sound: 'default',
+      'thread-id': 'inflight-own-flight',
+      // Passive on purpose. This arrives while the pilot is flying in another
+      // app, and it is information rather than something to act on now —
+      // interrupting a hand-flown approach to say the telemetry went quiet
+      // would be worse than the problem it reports.
+      'interruption-level': 'passive',
+    },
+    kind,
+    ...data,
+  };
+  const headers = {
+    'apns-topic': APNS_TOPIC,
+    'apns-push-type': 'alert',
+    'apns-priority': '5',
+    'apns-collapse-id': String(collapseId || kind).slice(0, 64),
+  };
+
+  let sent = 0;
+  for (const device of devices) {
+    const status = await sendToToken(device.device_token, headers, payload);
+    if (status >= 200 && status < 300) sent += 1;
+  }
+  return sent;
+}
+
 /** Every pilot anyone is watching — the set the event engine tracks state for. */
 function watchedUsernames() {
   const out = new Set();
@@ -857,5 +916,6 @@ module.exports = {
   notifyWatchersPilotOnline,
   watchedUsernames,
   pushLiveActivityUpdates,
+  notifyAccount,
   EVENT_KINDS,
 };

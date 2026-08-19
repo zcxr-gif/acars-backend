@@ -268,6 +268,10 @@ app.get('/api/admin/diagnostics', (req, res) => {
       // how many flights currently hold ground/air state, and how many are
       // mid-flip. A takeoff nobody received is diagnosed from here.
       friendEvents: watchlist.friendEventStats(),
+      // Connect hydration: how many pilots are broadcasting from the sim,
+      // how many of them the feed can currently see, and how many drop
+      // notices have gone out. `watching: 0` means nobody is broadcasting.
+      liveHydration: watchlist.hydrationStats(),
       config: {
         activePollMs: ACTIVE_POLL_MS,
         idlePollMs: IDLE_POLL_MS,
