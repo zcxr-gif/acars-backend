@@ -45,9 +45,49 @@
 const push = require('./push.cjs');
 const supabase = require('./supabase.cjs');
 
+// How often a snapshot is posted.
+//
+// Two ceilings, and the tighter one is not the obvious one. The position TTL is
+// four minutes, so anything under that keeps a pilot live — but this is a write
+// to a row Postgres does not overwrite in place, and the whole fillfactor and
+// dropped-index work on `pilot_live_status` exists to keep the dead-tuple cost
+// of a long flight bounded. Writing every thirty seconds would have made the
+// server a heavier writer than the app it stands in for, which broadcasts every
+// 45 seconds in the cruise.
+//
+// So: never more often than the app, and comfortably inside the TTL. Sixty
+// seconds is both, and costs 60 row versions an hour per suspended pilot
+// against the app's 80.
 const HYDRATE_INTERVAL_MS = Math.max(
-  5000,
-  Number(process.env.LIVE_HYDRATION_INTERVAL_MS) || 30 * 1000
+  15 * 1000,
+  Number(process.env.LIVE_HYDRATION_INTERVAL_MS) || 60 * 1000
+);
+
+// Most of a pass is one POST and one UPDATE, both linear in this. It is a
+// safety rail rather than a working limit: the real number is how many people
+// are flying with Connect attached, which is tens. A watched set that somehow
+// grew to thousands would otherwise mean a megabyte of JSON a minute and a
+// thousand row versions with it.
+const MAX_ROWS_PER_PASS = Math.max(
+  1,
+  Number(process.env.LIVE_HYDRATION_MAX_ROWS) || 500
+);
+
+// The drop notice does not need to be asked for on every pass. It fires on a
+// sim that has been quiet for twice the TTL — eight minutes — so checking every
+// two is already four times finer than the thing it detects, and it keeps the
+// scan off the common path where the answer is always "nobody".
+// Pushes go out one device at a time, so this is also roughly how long a pass
+// can be held open by a mass drop — a hundred pilots at APNs round-trip speed.
+// Anything over it is still due on the next pass rather than lost.
+const MAX_ALERTS_PER_PASS = Math.max(
+  1,
+  Number(process.env.CONNECT_ALERTS_MAX_PER_PASS) || 100
+);
+
+const ALERT_INTERVAL_MS = Math.max(
+  30 * 1000,
+  Number(process.env.CONNECT_ALERT_INTERVAL_MS) || 2 * 60 * 1000
 );
 
 // How often the set of flight ids worth matching is re-read. Deliberately
@@ -70,12 +110,23 @@ let watchedFetchedAt = 0;
 let watchedInFlight = null;
 
 async function refreshWatched() {
-  const rows = await supabase.rpc('pilot_live_hydratable', {});
-  const next = new Set();
-  for (const row of Array.isArray(rows) ? rows : []) {
-    if (typeof row?.flight_id === 'string' && row.flight_id) next.add(row.flight_id);
+  try {
+    const rows = await supabase.rpc('pilot_live_hydratable', {});
+    const next = new Set();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (typeof row?.flight_id === 'string' && row.flight_id) next.add(row.flight_id);
+    }
+    watched = next;
+  } catch (e) {
+    console.warn('[hydrate] ⚠️ Could not refresh broadcast flights:', e.message);
+    // Keep the previous set rather than going blind for a minute.
   }
-  watched = next;
+
+  // Stamped whether or not that worked, and that is the point. Stamping only on
+  // success means a Supabase outage leaves the clock in the past, `watchedSet`
+  // finds a refresh due on every single poll, and the backend answers an
+  // outage by retrying against it every three seconds. Failing quietly for a
+  // minute is the correct response to a failure.
   watchedFetchedAt = Date.now();
   return watched;
 }
@@ -87,9 +138,7 @@ async function refreshWatched() {
 function watchedSet() {
   if (Date.now() - watchedFetchedAt > WATCHED_TTL_MS && !watchedInFlight) {
     watchedInFlight = refreshWatched()
-      .catch((e) => {
-        console.warn('[hydrate] ⚠️ Could not refresh broadcast flights:', e.message);
-      })
+      .catch(() => {})
       .finally(() => { watchedInFlight = null; });
   }
   return watched;
@@ -146,6 +195,7 @@ function hydrationRow(flightId, flight) {
  * ========================= */
 
 let lastRunAt = 0;
+let lastAlertAt = 0;
 let inFlight = false;
 const stat = { matched: 0, hydrated: 0, alerts: 0, lastRunAt: 0, lastError: null };
 
@@ -174,6 +224,7 @@ function processSnapshot(byFlightId) {
 
   const rows = [];
   for (const id of ids) {
+    if (rows.length >= MAX_ROWS_PER_PASS) break;
     const flight = byFlightId.get(id);
     if (!flight) continue; // on the feed's books but not in the air right now
     const row = hydrationRow(id, flight);
@@ -203,6 +254,8 @@ async function hydrate(rows) {
   stat.lastRunAt = Date.now();
   stat.lastError = null;
 
+  if (Date.now() - lastAlertAt < ALERT_INTERVAL_MS) return;
+  lastAlertAt = Date.now();
   await sendDropNotices(rows.map((r) => r.flight_id));
 }
 
@@ -222,7 +275,13 @@ async function sendDropNotices(flightIds) {
 
   let due = [];
   try {
-    due = await supabase.rpc('pilot_connect_alerts_due', { p_flight_ids: flightIds });
+    due = await supabase.rpc('pilot_connect_alerts_due', {
+      p_flight_ids: flightIds,
+      // Claim only what this pass will actually push. The database marks a
+      // flight told in the same statement that hands it over, so asking for
+      // more than can be delivered would mark pilots told and never tell them.
+      p_limit: MAX_ALERTS_PER_PASS,
+    });
   } catch (e) {
     console.warn('[hydrate] ⚠️ Could not read due Connect alerts:', e.message);
     return;
