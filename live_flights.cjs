@@ -268,6 +268,11 @@ app.get('/api/admin/diagnostics', (req, res) => {
       // how many flights currently hold ground/air state, and how many are
       // mid-flip. A takeoff nobody received is diagnosed from here.
       friendEvents: watchlist.friendEventStats(),
+      // Own-flight announcements: how many pilots have the switch on and a
+      // handle nobody else claims (`targets`), and how many of their flights
+      // currently hold state. `targets: 0` with signed-in pilots flying means
+      // the profile handles are missing, not that the detector is broken.
+      ownFlightEvents: watchlist.ownFlightEventStats(),
       // Connect hydration: how many pilots are broadcasting from the sim,
       // how many of them the feed can currently see, and how many drop
       // notices have gone out. `watching: 0` means nobody is broadcasting.

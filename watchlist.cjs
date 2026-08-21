@@ -20,6 +20,7 @@ const cors = require('cors');
 const supabase = require('./supabase.cjs');
 const push = require('./push.cjs');
 const friendEvents = require('./friend_events.cjs');
+const ownFlightEvents = require('./own_flight_events.cjs');
 const liveHydrate = require('./live_hydrate.cjs');
 
 function boolEnv(name, dflt) {
@@ -210,6 +211,17 @@ function processSnapshot(flightsBySession) {
     }
   }
 
+  // The same snapshot, read for the pilot rather than for their watchers. This
+  // is the half that was missing: `friendEvents` announces your flight to
+  // everybody who follows you and to nobody who is in it.
+  if (primed) {
+    try {
+      ownFlightEvents.processPresent(present, fireOwnFlightEvent);
+    } catch (e) {
+      console.warn('[watchlist] ⚠️ Own-flight event processing failed:', e.message);
+    }
+  }
+
   push
     .pushLiveActivityUpdates(byFlightId)
     .catch((e) => console.warn('[watchlist] ⚠️ Live activity updates failed:', e.message));
@@ -258,6 +270,30 @@ function fireEvent(type, username, flight) {
   }
 }
 
+/**
+ * One announcement about the pilot's own flight.
+ *
+ * Deliberately not routed through `fireEvent`. That path fans out to every
+ * socket subscribed to the username and then to everybody watching them, which
+ * is the opposite of what this is: one notice, to one account, about their own
+ * aeroplane. Addressed by account rather than by APNs token because that is the
+ * only thing that knows which phone is the pilot's — see `push.notifyAccount`.
+ */
+function fireOwnFlightEvent(kind, target, flight) {
+  const notice = ownFlightEvents.compose(kind, flight);
+  if (!notice || !target?.userId) return;
+
+  push
+    .notifyAccount(target.userId, {
+      ...notice,
+      // One per flight per event, so a retry or a duplicate snapshot cannot
+      // stack two banners for the same moment.
+      collapseId: `${notice.kind}-${flight?.flightId || target.userId}`,
+      data: { flightId: flight?.flightId || null, handle: target.handle || null },
+    })
+    .catch((e) => console.warn(`[watchlist] ⚠️ ${notice.kind} push failed:`, e.message));
+}
+
 module.exports = {
   capabilities,
   registerCapabilitiesRoute,
@@ -265,5 +301,6 @@ module.exports = {
   attachSocket,
   processSnapshot,
   friendEventStats: friendEvents.stats,
+  ownFlightEventStats: ownFlightEvents.stats,
   hydrationStats: liveHydrate.stats,
 };
