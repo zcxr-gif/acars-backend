@@ -101,19 +101,30 @@ const committed = new Map(); // flightId -> bool airborne (last confirmed)
 const pending = new Map(); // flightId -> { air: bool, n: int }
 
 /**
- * Diff one snapshot of the watched pilots.
+ * Diff one snapshot of the feed.
  *
- * @param {Map<string, object>} present  lowercased username -> live flight
+ * Takes flights rather than a username -> flight map, and that is not a
+ * tidying-up. The map was built by the caller with `present.set(username,
+ * flight)`, so a pilot the feed reported twice — they are on more than one
+ * server, or one server is reporting a stale session alongside the live one —
+ * kept whichever aeroplane the packet happened to mention last. The other one
+ * was invisible to this engine: no takeoff, no landing, nothing. State here is
+ * keyed by flight id and always was, so it handles several per pilot perfectly
+ * well once it is allowed to see them.
+ *
+ * @param {Iterable<object>} flights  live flights, in any order
  * @param {(type: string, username: string, flight: object|null) => void} emit
  */
-function processPresent(present, emit) {
+function processPresent(flights, emit) {
   if (!enabled()) return;
 
   watchedSet(); // refreshes in the background when stale
   const liveIds = new Set();
 
-  for (const [lower, flight] of present) {
+  for (const flight of flights) {
     if (!flight?.flightId) continue;
+    const lower = String(flight.username || '').toLowerCase();
+    if (!lower) continue;
     if (!isWatched(lower)) continue;
     liveIds.add(flight.flightId);
 

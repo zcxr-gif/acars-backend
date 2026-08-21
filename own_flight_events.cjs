@@ -267,17 +267,28 @@ function stateFor(id) {
  * Diff one snapshot of the feed and announce what changed on the pilot's own
  * aeroplane.
  *
- * @param {Map<string, object>} present  lowercased username -> live flight
+ * Takes flights rather than a username -> flight map, for the reason given in
+ * `friend_events.processPresent`: a map keyed by name silently keeps one
+ * aeroplane per pilot, and a pilot can have two. Here it matters twice over,
+ * because the by-flight-id half of `identify` exists precisely to name the
+ * aeroplane the pilot's own app published — which is not necessarily the one a
+ * name-keyed map would have kept.
+ *
+ * @param {Iterable<object>} snapshot  live flights, in any order
  * @param {(kind: string, target: object, flight: object) => void} emit
  */
-function processPresent(present, emit) {
+function processPresent(snapshot, emit) {
   if (!enabled()) return;
 
   targetsSet(); // refreshes in the background when stale
   const liveIds = new Set();
 
-  for (const [lower, flight] of present) {
+  // Not `flights`: that is the module's own map of per-flight state, and
+  // shadowing it here is how this function quietly stopped being able to forget
+  // a flight that had left the feed.
+  for (const flight of snapshot) {
     if (!flight?.flightId) continue;
+    const lower = String(flight.username || '').toLowerCase();
     const target = identify(lower, flight.flightId);
     if (!target) continue; // not somebody who asked, so no state is held for them
 

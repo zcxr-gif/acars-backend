@@ -35,7 +35,9 @@ const flight = (username, { alt = 0, gs = 0, vs = 0, id = `${username}-1` } = {}
   position: { lat: 33.9, lon: -118.4, alt_ft: alt, gs_kt: gs, vs_fpm: vs },
 });
 
-const snapshot = (...flights) => new Map(flights.map((f) => [f.username.toLowerCase(), f]));
+// A snapshot is a list of flights, not a map keyed by pilot: the engines are
+// keyed by flight id and one pilot can be flying two aeroplanes.
+const snapshot = (...flights) => flights;
 
 // Ana has asked to hear about her own flight; Zoe has not.
 function run(snapshots, live) {
@@ -243,6 +245,19 @@ test('the flight id wins when the two disagree', () => {
   assert.strictEqual(own.identify('ana', 'a13').userId, 'user-sim');
   assert.strictEqual(own.identify('ana', 'unknown-flight').userId, 'user-typed');
   assert.strictEqual(own.identify('nobody', 'unknown-flight'), null);
+});
+
+test('a pilot on two servers has both aeroplanes watched, not one', () => {
+  // The map keyed by username used to keep whichever the packet mentioned
+  // last, so one of these was invisible to the engine — no airborne notice, no
+  // landing, nothing.
+  const events = run([
+    [parked('Ana', 'left'), cruising('Ana', 'right')],
+    [rolling('Ana', 'left'), cruising('Ana', 'right')],
+    [climbing('Ana', 'left'), cruising('Ana', 'right')],
+  ]);
+  assert.deepStrictEqual(events, ['airborne:ana'], 'the one that took off is announced');
+  assert.strictEqual(own.stats().tracking, 2, 'both aeroplanes hold state');
 });
 
 /* =========================

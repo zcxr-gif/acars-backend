@@ -36,7 +36,9 @@ const flight = (username, { alt = 0, gs = 0, id = `${username}-1` } = {}) => ({
   position: { lat: 33.9, lon: -118.4, alt_ft: alt, gs_kt: gs },
 });
 
-const snapshot = (...flights) => new Map(flights.map((f) => [f.username.toLowerCase(), f]));
+// A snapshot is a list of flights, not a map keyed by pilot: the engines are
+// keyed by flight id and one pilot can be flying two aeroplanes.
+const snapshot = (...flights) => flights;
 
 // Feed a sequence of snapshots through the engine and collect what it emitted.
 // The engine holds module-level state keyed by flightId, so each case uses its
@@ -193,6 +195,21 @@ test('two watched pilots are tracked independently', () => {
     ['Jan', 'Kim']
   );
   assert.deepStrictEqual(events.sort(), ['landing:Kim', 'takeoff:Jan']);
+});
+
+test('a watched pilot on two servers has both aeroplanes watched', () => {
+  // A snapshot keyed by username kept whichever aeroplane came last in the
+  // packet, so one of a pilot's two flights produced no events at all — and it
+  // was as likely as not the one being flown.
+  const events = run(
+    [
+      snapshot(parked('Lou', 'left'), cruising('Lou', 'right')),
+      snapshot(rolling('Lou', 'left'), cruising('Lou', 'right')),
+      snapshot(climbing('Lou', 'left'), cruising('Lou', 'right')),
+    ],
+    ['Lou']
+  );
+  assert.deepStrictEqual(events, ['takeoff:Lou']);
 });
 
 /* =========================

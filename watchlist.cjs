@@ -203,9 +203,14 @@ function processSnapshot(flightsBySession) {
   // Ground↔air transitions for the pilots being watched. Runs after presence
   // so a pilot who has only just appeared is already primed, and fires through
   // the same path as online/offline — one place decides what an event does.
+  //
+  // Given every flight rather than `present`, which is keyed by username and so
+  // holds one aeroplane per pilot. Presence is a per-person question and that
+  // key is right for it; a takeoff is a per-aeroplane one, and a pilot the feed
+  // reports on two servers had one of their flights silently dropped here.
   if (primed) {
     try {
-      friendEvents.processPresent(present, fireEvent);
+      friendEvents.processPresent(byFlightId.values(), fireEvent);
     } catch (e) {
       console.warn('[watchlist] ⚠️ Friend event processing failed:', e.message);
     }
@@ -216,7 +221,7 @@ function processSnapshot(flightsBySession) {
   // everybody who follows you and to nobody who is in it.
   if (primed) {
     try {
-      ownFlightEvents.processPresent(present, fireOwnFlightEvent);
+      ownFlightEvents.processPresent(byFlightId.values(), fireOwnFlightEvent);
     } catch (e) {
       console.warn('[watchlist] ⚠️ Own-flight event processing failed:', e.message);
     }
