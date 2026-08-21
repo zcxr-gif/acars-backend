@@ -629,7 +629,10 @@ function notifyWatchersPilotOnline(username, flight) {
  * @param {string} userId  Supabase account id
  * @returns {Promise<number>} how many devices were reached
  */
-async function notifyAccount(userId, { title, subtitle, body, kind, collapseId, data = {} }) {
+async function notifyAccount(
+  userId,
+  { title, subtitle, body, kind, collapseId, data = {}, level = 'passive', sound = true }
+) {
   if (!configured() || !userId) return 0;
 
   let devices = [];
@@ -644,13 +647,17 @@ async function notifyAccount(userId, { title, subtitle, body, kind, collapseId, 
   const payload = {
     aps: {
       alert: { title, subtitle, body },
-      sound: 'default',
+      // Both of these default to the quiet end and both are per-notice, because
+      // the notices are not alike. "Your telemetry went quiet" is information
+      // about something that has already happened and must not interrupt a
+      // hand-flown approach — that is what this was written for and it stays
+      // passive. "Top of descent" IS the approach: a pilot who asked to be told
+      // about their own flight asked to be told at the moment there is
+      // something to do, and a passive notice delivered silently after the fact
+      // is the same as not being told.
+      'interruption-level': level === 'active' ? 'active' : 'passive',
+      ...(sound ? { sound: 'default' } : {}),
       'thread-id': 'inflight-own-flight',
-      // Passive on purpose. This arrives while the pilot is flying in another
-      // app, and it is information rather than something to act on now —
-      // interrupting a hand-flown approach to say the telemetry went quiet
-      // would be worse than the problem it reports.
-      'interruption-level': 'passive',
     },
     kind,
     ...data,
@@ -658,7 +665,10 @@ async function notifyAccount(userId, { title, subtitle, body, kind, collapseId, 
   const headers = {
     'apns-topic': APNS_TOPIC,
     'apns-push-type': 'alert',
-    'apns-priority': '5',
+    // 5 lets APNs hold a notice back to save power, which is right for one that
+    // is only a record. A moment in a flight is worth nothing five minutes
+    // late, so an active notice goes at 10.
+    'apns-priority': level === 'active' ? '10' : '5',
     'apns-collapse-id': String(collapseId || kind).slice(0, 64),
   };
 
