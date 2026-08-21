@@ -38,9 +38,9 @@ const flight = (username, { alt = 0, gs = 0, vs = 0, id = `${username}-1` } = {}
 const snapshot = (...flights) => new Map(flights.map((f) => [f.username.toLowerCase(), f]));
 
 // Ana has asked to hear about her own flight; Zoe has not.
-function run(snapshots) {
+function run(snapshots, live) {
   own.reset();
-  own.setTargets(new Map([['ana', { userId: 'user-ana', handle: 'ana' }]]));
+  own.setTargets(new Map([['ana', { userId: 'user-ana', handle: 'ana' }]]), live);
   const events = [];
   for (const snap of snapshots) {
     own.processPresent(snap, (kind, target) => events.push(`${kind}:${target.handle}`));
@@ -90,7 +90,7 @@ test('one jittery reading over the groundspeed threshold announces nothing', () 
 
 test('a pilot who has not asked is not tracked at all', () => {
   own.reset();
-  own.setTargets(new Map());
+  own.setTargets(new Map(), new Map());
   const events = [];
   for (const snap of [snapshot(parked('Zoe', 'z1')), snapshot(rolling('Zoe', 'z1')), snapshot(climbing('Zoe', 'z1'))]) {
     own.processPresent(snap, (kind) => events.push(kind));
@@ -198,6 +198,51 @@ test('a new flight id starts clean rather than inheriting the last one', () => {
     snapshot(cruising('Ana', 'a11')),
   ]);
   assert.deepStrictEqual(events, ['airborne:ana'], 'the second flight is seeded, not announced');
+});
+
+/* =========================
+ * Recognised by the flight, not by the name
+ * ========================= */
+
+test('a pilot with no handle at all is reached by the flight id her app published', () => {
+  // The case the by-name join cannot serve, and the reason the second one
+  // exists: nothing in this snapshot says "zoe" anywhere the engine looks.
+  own.reset();
+  own.setTargets(new Map(), new Map([['z-9', { userId: 'user-zoe', handle: 'zoe' }]]));
+  const events = [];
+  for (const snap of [
+    snapshot(parked('Zoe', 'z-9')),
+    snapshot(rolling('Zoe', 'z-9')),
+    snapshot(climbing('Zoe', 'z-9')),
+  ]) {
+    own.processPresent(snap, (kind, target) => events.push(`${kind}:${target.handle}`));
+  }
+  assert.deepStrictEqual(events, ['airborne:zoe']);
+});
+
+test('a pilot found by both routes is announced to once', () => {
+  const events = run(
+    [
+      snapshot(parked('Ana', 'a12')),
+      snapshot(rolling('Ana', 'a12')),
+      snapshot(climbing('Ana', 'a12')),
+    ],
+    new Map([['a12', { userId: 'user-ana', handle: 'ana' }]])
+  );
+  assert.deepStrictEqual(events, ['airborne:ana']);
+});
+
+test('the flight id wins when the two disagree', () => {
+  // The handle is typed into a text box and the flight id came out of the
+  // running simulator. When they name different accounts, the simulator is the
+  // one that was actually there.
+  own.setTargets(
+    new Map([['ana', { userId: 'user-typed', handle: 'typed' }]]),
+    new Map([['a13', { userId: 'user-sim', handle: 'sim' }]])
+  );
+  assert.strictEqual(own.identify('ana', 'a13').userId, 'user-sim');
+  assert.strictEqual(own.identify('ana', 'unknown-flight').userId, 'user-typed');
+  assert.strictEqual(own.identify('nobody', 'unknown-flight'), null);
 });
 
 /* =========================

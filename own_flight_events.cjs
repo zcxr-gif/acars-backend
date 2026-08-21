@@ -82,15 +82,40 @@ function enabled() {
  * Who has asked to hear about their own flight
  * ========================= */
 
-// lowercased Infinite Flight handle -> { userId, handle }
+// Two maps, because there are two ways to know whose aeroplane this is, and
+// only one of them involves a name.
 //
-// Read from `pilot_flight_alert_targets`, which applies the switch and settles
-// the one rule that must not be got wrong here: a handle claimed by two
-// accounts reaches neither of them, because `if_username` is a claim and not an
-// identity. See the migration.
+//   byName    lowercased Infinite Flight handle -> { userId, handle }
+//   byFlight  feed flight id                    -> { userId, handle }
+//
+// `byName` comes from `pilot_flight_alert_targets`, which applies the switch and
+// settles the rule that must not be got wrong: a handle claimed by two accounts
+// reaches neither, because `if_username` is a claim typed into a settings field
+// and not an identity.
+//
+// `byFlight` comes from `pilot_flight_alert_live_targets`, and is the stronger
+// half. `pilot_live_status.flight_id` is the id the public feed uses, written by
+// the app out of the running simulator — the pilot saying "this aeroplane on
+// your map is me" in terms that need no name matching anywhere. It is also what
+// makes this work for somebody whose profile handle is blank, misspelled, or
+// claimed by an impersonator: on a phone, thirty seconds of Connect in the
+// background window as they switch into the sim is enough to publish one, and
+// the announcements then run for the rest of the flight with the app closed.
+//
+// Neither ranks over the other. A pilot found in both is found twice and
+// announced to once, because the state that decides whether to announce is
+// keyed on the flight, not on how the pilot was recognised.
 let targets = new Map();
+let liveTargets = new Map();
 let targetsFetchedAt = 0;
 const TARGETS_TTL_MS = 5 * 60 * 1000;
+
+// The by-flight map is refreshed far more often than the by-name one, and that
+// asymmetry is the point: a profile handle changes about once ever, while a
+// flight id appears the moment somebody starts flying and is worthless five
+// minutes later. This is one small query against a table that is bounded by the
+// number of people airborne with Connect attached.
+const LIVE_TARGETS_TTL_MS = 45 * 1000;
 
 // A failed refresh is retried sooner than a successful one is repeated, but
 // only sooner — never on the next snapshot. The poller runs every few seconds,
@@ -99,7 +124,9 @@ const TARGETS_TTL_MS = 5 * 60 * 1000;
 const TARGETS_RETRY_MS = 30 * 1000;
 
 let nextRefreshAt = 0;
+let nextLiveRefreshAt = 0;
 let targetsInFlight = null;
+let liveInFlight = null;
 let lastTargetsError = null;
 
 async function refreshTargets() {
@@ -141,6 +168,42 @@ async function refreshTargets() {
   return targets;
 }
 
+/**
+ * The by-flight-id half. Same shape as `refreshTargets`, same backoff, kept
+ * separate because it runs on its own much shorter clock.
+ */
+async function refreshLiveTargets() {
+  if (!supabase.hasServiceKey()) {
+    nextLiveRefreshAt = Date.now() + LIVE_TARGETS_TTL_MS;
+    return liveTargets;
+  }
+
+  let rows;
+  try {
+    rows = await supabase.rpc('pilot_flight_alert_live_targets', {});
+  } catch (e) {
+    lastTargetsError = e.message;
+    nextLiveRefreshAt = Date.now() + TARGETS_RETRY_MS;
+    console.warn('[own-flight] ⚠️ Live target refresh failed:', e.message);
+    return liveTargets;
+  }
+
+  if (!Array.isArray(rows)) {
+    nextLiveRefreshAt = Date.now() + TARGETS_RETRY_MS;
+    return liveTargets;
+  }
+
+  const next = new Map();
+  for (const row of rows) {
+    const id = String(row?.flight_id || '').trim();
+    if (!id || !row?.user_id) continue;
+    next.set(id, { userId: row.user_id, handle: row.handle || null });
+  }
+  liveTargets = next;
+  nextLiveRefreshAt = Date.now() + LIVE_TARGETS_TTL_MS;
+  return liveTargets;
+}
+
 // Never awaited on the poll path. Being one cycle late to notice a pilot who
 // has just turned the switch on is not worth stalling the poller for.
 function targetsSet() {
@@ -149,14 +212,32 @@ function targetsSet() {
       .catch(() => {})
       .finally(() => { targetsInFlight = null; });
   }
+  if (Date.now() >= nextLiveRefreshAt && !liveInFlight) {
+    liveInFlight = refreshLiveTargets()
+      .catch(() => {})
+      .finally(() => { liveInFlight = null; });
+  }
   return targets;
 }
 
-/** Test seam: the map without a round trip. */
-function setTargets(map) {
+/**
+ * Whose aeroplane this is, by either route.
+ *
+ * The flight id is tried first. It is the one the pilot's own app published out
+ * of the simulator, where the handle is the one they typed into a text box —
+ * and when the two disagree the simulator is right.
+ */
+function identify(lowerUsername, flightId) {
+  return (flightId ? liveTargets.get(flightId) : null) || targets.get(lowerUsername) || null;
+}
+
+/** Test seam: the maps without a round trip. */
+function setTargets(map, live) {
   targets = new Map(map instanceof Map ? map : Object.entries(map || {}));
+  liveTargets = new Map(live instanceof Map ? live : Object.entries(live || {}));
   targetsFetchedAt = Date.now();
   nextRefreshAt = targetsFetchedAt + TARGETS_TTL_MS;
+  nextLiveRefreshAt = targetsFetchedAt + LIVE_TARGETS_TTL_MS;
 }
 
 /* =========================
@@ -197,7 +278,7 @@ function processPresent(present, emit) {
 
   for (const [lower, flight] of present) {
     if (!flight?.flightId) continue;
-    const target = targets.get(lower);
+    const target = identify(lower, flight.flightId);
     if (!target) continue; // not somebody who asked, so no state is held for them
 
     liveIds.add(flight.flightId);
@@ -344,6 +425,7 @@ function stats() {
   return {
     enabled: enabled(),
     targets: targets.size,
+    liveTargets: liveTargets.size,
     tracking: flights.size,
     confirmSnapshots: CONFIRM_SNAPSHOTS,
     descentSnapshots: DESCENT_SNAPSHOTS,
@@ -360,7 +442,9 @@ function reset() {
 module.exports = {
   processPresent,
   compose,
+  identify,
   refreshTargets,
+  refreshLiveTargets,
   setTargets,
   stats,
   reset,
