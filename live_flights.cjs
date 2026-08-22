@@ -2828,6 +2828,60 @@ app.get('/flights/:sessionId/:flightId/plan', async (req, res) => {
   }
 });
 
+/**
+ * The filed plan for one flight, by flight id alone.
+ *
+ * The route above wants a session guid, which a map client does not have: it
+ * holds a flight id, because that is what is on the aeroplane it just drew. The
+ * session is ours to know — every flight in every session is already in
+ * `apiCache.flights` — so looking it up here saves the client a round trip it
+ * has no way to make.
+ *
+ * Returns waypoints flattened, which `simplifyFlightPlan` has been able to do
+ * since it was written and nothing has ever called it for. A filed plan is a
+ * tree: procedures carry their fixes as children, and a client that wants to
+ * draw a line through the route has to walk it. Every client walking it
+ * separately is every client getting it subtly differently — the old web build
+ * has its own copy of this walk — so it is done once, here.
+ */
+app.get('/api/flights/:flightId/plan', async (req, res) => {
+  const { flightId } = req.params;
+  if (!flightId) return res.status(400).json({ ok: false, error: 'flightId is required' });
+
+  const cacheKey = `planById:${flightId}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) return res.json({ ok: true, flightId, ...cached, fromCache: true });
+
+  // Which session is this aeroplane in? Whichever one is reporting it.
+  let sessionId = null;
+  for (const [id, payload] of apiCache.flights) {
+    if ((payload?.flights || []).some((f) => f?.flightId === flightId)) { sessionId = id; break; }
+  }
+  if (!sessionId) {
+    return res.status(404).json({ ok: false, error: 'No live flight with that id.' });
+  }
+
+  try {
+    const rawPlan = await getFlightPlan(sessionId, flightId);
+    if (!rawPlan) {
+      // A flight with no filed plan is the ordinary case, not a fault: most
+      // pilots do not file one. Cached as such, so tapping the same aircraft
+      // repeatedly does not ask the IF API again for an answer that will not
+      // change.
+      const empty = { flightPlanId: null, waypoints: [] };
+      setOnDemandCached(cacheKey, empty, 5 * 60 * 1000);
+      return res.json({ ok: true, flightId, ...empty });
+    }
+
+    const simplified = simplifyFlightPlan(rawPlan);
+    setOnDemandCached(cacheKey, simplified, 10 * 60 * 1000);
+    res.json({ ok: true, flightId, ...simplified });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    res.status(status).json({ ok: false, error: 'Failed to fetch flight plan', detail: e?.message });
+  }
+});
+
 app.get('/flights/:sessionId/:flightId/route', async (req, res) => {
   const { sessionId, flightId } = req.params;
   const cacheKey = `route:${sessionId}:${flightId}`;
