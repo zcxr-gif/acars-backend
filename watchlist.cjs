@@ -42,6 +42,15 @@ function capabilities() {
     // a flag so a client built against an older backend keeps working: it asks
     // for what it knows, and anything it doesn't recognise here it ignores.
     eventKinds: push.EVENT_KINDS,
+    // The same contract for the other direction — notices about the caller's
+    // own aeroplane. A client that does not see `ownApproach` in here is
+    // talking to a backend that cannot yet tell it when it is half an hour out,
+    // and can say so instead of offering a switch that does nothing.
+    ownFlightEventKinds: push.OWN_FLIGHT_EVENT_KEYS,
+    ownFlightAlerts: boolEnv('OWN_FLIGHT_ALERTS_ENABLED', true),
+    // How far out the arrival notice fires, so the wording in the app's
+    // settings comes from the thing that actually decides it.
+    approachMinutes: ownFlightEvents.APPROACH_MINUTES,
     // Whether a takeoff can raise a Live Activity on its own. Needs the same
     // APNs credentials as any other push, plus a push-to-start token from the
     // device — the client checks the first here and the second locally.
@@ -155,8 +164,18 @@ function attachSocket(socket) {
 const OFFLINE_AFTER_MISSES = 2;
 
 let primed = false; // first snapshot seeds state without firing events
-const onlineFlights = new Map(); // lowercased username -> last seen flight
+const onlineFlights = new Map(); // lowercased username -> last seen flight (watched only)
 const missingStreak = new Map(); // lowercased username -> consecutive absences
+
+// Every name in the previous snapshot, watched or not.
+//
+// Separate from `onlineFlights`, and the separation is the point. "Is this
+// pilot on the list" and "was this pilot in the sky a moment ago" are different
+// questions, and answering the second out of a map that only holds the first
+// makes adding somebody to your watchlist look exactly like them coming online.
+// A set of names rather than of flights: this is only ever asked whether it
+// contains something, and it is the whole server.
+let lastPresent = new Set();
 
 function processSnapshot(flightsBySession) {
   const present = new Map(); // lowercased username -> flight
@@ -176,15 +195,56 @@ function processSnapshot(flightsBySession) {
   }
   friendEvents.setEphemeralWatched(subscribed);
 
+  // Presence is tracked for the pilots somebody is actually watching, and for
+  // nobody else.
+  //
+  // It used to be tracked for every pilot on every server, and that was not
+  // merely wasteful — it was the load. Each appearance called `fireEvent`,
+  // which called `notifyWatchers`, which asked Supabase who was watching that
+  // name. At a busy hour Infinite Flight has a couple of thousand aircraft
+  // across the three servers and dozens of joins per poll, so a path that was
+  // meant to answer "did one of your friends come online" was instead putting
+  // dozens of HTTP round trips into every few seconds, on an instance sized at
+  // half a core. What it cost was the events themselves: the poller is the same
+  // loop that detects takeoffs, and one it cannot finish on time is one that
+  // detects nothing.
+  //
+  // `friendEvents.isWatched` is the union of every device subscription, every
+  // account watchlist and every live socket — refreshed on its own timer, in
+  // memory, and consulted here for the price of a set lookup.
+  const isWatched = (key) => {
+    try {
+      return friendEvents.isWatched(key);
+    } catch (_) {
+      // Never let a lookup failure turn into silence: an event nobody wanted
+      // is a smaller mistake than a takeoff nobody heard about.
+      return true;
+    }
+  };
+
   if (!primed) {
-    for (const [key, flight] of present) onlineFlights.set(key, flight);
+    for (const [key, flight] of present) {
+      if (isWatched(key)) onlineFlights.set(key, flight);
+    }
     primed = true;
   } else {
     for (const [key, flight] of present) {
+      if (!isWatched(key)) continue;
       missingStreak.delete(key);
-      const wasOnline = onlineFlights.has(key);
+      // Two ways of already having been in the sky, and an arrival is neither
+      // of them.
+      //
+      // `onlineFlights` is the engine's own memory, and it deliberately
+      // outlives a single missing poll — that hysteresis is what stops one
+      // telemetry gap firing an offline and an online either side of itself.
+      // `lastPresent` is the whole previous snapshot regardless of who was
+      // watching, and it covers the case the first cannot: a pilot added to
+      // somebody's list while they were already mid-Atlantic has not just come
+      // online, and saying they have is how an app teaches people to stop
+      // reading its notifications.
+      const wasFlying = onlineFlights.has(key) || lastPresent.has(key);
       onlineFlights.set(key, flight); // keep the freshest flight for events
-      if (!wasOnline) fireEvent('pilot_online', flight.username, flight);
+      if (!wasFlying) fireEvent('pilot_online', flight.username, flight);
     }
 
     for (const [key, lastFlight] of Array.from(onlineFlights)) {
@@ -199,6 +259,8 @@ function processSnapshot(flightsBySession) {
       }
     }
   }
+
+  lastPresent = new Set(present.keys());
 
   // Ground↔air transitions for the pilots being watched. Runs after presence
   // so a pilot who has only just appeared is already primed, and fires through
@@ -236,6 +298,23 @@ function processSnapshot(flightsBySession) {
   } catch (e) {
     console.warn('[watchlist] ⚠️ Live status hydration failed:', e.message);
   }
+}
+
+/**
+ * Test seam: forget the world.
+ *
+ * Presence is a diff against the last snapshot, so a test that does not start
+ * from nothing is a test asserting against whatever the previous one left
+ * behind — which is how "the first snapshot announces nothing" quietly becomes
+ * a test of something else.
+ */
+function reset() {
+  primed = false;
+  onlineFlights.clear();
+  missingStreak.clear();
+  lastPresent = new Set();
+  socketSubs.clear();
+  friendEvents.setEphemeralWatched(new Set());
 }
 
 /**
@@ -300,7 +379,9 @@ module.exports = {
   registerRoutes,
   attachSocket,
   processSnapshot,
+  reset,
   friendEventStats: friendEvents.stats,
   ownFlightEventStats: ownFlightEvents.stats,
   hydrationStats: liveHydrate.stats,
+  pushStats: push.stats,
 };

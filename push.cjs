@@ -23,7 +23,30 @@
  *   APNS_KEY_ID     key id of the .p8
  *   APNS_TEAM_ID    Apple developer team id
  *   APNS_TOPIC      app bundle id (default com.tracker.Inflight)
- *   APNS_HOST       default https://api.push.apple.com (production)
+ *   APNS_HOST       which environment to try first (default production)
+ *   APNS_ENV_FALLBACK  0/false to stop trying the other one — see below
+ *
+ * ## The two APNs environments, and the bug that hid behind them
+ *
+ * Apple runs two of them. A build signed `aps-environment: development` — every
+ * build run from Xcode, and any build whose export did not rewrite the
+ * entitlement — registers with the sandbox and is handed a token the
+ * PRODUCTION host does not recognise. It does not fail politely: the reply is
+ * `400 BadDeviceToken`, which is byte for byte the reply for a token that is
+ * genuinely rubbish.
+ *
+ * This module used to believe it, and prune the token — along with the whole
+ * device_watch subscription hanging off it, which is the registry's only owner.
+ * So a development or mismatched build did not merely fail to be notified: the
+ * first event it should have received erased its watchlist from the server, and
+ * every later one had nothing to deliver to. "It never sends any notification at
+ * all", exactly, and self-concealing, because the evidence deleted itself.
+ *
+ * So a token's environment is now something we learn rather than assume. A
+ * `BadDeviceToken` is retried once against the other host; whichever one accepts
+ * it is remembered per token, and a token is only ever pruned when BOTH have
+ * refused it. Nothing to configure, and it repairs a fleet that is a mixture —
+ * which every TestFlight-plus-Xcode fleet is.
  */
 
 const http2 = require('http2');
@@ -33,8 +56,23 @@ const path = require('path');
 const Database = require('better-sqlite3');
 
 const supabase = require('./supabase.cjs');
+const geo = require('./geo.cjs');
 
-const APNS_HOST = (process.env.APNS_HOST || 'https://api.push.apple.com').trim();
+const APNS_PRODUCTION_HOST = 'https://api.push.apple.com';
+const APNS_SANDBOX_HOST = 'https://api.sandbox.push.apple.com';
+
+const APNS_HOST = (process.env.APNS_HOST || APNS_PRODUCTION_HOST).trim();
+
+// The one to try second. Derived rather than configured: there are exactly two,
+// and "the other one" is never a judgement call.
+const APNS_ALT_HOST = APNS_HOST === APNS_SANDBOX_HOST ? APNS_PRODUCTION_HOST : APNS_SANDBOX_HOST;
+
+function envFallbackEnabled() {
+  const v = String(process.env.APNS_ENV_FALLBACK ?? '').trim().toLowerCase();
+  if (!v) return true;
+  return !['0', 'false', 'no', 'off'].includes(v);
+}
+
 const APNS_TOPIC = (process.env.APNS_TOPIC || 'com.tracker.Inflight').trim();
 const LIVE_ACTIVITY_TOPIC = `${APNS_TOPIC}.push-type.liveactivity`;
 const KEY_ID = (process.env.APNS_KEY_ID || '').trim();
@@ -118,6 +156,18 @@ db.prepare(`
 
 db.prepare('CREATE INDEX IF NOT EXISTS device_watch_username ON device_watch (username)').run();
 
+// Which APNs environment a token actually belongs to, learned the first time
+// one host accepts it. Rows are only ever written after a 2xx, so nothing in
+// here is a guess — and a token missing from this table simply means the
+// configured host has not been contradicted yet.
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS apns_environment (
+    token TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  )
+`).run();
+
 // Which event kinds that device wants, as a JSON object. Kept in its own table
 // rather than repeated on every watch row: the choice is per device, not per
 // pilot.
@@ -187,6 +237,15 @@ const stmts = {
   `),
   prefsForDevice: db.prepare('SELECT events FROM device_prefs WHERE device_token = ?'),
   prunePrefs: db.prepare('DELETE FROM device_prefs WHERE device_token = ?'),
+
+  apnsHostFor: db.prepare('SELECT host FROM apns_environment WHERE token = ?'),
+  rememberApnsHost: db.prepare(`
+    INSERT INTO apns_environment (token, host, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT (token)
+    DO UPDATE SET host = excluded.host, updated_at = excluded.updated_at
+  `),
+  forgetApnsHost: db.prepare('DELETE FROM apns_environment WHERE token = ?'),
+  apnsEnvironmentCounts: db.prepare('SELECT host, COUNT(*) AS n FROM apns_environment GROUP BY host'),
 };
 
 // APNs device tokens are hex (64 chars for alert pushes, longer for Live
@@ -221,27 +280,34 @@ function providerToken() {
   return providerTokenCache.token;
 }
 
-let apnsSession = null;
+// One session per host, because there are now two hosts. Keyed rather than
+// held in a single variable: the sandbox connection is idle on almost every
+// deployment, and tearing down the production one to reach it — which is what
+// a single slot would do — would reconnect on every alternate push.
+const apnsSessions = new Map(); // host -> ClientHttp2Session
 
-function getApnsSession() {
-  if (apnsSession && !apnsSession.closed && !apnsSession.destroyed) return apnsSession;
-  apnsSession = http2.connect(APNS_HOST);
-  apnsSession.on('error', (e) => {
-    console.warn('[push] APNs session error:', e.message);
-    apnsSession = null;
+function getApnsSession(host) {
+  const existing = apnsSessions.get(host);
+  if (existing && !existing.closed && !existing.destroyed) return existing;
+
+  const session = http2.connect(host);
+  session.on('error', (e) => {
+    console.warn(`[push] APNs session error (${host}):`, e.message);
+    if (apnsSessions.get(host) === session) apnsSessions.delete(host);
   });
-  apnsSession.on('goaway', () => {
-    try { apnsSession.close(); } catch (_) { /* already gone */ }
-    apnsSession = null;
+  session.on('goaway', () => {
+    try { session.close(); } catch (_) { /* already gone */ }
+    if (apnsSessions.get(host) === session) apnsSessions.delete(host);
   });
-  return apnsSession;
+  apnsSessions.set(host, session);
+  return session;
 }
 
-function apnsRequest(deviceToken, headers, body) {
+function apnsRequest(deviceToken, headers, body, host = APNS_HOST) {
   return new Promise((resolve, reject) => {
     let req;
     try {
-      req = getApnsSession().request({
+      req = getApnsSession(host).request({
         ':method': 'POST',
         ':path': `/3/device/${deviceToken}`,
         authorization: `bearer ${providerToken()}`,
@@ -269,20 +335,78 @@ function apnsRequest(deviceToken, headers, body) {
   });
 }
 
-// Send one push; prunes the token from both registries when APNs says it's
-// dead (410 Unregistered / 400 BadDeviceToken). Returns the HTTP status
-// (0 on transport failure) so callers can decide what to record.
-async function sendToToken(token, headers, payload) {
+/** Which host this token is known to live on, or the configured default. */
+function hostFor(token) {
   try {
-    const { status, body } = await apnsRequest(token, headers, payload);
-    if (status === 410 || (status === 400 && body?.reason === 'BadDeviceToken')) {
-      stmts.pruneDeviceToken.run(token);
-      stmts.deleteLaToken.run(token);
-      // A dead alert token also takes its device-scoped subscription with it —
-      // that registry is keyed by exactly this token, so nothing else will ever
-      // clean it up.
-      stmts.pruneDeviceWatch.run(token);
-      stmts.prunePrefs.run(token);
+    return stmts.apnsHostFor.get(token)?.host || APNS_HOST;
+  } catch (_) {
+    return APNS_HOST;
+  }
+}
+
+function rememberHost(token, host) {
+  try {
+    if (host === APNS_HOST) stmts.forgetApnsHost.run(token);
+    else stmts.rememberApnsHost.run(token, host, Date.now());
+  } catch (e) {
+    console.warn('[push] ⚠️ Could not record the APNs environment:', e.message);
+  }
+}
+
+/** Everything a token owns, gone in one go. */
+function pruneToken(token) {
+  stmts.pruneDeviceToken.run(token);
+  stmts.deleteLaToken.run(token);
+  // A dead alert token also takes its device-scoped subscription with it —
+  // that registry is keyed by exactly this token, so nothing else will ever
+  // clean it up.
+  stmts.pruneDeviceWatch.run(token);
+  stmts.prunePrefs.run(token);
+  stmts.forgetApnsHost.run(token);
+}
+
+// A token the wrong host will not recognise, and a token nobody will ever
+// recognise, are the same four hundred and the same four words.
+function isEnvironmentMismatch(status, body) {
+  return status === 400 && body?.reason === 'BadDeviceToken';
+}
+
+/**
+ * Send one push.
+ *
+ * Tries the environment this token is known to live on — the configured one
+ * until something has said otherwise — and, on the one reply that means "wrong
+ * environment", tries the other. Whichever is accepted is remembered, so the
+ * second attempt happens once per token rather than once per push.
+ *
+ * A token is pruned only when it has been refused by both, or when APNs says
+ * `410 Unregistered`, which is the app having been deleted and is not
+ * ambiguous. Returns the HTTP status (0 on transport failure) so callers can
+ * decide what to record.
+ */
+async function sendToToken(token, headers, payload) {
+  const primary = hostFor(token);
+
+  try {
+    let { status, body } = await apnsRequest(token, headers, payload, primary);
+
+    if (isEnvironmentMismatch(status, body) && envFallbackEnabled()) {
+      const alternate = primary === APNS_HOST ? APNS_ALT_HOST : APNS_HOST;
+      const retry = await apnsRequest(token, headers, payload, alternate);
+
+      if (retry.status >= 200 && retry.status < 300) {
+        rememberHost(token, alternate);
+        console.log(`[push] ↪️ Token belongs to ${alternate} — remembered.`);
+        return retry.status;
+      }
+
+      // Both refused it, so it really is dead. Report the second reply, which
+      // is the one that settled it.
+      ({ status, body } = retry);
+    }
+
+    if (status === 410 || isEnvironmentMismatch(status, body)) {
+      pruneToken(token);
       console.log(`[push] 🧹 Pruned dead APNs token (HTTP ${status}).`);
     } else if (status >= 300) {
       console.warn(`[push] ⚠️ APNs rejected push: HTTP ${status} ${body?.reason || ''}`.trim());
@@ -298,18 +422,58 @@ async function sendToToken(token, headers, payload) {
  * Device-scoped subscriptions
  * ========================= */
 
-// Every event the client may ask for, and what it defaults to when the client
-// says nothing. Takeoff is the headline feature, so it is on; offline is the
-// noisiest and least interesting, so it is not.
+// Every event about SOMEBODY ELSE the client may ask for, and what it defaults
+// to when the client says nothing. Takeoff is the headline feature, so it is
+// on; offline is the noisiest and least interesting, so it is not.
 const EVENT_KINDS = ['takeoff', 'landing', 'online', 'offline'];
-const DEFAULT_EVENTS = { takeoff: true, landing: true, online: true, offline: false, liveActivity: true };
+
+/**
+ * Every event about the pilot's OWN flight, by the preference key that governs
+ * it, and the `kind` each notice carries on the wire.
+ *
+ * These used to have no switch at all. That was defensible while the only one
+ * was "your sim link dropped" — a single notice nobody would want twice — and
+ * stopped being defensible the moment there were four, one of which makes a
+ * sound in the middle of a flight. The switch lives on the device rather than
+ * on the account for the same reason the watchlist's does: it is a preference
+ * about a phone's notification centre, and the phone is what has one.
+ */
+const OWN_FLIGHT_KINDS = {
+  own_airborne: 'ownAirborne',
+  own_descent: 'ownDescent',
+  own_approach: 'ownApproach',
+  own_landed: 'ownLanded',
+  connect_dropped: 'connectDropped',
+};
+
+const OWN_FLIGHT_EVENT_KEYS = Object.values(OWN_FLIGHT_KINDS);
+
+const DEFAULT_EVENTS = {
+  takeoff: true,
+  landing: true,
+  online: true,
+  offline: false,
+  liveActivity: true,
+  // All on by default: somebody who has told us which aeroplane is theirs has
+  // already opted into hearing about it, and a feature that ships switched off
+  // is a feature nobody discovers.
+  ownAirborne: true,
+  ownDescent: true,
+  ownApproach: true,
+  ownLanded: true,
+  connectDropped: true,
+};
+
+// Every key the wire format carries, in one list, so a new event kind is added
+// in exactly one place.
+const PREFERENCE_KEYS = [...EVENT_KINDS, 'liveActivity', ...OWN_FLIGHT_EVENT_KEYS];
 
 const MAX_WATCHED_PER_DEVICE = 200;
 
 function normalizeEvents(raw) {
   const out = { ...DEFAULT_EVENTS };
   if (raw && typeof raw === 'object') {
-    for (const key of [...EVENT_KINDS, 'liveActivity']) {
+    for (const key of PREFERENCE_KEYS) {
       if (typeof raw[key] === 'boolean') out[key] = raw[key];
     }
   }
@@ -644,6 +808,17 @@ async function notifyAccount(
   }
   if (!devices.length) return 0;
 
+  // Filtered per device rather than per account, because two phones signed into
+  // one account are two notification centres with two sets of opinions. A kind
+  // this table does not know is not filtered at all — an older client that has
+  // never sent a preference for it still gets it, which is the failure mode
+  // worth having.
+  const preferenceKey = OWN_FLIGHT_KINDS[kind];
+  if (preferenceKey) {
+    devices = devices.filter((device) => deviceEvents(device.device_token)[preferenceKey] !== false);
+    if (!devices.length) return 0;
+  }
+
   const payload = {
     aps: {
       alert: { title, subtitle, body },
@@ -701,30 +876,7 @@ const APPLE_EPOCH_OFFSET = 978307200;
 const LA_MIN_INTERVAL_MS = 45 * 1000; // spec cadence is ~50s; poller can be faster
 const LA_END_AFTER_MISSES = 2;
 
-let airportsIndex = null;
-function airportCoords(icao) {
-  if (!airportsIndex) {
-    try {
-      airportsIndex = JSON.parse(fs.readFileSync(path.join(__dirname, 'airports.json'), 'utf8'));
-    } catch (e) {
-      console.error('[push] ❌ Could not load airports.json:', e.message);
-      airportsIndex = {};
-    }
-  }
-  const a = airportsIndex[String(icao || '').toUpperCase()];
-  return a && typeof a.lat === 'number' && typeof a.lon === 'number' ? a : null;
-}
-
-function haversineNm(lat1, lon1, lat2, lon2) {
-  const toRad = (d) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  const EARTH_RADIUS_NM = 3440.065;
-  return 2 * EARTH_RADIUS_NM * Math.asin(Math.min(1, Math.sqrt(a)));
-}
+const { airportCoords, haversineNm } = geo;
 
 function liveActivityContentState(flight) {
   const pos = flight?.position || {};
@@ -919,6 +1071,33 @@ async function pushLiveActivityUpdates(flightById) {
   }
 }
 
+/** Diagnostics: what the registries hold, and which environments they live in. */
+function stats() {
+  const out = {
+    configured: configured(),
+    host: APNS_HOST,
+    environmentFallback: envFallbackEnabled(),
+    devices: 0,
+    watchRows: 0,
+    liveActivityTokens: 0,
+    // Tokens the configured host refused and the other one accepted. A number
+    // climbing here on a production deployment means builds are shipping with
+    // `aps-environment: development` — worth knowing, and invisible before.
+    onAlternateEnvironment: 0,
+  };
+  try {
+    out.devices = db.prepare('SELECT COUNT(*) AS n FROM push_devices').get().n;
+    out.watchRows = db.prepare('SELECT COUNT(*) AS n FROM device_watch').get().n;
+    out.liveActivityTokens = db.prepare('SELECT COUNT(*) AS n FROM live_activity_tokens').get().n;
+    for (const row of stmts.apnsEnvironmentCounts.all()) {
+      if (row.host !== APNS_HOST) out.onAlternateEnvironment += row.n;
+    }
+  } catch (e) {
+    out.error = e.message;
+  }
+  return out;
+}
+
 module.exports = {
   configured,
   registerRoutes,
@@ -927,5 +1106,11 @@ module.exports = {
   watchedUsernames,
   pushLiveActivityUpdates,
   notifyAccount,
+  deviceEvents,
+  stats,
   EVENT_KINDS,
+  OWN_FLIGHT_KINDS,
+  OWN_FLIGHT_EVENT_KEYS,
+  PREFERENCE_KEYS,
+  DEFAULT_EVENTS,
 };
