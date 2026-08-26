@@ -167,5 +167,7 @@ module.exports = {
   processPresent,
   setEphemeralWatched,
   refreshWatched,
+  isWatched,
+  watchedSet,
   stats,
 };

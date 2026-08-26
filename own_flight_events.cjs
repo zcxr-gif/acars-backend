@@ -25,13 +25,15 @@
  *
  * ## What it announces, and what it refuses to
  *
- * Three events, chosen because the feed can actually support them:
+ * Four events, chosen because the feed can actually support them:
  *
  *   airborne  — a confirmed ground -> air transition, the same detector the
  *               friend takeoff notice uses.
  *   descent   — the top of descent: a flight that reached a cruise and has now
  *               been coming down for several consecutive snapshots. This is the
  *               seatbelt-sign moment, and it is the one worth a sound.
+ *   approach  — thirty minutes from the destination, by the distance still to
+ *               run over the speed actually being made good. See below.
  *   landed    — a confirmed air -> ground transition.
  *
  * Not announced: anything needing height above ground. The feed carries MSL
@@ -39,6 +41,34 @@
  * Amsterdam and one 2,000 ft over Denver are the same number and a different
  * situation. Inventing it would produce an announcement that is wrong in
  * mountains, which is worse than an announcement that does not exist.
+ *
+ * ## Thirty minutes out
+ *
+ * The one people actually plan around: it is the difference between finding out
+ * you are on approach and deciding to be at the controls for it. It needs no
+ * height above ground and no filed schedule — only where the arrival field is,
+ * where the aeroplane is, and how fast it is closing — so unlike "on final" it
+ * is derivable from what the feed carries, and derivable everywhere.
+ *
+ * Three guards, each for a way the naive version is wrong:
+ *
+ *   - The time is computed from the great-circle distance over the CURRENT
+ *     groundspeed, and only when that speed is a cruise rather than a taxi.
+ *     A stationary aeroplane is infinitely far from everywhere, and dividing
+ *     by a groundspeed of four would say so.
+ *   - The flight must have been seen further out than thirty minutes first.
+ *     Without that, a restart mid-arrival, a short hop that begins inside the
+ *     window, and a pilot who spawns twenty miles from the field all announce
+ *     a "thirty minutes out" that is either late or was never true.
+ *   - It fires once per flight id, like everything else here, so an aeroplane
+ *     slowing into a hold on the threshold of the window cannot ring twice.
+ *
+ * A diversion is the honest limit: the estimate is against the field that was
+ * filed, and a flight that goes somewhere else was announced about a
+ * destination it is no longer going to. That is the same limit the route strip
+ * on the map has always had, and the alternative — guessing at the intended
+ * field from the track — is a guess that is wrong in exactly the situations
+ * where it matters.
  *
  * ## Why it will not fire twice, or fire for a flight it did not watch begin
  *
@@ -55,13 +85,33 @@
  *   OWN_FLIGHT_ALERTS_ENABLED     0/false to detect nothing
  *   OWN_FLIGHT_CONFIRM_SNAPSHOTS  consecutive readings before a flip commits (2)
  *   OWN_FLIGHT_DESCENT_SNAPSHOTS  consecutive descending readings (3)
+ *   OWN_FLIGHT_APPROACH_MINUTES   how far out the arrival notice fires (30)
  */
 
 const vaFilter = require('./va_filter.cjs');
 const supabase = require('./supabase.cjs');
+const geo = require('./geo.cjs');
 
 const CONFIRM_SNAPSHOTS = Math.max(1, Number(process.env.OWN_FLIGHT_CONFIRM_SNAPSHOTS) || 2);
 const DESCENT_SNAPSHOTS = Math.max(1, Number(process.env.OWN_FLIGHT_DESCENT_SNAPSHOTS) || 3);
+
+// The headline number, and the only one in here anybody is likely to want to
+// change. Clamped so a typo cannot turn it into "announce at the gate" or
+// "announce before pushback".
+const APPROACH_MINUTES = Math.min(
+  180,
+  Math.max(1, Number(process.env.OWN_FLIGHT_APPROACH_MINUTES) || 30)
+);
+
+// Below this the aeroplane is taxiing, holding or parked, and the distance over
+// the speed is not a time to anywhere. 120 kt is comfortably under a light
+// aircraft's approach speed and comfortably over anything on the ground.
+const APPROACH_MIN_GROUNDSPEED_KT = 120;
+
+// And a floor on the distance, for the case the speed guard cannot catch: an
+// aeroplane taxiing at 25 kt three miles from its own destination is not
+// thirty minutes out, however the arithmetic reads.
+const APPROACH_MIN_DISTANCE_NM = 12;
 
 // What counts as having reached a cruise worth descending from. A circuit at
 // 1,500 ft has a descent too, and nobody wants a "top of descent" notice for
@@ -250,6 +300,7 @@ function setTargets(map, live) {
 //   reachedCruise: bool,   has been above the cruise floor
 //   levelSeen: bool,       has been seen not-descending since reaching it
 //   descending: n,         consecutive descending readings
+//   sawFarOut: bool,       has been seen further out than the approach window
 //   told: Set<string>      events already announced for this flight
 // }
 const flights = new Map();
@@ -257,7 +308,15 @@ const flights = new Map();
 function stateFor(id) {
   let s = flights.get(id);
   if (!s) {
-    s = { airborne: undefined, pending: null, reachedCruise: false, levelSeen: false, descending: 0, told: new Set() };
+    s = {
+      airborne: undefined,
+      pending: null,
+      reachedCruise: false,
+      levelSeen: false,
+      descending: 0,
+      sawFarOut: false,
+      told: new Set(),
+    };
     flights.set(id, s);
   }
   return s;
@@ -286,6 +345,7 @@ function processPresent(present, emit) {
 
     trackGroundAir(state, flight, target, emit);
     trackDescent(state, flight, target, emit);
+    trackApproach(state, flight, target, emit);
   }
 
   // A flight that has left the feed is finished with. Nothing is announced on
@@ -350,6 +410,57 @@ function trackDescent(state, flight, target, emit) {
   announce(state, 'descent', target, flight, emit);
 }
 
+/**
+ * Minutes still to run, or null when the feed cannot support the sum.
+ *
+ * Deliberately the simplest estimate there is — distance over the speed being
+ * made good right now — because every more sophisticated one needs something
+ * the feed does not carry. It has no wind model and no arrival profile, so it
+ * runs a few minutes optimistic on a flight that still has to slow down; the
+ * notice says "about", and being a little early to warn somebody is the right
+ * direction to be wrong in.
+ *
+ * `coords` is injectable so the tests can place an airport without reading a
+ * twelve-megabyte file.
+ */
+let airportResolver = geo.airportCoords;
+
+/** Test seam: place an airport without reading a twelve-megabyte file. */
+function setAirportResolver(resolver) {
+  airportResolver = typeof resolver === 'function' ? resolver : geo.airportCoords;
+}
+
+function minutesToArrival(flight, coords) {
+  const gs = flight?.position?.gs_kt;
+  if (typeof gs !== 'number' || gs < APPROACH_MIN_GROUNDSPEED_KT) return null;
+
+  const distanceNm = geo.distanceToArrivalNm(flight, coords || airportResolver);
+  if (distanceNm === null || distanceNm < APPROACH_MIN_DISTANCE_NM) return null;
+
+  return (distanceNm / gs) * 60;
+}
+
+function trackApproach(state, flight, target, emit) {
+  // Nothing to be thirty minutes from until the aeroplane is off the ground.
+  // Airborne is `undefined` on the very first sighting, which is also when it
+  // should say nothing.
+  if (state.airborne !== true) return;
+
+  const minutes = minutesToArrival(flight);
+  if (minutes === null) return;
+
+  if (minutes > APPROACH_MINUTES) {
+    // The reading that earns the right to announce later. Without it a flight
+    // first seen inside the window announces a moment it never passed through.
+    state.sawFarOut = true;
+    return;
+  }
+
+  if (!state.sawFarOut) return;
+
+  announce(state, 'approach', target, flight, emit);
+}
+
 function announce(state, kind, target, flight, emit) {
   if (state.told.has(kind)) return;
   state.told.add(kind);
@@ -404,6 +515,20 @@ function compose(kind, flight) {
         level: 'active',
         sound: true,
       };
+    case 'approach':
+      return {
+        title: `${APPROACH_MINUTES} minutes out`,
+        subtitle: callsign || undefined,
+        body: flight?.arrivalIcao
+          ? `About ${APPROACH_MINUTES} minutes to ${flight.arrivalIcao} at your current speed. Time to get back to the flight deck.`
+          : `About ${APPROACH_MINUTES} minutes to your destination at your current speed. Time to get back to the flight deck.`,
+        kind: 'own_approach',
+        // The whole reason this notice exists is to reach somebody who is not
+        // looking at their phone, in time for them to do something about it.
+        // Delivered quietly it would be a record of a moment that had passed.
+        level: 'active',
+        sound: true,
+      };
     case 'landed':
       return {
         title: 'On the ground',
@@ -429,6 +554,7 @@ function stats() {
     tracking: flights.size,
     confirmSnapshots: CONFIRM_SNAPSHOTS,
     descentSnapshots: DESCENT_SNAPSHOTS,
+    approachMinutes: APPROACH_MINUTES,
     targetsAgeMs: targetsFetchedAt ? Date.now() - targetsFetchedAt : null,
     lastError: lastTargetsError,
   };
@@ -442,6 +568,9 @@ function reset() {
 module.exports = {
   processPresent,
   compose,
+  minutesToArrival,
+  setAirportResolver,
+  APPROACH_MINUTES,
   identify,
   refreshTargets,
   refreshLiveTargets,

@@ -37,6 +37,18 @@ const flight = (username, { alt = 0, gs = 0, vs = 0, id = `${username}-1` } = {}
 
 const snapshot = (...flights) => new Map(flights.map((f) => [f.username.toLowerCase(), f]));
 
+/**
+ * A flat earth, one airport, on the equator at the prime meridian.
+ *
+ * Stubbed rather than read out of `airports.json`, for two reasons. The file is
+ * twelve megabytes, which is not a thing to parse to assert an inequality. And
+ * with the field at 0°N 0°E, a degree of longitude is sixty nautical miles
+ * exactly — so `enroute(300, …)` puts the aeroplane three hundred miles out and
+ * the arithmetic under test is the only arithmetic in the test.
+ */
+const TEST_FIELD = { lat: 0, lon: 0 };
+own.setAirportResolver((icao) => (String(icao).toUpperCase() === 'ZZZZ' ? TEST_FIELD : null));
+
 // Ana has asked to hear about her own flight; Zoe has not.
 function run(snapshots, live) {
   own.reset();
@@ -154,6 +166,106 @@ test('a circuit below the cruise floor gets no top of descent', () => {
 });
 
 /* =========================
+ * Thirty minutes out
+ * ========================= */
+
+// Distance from the field in nautical miles, straight down the equator, and
+// the speed being made good at it. See TEST_FIELD above.
+const enroute = (u, id, { nm, gs, alt = 33000, vs = 0 }) => ({
+  flightId: id,
+  username: u,
+  callsign: 'BAW117',
+  departureIcao: 'KLAX',
+  arrivalIcao: 'ZZZZ',
+  position: { lat: 0, lon: nm / 60, alt_ft: alt, gs_kt: gs, vs_fpm: vs },
+});
+
+test('a flight watched in from further out is told once when it is half an hour away', () => {
+  const events = run([
+    snapshot(enroute('Ana', 'p1', { nm: 400, gs: 450 })), // 53 minutes
+    snapshot(enroute('Ana', 'p1', { nm: 200, gs: 450 })), // 27 — the notice
+    snapshot(enroute('Ana', 'p1', { nm: 150, gs: 450 })), // closer still, silent
+    snapshot(enroute('Ana', 'p1', { nm: 90, gs: 400 })),
+  ]);
+  assert.deepStrictEqual(events, ['approach:ana']);
+});
+
+test('a flight first seen inside the window is never told it is thirty minutes out', () => {
+  // The redeploy case, and the one that would read as the app being broken:
+  // announcing half an hour out to somebody already on the arrival.
+  const events = run([
+    snapshot(enroute('Ana', 'p2', { nm: 150, gs: 450 })),
+    snapshot(enroute('Ana', 'p2', { nm: 120, gs: 450 })),
+    snapshot(enroute('Ana', 'p2', { nm: 80, gs: 420 })),
+  ]);
+  assert.deepStrictEqual(events, []);
+});
+
+test('a light aircraft gets the same notice at its own speed', () => {
+  // 200 miles is an hour and a half at 130 knots, and sixty miles is half an
+  // hour. Nothing here is an airliner's number.
+  const events = run([
+    snapshot(enroute('Ana', 'p3', { nm: 200, gs: 130, alt: 8000 })),
+    snapshot(enroute('Ana', 'p3', { nm: 60, gs: 130, alt: 8000 })),
+  ]);
+  assert.deepStrictEqual(events, ['approach:ana']);
+});
+
+test('an aeroplane still on the ground is not counted down to anywhere', () => {
+  const events = run([
+    snapshot(enroute('Ana', 'p4', { nm: 900, gs: 0, alt: 30, vs: 0 })),
+    snapshot(enroute('Ana', 'p4', { nm: 900, gs: 12, alt: 30, vs: 0 })),
+  ]);
+  assert.deepStrictEqual(events, []);
+});
+
+test('taxiing in at the far end is not thirty minutes from the gate', () => {
+  // The arithmetic on its own would say a taxiing aeroplane four miles out is
+  // twenty minutes away. Both guards — the speed floor and the distance floor
+  // — exist to refuse that.
+  const events = run([
+    snapshot(enroute('Ana', 'p5', { nm: 400, gs: 450 })),
+    snapshot(enroute('Ana', 'p5', { nm: 4, gs: 12, alt: 30 })),
+  ]);
+  assert.deepStrictEqual(events, []);
+});
+
+test('a flight with no destination filed is never counted down', () => {
+  const noDestination = (id, nm, gs) => ({
+    flightId: id,
+    username: 'Ana',
+    callsign: 'BAW117',
+    departureIcao: 'KLAX',
+    arrivalIcao: null,
+    position: { lat: 0, lon: nm / 60, alt_ft: 33000, gs_kt: gs, vs_fpm: 0 },
+  });
+  const events = run([
+    snapshot(noDestination('p6', 400, 450)),
+    snapshot(noDestination('p6', 200, 450)),
+    snapshot(noDestination('p6', 100, 450)),
+  ]);
+  assert.deepStrictEqual(events, []);
+});
+
+test('a second flight by the same pilot gets its own countdown', () => {
+  const events = run([
+    snapshot(enroute('Ana', 'p7', { nm: 400, gs: 450 })),
+    snapshot(enroute('Ana', 'p7', { nm: 200, gs: 450 })),
+    snapshot(enroute('Ana', 'p8', { nm: 400, gs: 450 })),
+    snapshot(enroute('Ana', 'p8', { nm: 200, gs: 450 })),
+  ]);
+  assert.deepStrictEqual(events, ['approach:ana', 'approach:ana']);
+});
+
+test('the estimate is the distance over the speed being made good', () => {
+  const at = (nm, gs) => own.minutesToArrival(enroute('Ana', 'x', { nm, gs }), () => TEST_FIELD);
+  assert.ok(Math.abs(at(450, 450) - 60) < 1, 'four hundred and fifty miles at 450 knots is an hour');
+  assert.ok(Math.abs(at(225, 450) - 30) < 1, 'half that is half an hour');
+  assert.strictEqual(at(450, 40), null, 'a groundspeed that is a taxi is not a speed to anywhere');
+  assert.strictEqual(at(3, 450), null, 'three miles out is not an estimate, it is an arrival');
+});
+
+/* =========================
  * Landing, and absence
  * ========================= */
 
@@ -249,9 +361,10 @@ test('the flight id wins when the two disagree', () => {
  * What it says
  * ========================= */
 
-test('the descent notice is the only one that makes a sound', () => {
+test('the two notices with something to do about them are the ones that make a sound', () => {
   const f = flight('Ana');
   assert.strictEqual(own.compose('descent', f).sound, true);
+  assert.strictEqual(own.compose('approach', f).sound, true);
   assert.strictEqual(own.compose('airborne', f).sound, false);
   assert.strictEqual(own.compose('landed', f).sound, false);
 });
@@ -259,12 +372,21 @@ test('the descent notice is the only one that makes a sound', () => {
 test('the descent notice is active and the landing notice is not', () => {
   const f = flight('Ana');
   assert.strictEqual(own.compose('descent', f).level, 'active');
+  assert.strictEqual(own.compose('approach', f).level, 'active');
   assert.strictEqual(own.compose('landed', f).level, 'passive');
+});
+
+test('the arrival notice names the field, and the window it fires in', () => {
+  const notice = own.compose('approach', flight('Ana'));
+  assert.strictEqual(notice.kind, 'own_approach');
+  assert.ok(notice.title.startsWith(String(own.APPROACH_MINUTES)),
+    `the title leads with the number that decides it: ${notice.title}`);
+  assert.ok(notice.body.includes('EGLL'), `the body names the destination: ${notice.body}`);
 });
 
 test('a flight with no route still composes a sentence', () => {
   const bare = { flightId: 'x', username: 'Ana', position: {} };
-  for (const kind of ['airborne', 'descent', 'landed']) {
+  for (const kind of ['airborne', 'descent', 'approach', 'landed']) {
     const notice = own.compose(kind, bare);
     assert.ok(notice.body && !notice.body.includes('undefined') && !notice.body.includes('null'),
       `${kind} reads as a sentence without a route: ${notice.body}`);

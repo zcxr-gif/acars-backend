@@ -277,6 +277,12 @@ app.get('/api/admin/diagnostics', (req, res) => {
       // how many of them the feed can currently see, and how many drop
       // notices have gone out. `watching: 0` means nobody is broadcasting.
       liveHydration: watchlist.hydrationStats(),
+      // The APNs registries themselves, which is where "nobody received it"
+      // is separated from "nobody was registered". `onAlternateEnvironment`
+      // counts tokens the configured host refused and the other one accepted:
+      // on a production deployment that is a count of builds shipped with
+      // `aps-environment: development`.
+      push: watchlist.pushStats(),
       config: {
         activePollMs: ACTIVE_POLL_MS,
         idlePollMs: IDLE_POLL_MS,
