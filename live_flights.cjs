@@ -815,21 +815,54 @@ async function getOceanicTracks() {
 }
 
 /**
- * Refresh NAT tracks once every 24 hours
+ * Keep the oceanic tracks fresh.
+ *
+ * ## Why this is not a daily job
+ *
+ * It was one: fetch at boot, then every twenty-four hours, and the same
+ * twenty-four hours whether the fetch worked or threw. Both halves of that were
+ * wrong, and between them they are why a client could show no tracks at all.
+ *
+ * **A failure cost a day.** This runs at module load, which is the least
+ * settled moment in the process — and if that one attempt threw, for any reason
+ * at all, the next was scheduled a full day out. Nothing served
+ * `/api/live/tracks` in the meantime but an empty list, which every client
+ * faithfully drew as nothing. One unlucky second at boot, and the track layer
+ * was empty until tomorrow.
+ *
+ * **A day is the wrong period anyway.** The North Atlantic track system is
+ * republished *twice* daily — the westbound day tracks and the eastbound night
+ * tracks are different sets over different fixes. Sampling once a day means
+ * running up to twenty-four hours behind, and for much of that showing the set
+ * that is not currently in force.
+ *
+ * So: a short retry when the fetch fails, and a period comfortably inside the
+ * publication interval when it succeeds. It is one request either way, against
+ * an endpoint whose answer is a dozen lines.
+ *
+ * A failure never clears what is already held — the assignment is in the
+ * success path alone. A track set hours old is a far better answer than an
+ * empty ocean, and the sets are valid for hours by construction.
  */
+const TRACKS_REFRESH_MS = 6 * 60 * 60 * 1000;
+const TRACKS_RETRY_MS = 10 * 60 * 1000;
+
 (function runTracksPoller() {
   getOceanicTracks()
     .then(tracks => {
       apiCache.tracks = tracks;
       console.log(`✅ [tracks] Synchronized ${tracks.length} Oceanic Tracks.`);
+      return TRACKS_REFRESH_MS;
     })
-    .catch(e => console.error('[tracks] Sync failed:', e.message))
-    .finally(() => {
-      // 24 Hour Refresh (24h * 60m * 60s * 1000ms)
-      const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-    
-      setTimeout(runTracksPoller, TWENTY_FOUR_HOURS);
-    });
+    .catch(e => {
+      // Said out loud with the wait attached, because "sync failed" on its own
+      // gives no way to tell a blip from a layer that has been empty all day.
+      console.error(
+        `[tracks] Sync failed (${e.message}); retrying in ${TRACKS_RETRY_MS / 60000}m.`
+      );
+      return TRACKS_RETRY_MS;
+    })
+    .then(wait => setTimeout(runTracksPoller, wait));
 })();
 
 async function getAircraftList() {
