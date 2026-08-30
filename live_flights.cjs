@@ -1300,6 +1300,38 @@ function simplifyFlightPlan(plan) {
   };
 }
 
+/**
+ * Which live session an aircraft is flying in, by flight id alone.
+ *
+ * The Infinite Flight API has no such lookup — every flight endpoint it
+ * publishes is under `/sessions/{sessionId}/…` — but we already hold the
+ * answer. The poller keeps `apiCache.flights` fresh for every server we
+ * broadcast, and each entry is the full flight list for that session, so the
+ * session an id belongs to is a walk over three arrays we are keeping anyway.
+ *
+ * This exists because the clients that need a plan do not know the session.
+ * The map holds a flight id and nothing else: an aeroplane is tapped, and the
+ * question is "draw this one's route", not "draw this one's route on the
+ * Expert Server". Making the app carry a session id around so it could hand it
+ * straight back to us would be the wrong half of the system knowing it.
+ *
+ * Returns null for an aircraft that is not in any session we are polling —
+ * one that has just landed and left the feed, or an id that was never real.
+ */
+function sessionIdForFlight(flightId) {
+  if (!flightId) return null;
+
+  for (const [sessionId, payload] of apiCache.flights) {
+    const flights = payload && Array.isArray(payload.flights) ? payload.flights : null;
+    if (!flights) continue;
+    for (const flight of flights) {
+      if (flight && flight.flightId === flightId) return sessionId;
+    }
+  }
+
+  return null;
+}
+
 async function getFlightRoute(sessionId, flightId) {
   if (!sessionId || !flightId) throw new Error('Missing sessionId or flightId');
   const url = `/sessions/${encodeURIComponent(sessionId)}/flights/${encodeURIComponent(flightId)}/route`;
@@ -2355,6 +2387,67 @@ app.get('/api/flights/:flightId/history', async (req, res) => {
     res.json({ ok: true, flightId: req.params.flightId, path });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/**
+ * A filed plan, by flight id alone — the flat form, ready to draw.
+ *
+ * The session-scoped `/flights/:sessionId/:flightId/plan` below is the older
+ * endpoint and stays as it is: it answers with the plan exactly as Infinite
+ * Flight files it, which is a *tree* — a SID or a STAR is one item carrying
+ * its fixes as `children`, and only the leaves hold coordinates. That is the
+ * right answer for a caller that wants the procedures back.
+ *
+ * It is the wrong answer for a map. Every client that draws a route wants the
+ * leaves, in order, with coordinates — which is what `simplifyFlightPlan` has
+ * always produced and what nothing, until now, was calling it for. So this
+ * serves the flat shape, and resolves the session itself so a client holding
+ * one flight id can ask.
+ *
+ * ## What each status means, and why
+ *
+ * A pilot who filed nothing is an **answer**, not a failure: 200 with an empty
+ * `waypoints`. Clients cache that — the alternative is re-asking on every
+ * packet for every aeroplane on the server, for a route that does not exist —
+ * and a 404 would be cached as "ask again later" instead, which is the storm.
+ * 404 is kept for the genuinely unknown: an aircraft in no session we poll.
+ */
+app.get('/api/flights/:flightId/plan', async (req, res) => {
+  const { flightId } = req.params;
+
+  const cacheKey = `plan:flat:${flightId}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) return res.json({ ok: true, flightId, ...cached, fromCache: true });
+
+  const sessionId = sessionIdForFlight(flightId);
+  if (!sessionId) {
+    return res.status(404).json(
+      err(404, 'Flight not found in any live session. It may have landed, or never existed.')
+    );
+  }
+
+  try {
+    // Null when the pilot filed nothing, which `simplifyFlightPlan` turns into
+    // an empty list rather than throwing.
+    const rawPlan = await getFlightPlan(sessionId, flightId);
+    const simplified = simplifyFlightPlan(rawPlan);
+
+    // The same ten minutes the session-scoped route uses, and for the same
+    // reason: a plan can be amended mid-flight, but not on the timescale of
+    // somebody tapping around the map.
+    setOnDemandCached(cacheKey, simplified, 10 * 60 * 1000);
+
+    res.json({ ok: true, flightId, sessionId, ...simplified });
+  } catch (e) {
+    const status = e?.response?.status || 500;
+    const apiError = e?.response?.data;
+    res.status(status).json(
+      err(status, 'Failed to fetch flight plan', {
+        apiErrorCode: apiError?.errorCode,
+        detail: e?.message
+      })
+    );
   }
 });
 
