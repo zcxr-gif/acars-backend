@@ -2416,10 +2416,6 @@ app.get('/api/flights/:flightId/history', async (req, res) => {
 app.get('/api/flights/:flightId/plan', async (req, res) => {
   const { flightId } = req.params;
 
-  const cacheKey = `plan:flat:${flightId}`;
-  const cached = getOnDemandCached(cacheKey);
-  if (cached) return res.json({ ok: true, flightId, ...cached, fromCache: true });
-
   const sessionId = sessionIdForFlight(flightId);
   if (!sessionId) {
     return res.status(404).json(
@@ -2427,18 +2423,65 @@ app.get('/api/flights/:flightId/plan', async (req, res) => {
     );
   }
 
+  // Deliberately the *same* cache key the session-scoped route uses, holding
+  // the same raw plan in the same shape.
+  //
+  // The tempting thing was a key of this route's own, holding the flattened
+  // form so the tree is only walked once. It would have been worse on both
+  // counts that matter, and both of them are shared with the website. The
+  // on-demand cache is one bounded store — a second key per flight is eviction
+  // pressure on everything else in it, airport info and user stats included —
+  // and a second key means a second call to the Infinite Flight API for a plan
+  // we already hold, against rate limits the website is spending too.
+  //
+  // Sharing it, a plan fetched for the map is a plan the website gets free, and
+  // the other way about. The tree is walked per request instead, which is a few
+  // dozen items and nothing next to the call it saves.
+  const cacheKey = `plan:${sessionId}:${flightId}`;
+  const cached = getOnDemandCached(cacheKey);
+  if (cached) {
+    return res.json({
+      ok: true,
+      flightId,
+      sessionId,
+      ...simplifyFlightPlan(cached),
+      fromCache: true
+    });
+  }
+
+  // "This pilot filed nothing" is remembered separately, under a key nothing
+  // else reads. It cannot go under the shared key: the session-scoped route
+  // returns whatever it finds there as `plan`, so a sentinel parked in it would
+  // be served to the website as a flight plan. Left uncached entirely, every
+  // packet would re-ask the Infinite Flight API for an answer that is not going
+  // to change — which is the same rate limit again.
+  const noPlanKey = `plan:none:${sessionId}:${flightId}`;
+  if (getOnDemandCached(noPlanKey)) {
+    return res.json({
+      ok: true,
+      flightId,
+      sessionId,
+      flightPlanId: null,
+      waypoints: [],
+      fromCache: true
+    });
+  }
+
   try {
     // Null when the pilot filed nothing, which `simplifyFlightPlan` turns into
     // an empty list rather than throwing.
     const rawPlan = await getFlightPlan(sessionId, flightId);
-    const simplified = simplifyFlightPlan(rawPlan);
 
     // The same ten minutes the session-scoped route uses, and for the same
     // reason: a plan can be amended mid-flight, but not on the timescale of
     // somebody tapping around the map.
-    setOnDemandCached(cacheKey, simplified, 10 * 60 * 1000);
+    if (rawPlan) {
+      setOnDemandCached(cacheKey, rawPlan, 10 * 60 * 1000);
+    } else {
+      setOnDemandCached(noPlanKey, true, 10 * 60 * 1000);
+    }
 
-    res.json({ ok: true, flightId, sessionId, ...simplified });
+    res.json({ ok: true, flightId, sessionId, ...simplifyFlightPlan(rawPlan) });
   } catch (e) {
     const status = e?.response?.status || 500;
     const apiError = e?.response?.data;
