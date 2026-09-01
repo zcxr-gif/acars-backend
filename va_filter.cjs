@@ -411,7 +411,8 @@ function matchVa(callsign, serverName) {
 /* ---- roster watch list (VAs that accept any callsign) ---- */
 
 // Usernames whose flights must be forwarded even when the callsign matches no
-// VA at all. A VA can set `rosterTrust: "any"` — "our members fly codeshare and
+// VA at all. A VA can set a `rosterTrust` that waives part of the rule — "our
+// members fly codeshare and
 // partner callsigns, count them anyway" — and those flights are exactly the ones
 // this matcher would never forward, because nothing in the callsign points at a
 // VA. So the other backend publishes the roster usernames of the VAs that opted
@@ -584,9 +585,11 @@ function processSnapshot(flightsCache, claimEvent) {
       if (!f?.flightId) continue;
       let cfg = matchVa(f.callsign, payload?.server);
       // No VA owns this callsign — but the pilot may be on the roster of a VA
-      // that asked for their flights whatever they're flying (rosterTrust:
-      // "any"). Forward it unattributed and let the other backend decide; this
-      // side has no rosters and no business guessing which VA it belongs to.
+      // whose rosterTrust waives the part of the callsign rule this side just
+      // applied: the tag ('airline'), the airline ('tagged'), or the callsign
+      // outright ('any'). Forward it unattributed and let the other backend
+      // decide; this side has no rosters and no business guessing which VA it
+      // belongs to.
       if (!cfg && isWatchedPilot(f.username)) cfg = ROSTER_ONLY_CFG;
       if (!cfg) continue;
       present.add(f.flightId);
