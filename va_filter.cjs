@@ -94,8 +94,15 @@ function patternParts(pattern) {
 //              nothing before, between or after it. "Air Canada 001VA" only.
 //   'strict' — declared prefix AND the tag on one of the last two tokens, so a
 //              pilot may append a division/event tag after the VA one.
+//   'tag'    — 'strict', plus the VA's own distinctive tag on ANY airline. The
+//              codeshare answer: Norwegian flies "Red Nose 12NV" on its own
+//              metal and "Shamrock 12NV" on a partner's, and the "NV" is the
+//              VA claiming the flight. Every other mode tests the prefix first
+//              and returns early, so a codeshare leg was dropped here — before
+//              the event was ever forwarded — no matter what the other backend
+//              was configured to do with it.
 //   'broad'  — the declared prefix alone is enough, tag or no tag.
-const MATCH_MODES = new Set(['exact', 'strict', 'broad']);
+const MATCH_MODES = new Set(['exact', 'strict', 'tag', 'broad']);
 function matchMode(v) {
   const m = String(v || '').trim().toLowerCase();
   return MATCH_MODES.has(m) ? m : 'strict';
@@ -190,6 +197,17 @@ function tokenHasSuffixTag(token, tag) {
   return before >= '0' && before <= '9';
 }
 
+// Is a tag distinctive enough to claim a flight on its OWN, with no declared
+// airline in front of it? "VA" is not — nearly every virtual airline appends it,
+// so it says "some VA" and nothing more, and matching on it alone would hand
+// every VA in the sky to whoever asked first. Single letters collide the same
+// way. Anything else ("NV", "EX", "UP") names one VA in practice. Mirrors
+// isDistinctiveVaTag on the other backend and in embed.js.
+function isDistinctiveTag(tag) {
+  const t = String(tag || '').trim().toUpperCase();
+  return t.length >= 2 && t !== 'VA';
+}
+
 // Exact-mode test: the compacted callsign must be EXACTLY one of the registered
 // shapes — a declared prefix, then the flight number, then (when the VA uses
 // tags) one of those tags, and then nothing at all. "AIRCANADA001VA" ✓ ;
@@ -261,16 +279,22 @@ function callsignMatches(callsign, cfg) {
   // Always-included untagged callsigns first — they bypass the tag rule.
   if (matchesRegular(c, cfg.regulars || [], mode)) return true;
 
+  const tail = tokens.slice(-2);
+  const carriesTag = (tag) => tail.some((t) => tokenHasSuffixTag(t, tag));
+
+  // 'tag' mode asks about the TAG before the airline, because the flight it
+  // exists for — a codeshare on partner metal — has no airline of the VA's on
+  // it at all. Only a distinctive tag may claim a flight this way.
+  if (mode === 'tag' && cfg.suffixes.some((t) => isDistinctiveTag(t) && carriesTag(t))) return true;
+
   const prefixHit = cfg.prefixes.some((p) => p && c.startsWith(p));
   if (!prefixHit) return false;
   if (mode === 'exact') return matchesExactConfig(c, cfg);
   if (mode === 'broad') return true;          // the airline name is enough
 
-  // Tag mode. A pilot often appends a second trailing tag (division / event code)
-  // after the VA one — "Air Canada 001VA CX" — so either of the last two tokens
-  // carrying a configured tag counts.
-  const tail = tokens.slice(-2);
-  const carriesTag = (tag) => tail.some((t) => tokenHasSuffixTag(t, tag));
+  // Tag mode on the VA's own airline. A pilot often appends a second trailing
+  // tag (division / event code) after the VA one — "Air Canada 001VA CX" — so
+  // either of the last two tokens carrying a configured tag counts.
 
   // With the declared pairs on file, each airline is held to ITS OWN tag. That
   // matters for a VA whose callsigns don't all work the same way: a listing
@@ -298,7 +322,7 @@ function explainMatch(callsign, cfg) {
   const prefixMatch = cfg.prefixes.some((p) => p && compacted.startsWith(p));
   // A tag is only *required* in strict mode; exact folds it into the shape test
   // and broad waives it outright.
-  const suffixRequired = mode === 'strict' && cfg.suffixes.length > 0;
+  const suffixRequired = (mode === 'strict' || mode === 'tag') && cfg.suffixes.length > 0;
   const suffixMatch = suffixRequired
     ? cfg.suffixes.some((tag) => tail.some((t) => tokenHasSuffixTag(t, tag)))
     : null; // null = no tag needed in this mode
@@ -314,6 +338,11 @@ function explainMatch(callsign, cfg) {
     prefixMatch,
     suffixRequired,
     suffixMatch,
+    // 'tag' mode only: did a distinctive tag claim this flight on its own,
+    // with no declared airline in front of it (the codeshare path)?
+    tagOnlyMatch: mode === 'tag'
+      ? cfg.suffixes.some((t) => isDistinctiveTag(t) && tail.some((k) => tokenHasSuffixTag(k, t)))
+      : null,
     // Only meaningful in exact mode: did the callsign fit <prefix><number><tag>
     // with nothing extra?
     exactShapeMatch: mode === 'exact' ? matchesExactConfig(compacted, cfg) : null,
@@ -382,7 +411,8 @@ function matchVa(callsign, serverName) {
 /* ---- roster watch list (VAs that accept any callsign) ---- */
 
 // Usernames whose flights must be forwarded even when the callsign matches no
-// VA at all. A VA can set `rosterTrust: "any"` — "our members fly codeshare and
+// VA at all. A VA can set a `rosterTrust` that waives part of the rule — "our
+// members fly codeshare and
 // partner callsigns, count them anyway" — and those flights are exactly the ones
 // this matcher would never forward, because nothing in the callsign points at a
 // VA. So the other backend publishes the roster usernames of the VAs that opted
@@ -555,9 +585,11 @@ function processSnapshot(flightsCache, claimEvent) {
       if (!f?.flightId) continue;
       let cfg = matchVa(f.callsign, payload?.server);
       // No VA owns this callsign — but the pilot may be on the roster of a VA
-      // that asked for their flights whatever they're flying (rosterTrust:
-      // "any"). Forward it unattributed and let the other backend decide; this
-      // side has no rosters and no business guessing which VA it belongs to.
+      // whose rosterTrust waives the part of the callsign rule this side just
+      // applied: the tag ('airline'), the airline ('tagged'), or the callsign
+      // outright ('any'). Forward it unattributed and let the other backend
+      // decide; this side has no rosters and no business guessing which VA it
+      // belongs to.
       if (!cfg && isWatchedPilot(f.username)) cfg = ROSTER_ONLY_CFG;
       if (!cfg) continue;
       present.add(f.flightId);

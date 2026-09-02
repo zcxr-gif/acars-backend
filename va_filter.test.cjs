@@ -181,6 +181,58 @@ test('strict allows a second trailing tag but still needs the airline', () => {
   ]);
 });
 
+// The codeshare case. Norwegian registers "Red Nose ##NV" and its pilots keep
+// the "NV" on a partner's metal. Every other mode tests the PREFIX first and
+// returns early, so this matcher — the gate the whole feed runs through —
+// dropped the leg before the tag was ever read, and nothing downstream could
+// recover it.
+test('tag mode lets a distinctive tag claim a flight on any airline', () => {
+  expect(va('Red Nose ##NV', 'tag'), [
+    ['Red Nose 12NV', true],        // own metal
+    ['Shamrock 12NV', true],        // codeshare, still wearing the tag
+    ['Shamrock 12NV Heavy', true],  // …and a weight class does not hide it
+    ['Shamrock 12NV Cargo', true],  // …nor a trailing word
+    ['Shamrock 12', false],         // no tag: nothing says it is theirs
+    ['Shamrock 12EX', false],       // somebody else's tag
+    ['Red Nose 12', false],         // our airline still owes us the tag
+  ]);
+});
+
+// The tag written as its OWN token — "000 NV" rather than "000NV". Pilots type
+// it both ways and tokenHasSuffixTag accepts a standalone tag, but the tail
+// window is only two tokens wide, so anything appended after it has to be
+// peeled off first or the tag falls out of range.
+test('the tag counts when it is a separate token, "000 NV"', () => {
+  expect(va('Red Nose ##NV', 'tag'), [
+    ['Red Nose 000 NV', true],              // own metal, spaced tag
+    ['Shamrock 000 NV', true],              // codeshare, spaced tag
+    ['Shamrock 000 NV Heavy', true],        // …behind a weight class
+    ['Shamrock 000 NV Cargo Heavy', true],  // …behind a word AND a weight class
+    ['Shamrock 000 EX', false],             // somebody else's tag, spaced
+    ['Shamrock 000', false],                // no tag at all
+  ]);
+  // strict is the same rule on the VA's own airline, so it has to agree.
+  expect(va('Red Nose ##NV', 'strict'), [
+    ['Red Nose 000 NV', true],
+    ['Red Nose 000 NV Heavy', true],
+    ['Red Nose 000', false],
+  ]);
+});
+
+test('strict and broad both reject that codeshare — tag mode is the only answer', () => {
+  expect(va('Red Nose ##NV', 'strict'), [['Shamrock 12NV', false]]);
+  expect(va('Red Nose ##NV', 'broad'), [['Shamrock 12NV', false]]);
+  expect(va('Red Nose ##NV', 'exact'), [['Shamrock 12NV', false]]);
+});
+
+// A tag may only claim a flight alone when it identifies ONE VA. "VA" does not.
+test('tag mode will not let the generic "VA" tag claim another airline', () => {
+  expect(va('Ocean ##VA', 'tag'), [
+    ['Ocean 12VA', true],       // their own airline is unaffected
+    ['Shamrock 12VA', false],   // …but "VA" names no one
+  ]);
+});
+
 test('broad waives the tag entirely, and only the tag', () => {
   expect(va('Air Canada ##VA', 'broad'), [
     ['Air Canada 001', true],
